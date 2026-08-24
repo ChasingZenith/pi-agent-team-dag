@@ -1,0 +1,13 @@
+{
+  "name": "pi-agent-team-dag-tasks-server",
+  "private": true,
+  "type": "module",
+  "description": "Read-only HTTP/SSE API over the task graph (web frontend backend)",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.13.2"
+  }
+}

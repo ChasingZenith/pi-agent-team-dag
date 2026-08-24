@@ -1,0 +1,327 @@
+/**
+ * Dimension B E2E harness — comms mechanism layer (B-6..B-10) plus the
+ * long-lived b-harness / b-noreply identities that the interactive flow
+ * (B-1..B-5, driven against the b-spawner pi session) depends on.
+ *
+ * Run inside a REAL tmux pane of session e2e-b (B-7 spawns an agent via
+ * agent-lifecycle's executeAgentSpawn, which requires TMUX_PANE):
+ *
+ *   tmux send-keys -t e2e-b 'cd <root> && bun run tests/e2e/dim-b.ts --subnet test-b > /tmp/e2e-b.log 2>&1' Enter
+ *
+ * The harness stays alive (heartbeating b-harness + b-noreply every 10s) until
+ * a stop flag file appears: .pi/e2e-reports/dim-b-stop.flag
+ */
+import { execFileSync } from "node:child_process";
+import { writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+import { executeAgentSpawn } from "../../extensions/agent-lifecycle.ts";
+import * as registry from "../../extensions/lib/comms/registry.ts";
+import * as messaging from "../../extensions/lib/comms/messaging.ts";
+import {
+  statusFromLastSeen,
+  nowIso,
+  DEFAULT_NATS_URL,
+  nameKey,
+  profileKey,
+} from "../../extensions/lib/comms/protocol.ts";
+import {
+  connectNats,
+  ensureStream,
+  getKvProfiles,
+  getKvNames,
+  getKvHistory,
+} from "../../extensions/lib/comms/nats.ts";
+import { resolveToken, waitFor, sleep, readJsonl, kvRead } from "./helpers.ts";
+
+const ROOT = process.cwd();
+const SUBNET = "test-b";
+const FLAG = join(ROOT, ".pi", "e2e-reports", "dim-b-stop.flag");
+const DUMP_FILE = join(ROOT, ".pi", "e2e-reports", "kv-dump-b.json");
+
+const results: { id: string; pass: boolean; note: string }[] = [];
+
+function log(msg: string): void {
+  console.log(`[${new Date().toISOString().slice(11, 23)}] ${msg}`);
+}
+
+function check(id: string, pass: boolean, note: string): void {
+  results.push({ id, pass, note });
+  console.log(`${pass ? "[PASS]" : "[FAIL]"} ${id} ${note}`);
+}
+
+function mkIdentity(name: string, subnet: string = SUBNET) {
+  return {
+    name,
+    subnet,
+    cwd: ROOT,
+    model: "deepseek-v4-flash",
+    started_at: nowIso(),
+  };
+}
+
+async function dumpKv(): Promise<Record<string, unknown>> {
+  const read = async (kv: any, prefix: string): Promise<Record<string, unknown>> => {
+    const out: Record<string, unknown> = {};
+    try {
+      for await (const e of await kv.history({ key: prefix })) {
+        if (e.operation === "DEL") { out[e.key] = { op: "DEL" }; continue; }
+        try { out[e.key] = e.json(); } catch { out[e.key] = "?"; }
+      }
+    } catch (err: any) {
+      out._error = err?.message ?? String(err);
+    }
+    return out;
+  };
+  return {
+    profiles: await read(getKvProfiles(), "a.test-b.>"),
+    names: await read(getKvNames(), "n.test-b.>"),
+    history: await read(getKvHistory(), "h.test-b.>"),
+  };
+}
+
+// ━━ B-6: remind scheduler (consolidated injection, dismiss stops it) ━━━━━━━━
+async function runB6(harnessId: any): Promise<void> {
+  const captured: { t: number; pending: any[] }[] = [];
+  messaging.setRemindInjector((pending: messaging.PendingInfo[]) => {
+    captured.push({ t: Date.now(), pending: pending as any });
+    log(`B-6 injector fired: ${pending.length} pending — ${pending.map((p) => p.msg_id).join(",")}`);
+  });
+
+  const t0 = Date.now();
+  const r1 = await messaging.send(harnessId, "b-noreply", "hi", { remindMs: 1000 });
+  check("B-6a", typeof r1.msg_id === "string" && r1.msg_id.length > 0, `send#1 ok msg_id=${r1.msg_id}`);
+
+  // ≤40s: first consolidated injection containing msg_id
+  const first = await waitFor(
+    () => captured.find((c) => c.pending.some((p) => p.msg_id === r1.msg_id)) ?? null,
+    { timeoutMs: 40_000, stepMs: 500, label: "B-6 first remind injection" },
+  ).catch((e) => { check("B-6b", false, `no injection within 40s: ${String(e)}`); return null; });
+  if (first) {
+    check("B-6b", true, `first injection at +${Date.now() - t0}ms, pending count ${first.pending.length}`);
+  }
+
+  // second pending send → next tick must still be exactly ONE injection, merged
+  const before = captured.length;
+  const lastT = before > 0 ? captured[before - 1].t : 0; // strictly AFTER the first injection
+  const r2 = await messaging.send(harnessId, "b-noreply", "hi again", { remindMs: 1000 });
+  await waitFor(
+    () => (captured.length > before ? captured[captured.length - 1] : null),
+    { timeoutMs: 40_000, stepMs: 500, label: "B-6 second injection" },
+  ).catch((e) => { check("B-6c", false, `no second injection: ${String(e)}`); });
+  const winCount = captured.filter((c) => c.t > lastT).length;
+  check("B-6c", winCount === 1, `one tick → exactly 1 injection (got ${winCount})`);
+  const last = captured[captured.length - 1];
+  check(
+    "B-6d",
+    !!last && last.pending.some((p) => p.msg_id === r1.msg_id) && last.pending.some((p) => p.msg_id === r2.msg_id),
+    `injection covers BOTH pending sends (merged; got ${last ? last.pending.length : 0} entries)`,
+  );
+
+  // dismiss both → no further injections within one full tick (~35s)
+  const d1 = messaging.dismissReply(r1.msg_id);
+  const d2 = messaging.dismissReply(r2.msg_id);
+  check("B-6e", d1 === "dismissed", `dismiss r1 → ${d1}`);
+  check("B-6f", d2 === "dismissed", `dismiss r2 → ${d2}`);
+  const base = captured.length;
+  await sleep(35_000);
+  const extra = captured.slice(base);
+  check("B-6g", extra.length === 0, `no injections in 35s after dismiss (got ${extra.length})`);
+}
+
+// ━━ B-9: subnet isolation negative test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function runB9(harnessId: any): Promise<void> {
+  const dummy = await registry.register(mkIdentity("b-xdummy", "test-a"), {
+    context_used_pct: 0,
+    model: "deepseek-v4-flash",
+  });
+  log(`B-9 dummy registered in test-a as ${dummy.name}`);
+
+  let threw = false;
+  let errMsg = "";
+  try {
+    await messaging.send(harnessId, "b-xdummy", "hi from test-b");
+  } catch (err: any) {
+    threw = true;
+    errMsg = err?.message ?? String(err);
+  }
+  check("B-9a", threw, `send from test-b to test-a-only name threw (threw=${threw})`);
+  check("B-9b", threw && /target not found/.test(errMsg), `error mentions "target not found" — got: ${errMsg}`);
+
+  await registry.clearOwn(dummy);
+  // A deleted key reads back as a DEL tombstone with an empty value (""), not
+  // null — treat falsy as deleted.
+  const gone = await kvRead(getKvNames(), nameKey("test-a", "b-xdummy"));
+  const profileGone = await kvRead(getKvProfiles(), profileKey("test-a", "b-xdummy"));
+  check("B-9c", !gone, `test-a dummy name lease cleaned (read=${JSON.stringify(gone)})`);
+  check("B-9d", !profileGone, `test-a dummy profile cleaned (read=${JSON.stringify(profileGone)})`);
+}
+
+// ━━ B-7 + B-8: spawn b-leaser, crash it (kill-window), lease expiry + profile ━━━━
+async function runB7B8(): Promise<void> {
+  const fakeCtx = { model: { provider: "deepseek", id: "deepseek-v4-flash" }, thinkingLevel: "off" } as any;
+  const spawnRes = await executeAgentSpawn(
+    { name: "b-leaser", llmContext: { systemPrompt: "You are a test agent. Do nothing and wait." } },
+    ROOT,
+    fakeCtx,
+  );
+  const sessionFile = (spawnRes.details.sessionFile as string) ?? "";
+  const windowId = (spawnRes.details.windowId as string) ?? "";
+  check("B-7-spawn", !!windowId && !!sessionFile, `spawned b-leaser window=${windowId} session=${sessionFile}`);
+
+  const reg = await waitFor(
+    () =>
+      readJsonl(sessionFile).find(
+        (e) => e?.type === "custom" && e?.customType === "comms-log" && e?.data?.event === "register",
+      ) ?? null,
+    { timeoutMs: 90_000, stepMs: 1_000, label: "B-7 b-leaser register" },
+  );
+  check("B-7-reg", !!reg, `b-leaser registered (${reg ? `${reg.data.name}@${reg.data.subnet}` : "no register event"})`);
+
+  const profile = await waitFor(
+    async () => (await kvRead(getKvProfiles(), profileKey("test-b", "b-leaser"))) ?? null,
+    { timeoutMs: 30_000, stepMs: 1_000, label: "B-7 b-leaser profile" },
+  ).catch(() => null);
+  check("B-7-profile", !!profile, `KV profile a.test-b.b-leaser present at register time`);
+  if (profile) {
+    const st = statusFromLastSeen((profile as any).last_seen_at, 30_000, 60_000);
+    check("B-7-profile-online", st === "online", `profile status derived online before crash (got ${st})`);
+  }
+
+  // Crash semantics: tmux kill-window = SIGHUP
+  try {
+    execFileSync("tmux", ["kill-window", "-t", windowId]);
+    log("B-7 killed b-leaser window (kill-window = SIGHUP = crash)");
+  } catch (err: any) {
+    check("B-7-kill", false, `kill-window failed: ${err?.message ?? err}`);
+    return;
+  }
+  const t0 = Date.now();
+
+  // B-7a: +5s — lease still alive
+  await sleep(5_000);
+  const sid5 = await registry.resolveName("test-b", "b-leaser");
+  check("B-7a", sid5 !== null, `t+5s name lease still resolves (sid=${sid5})`);
+
+  // B-7b: +35s — lease expired (bucket TTL 30s from last heartbeat ≤10s pre-crash)
+  await sleep(30_000);
+  const sid35 = await registry.resolveName("test-b", "b-leaser");
+  check("B-7b", sid35 === null, `t+35s name lease expired, resolveName → null (got ${JSON.stringify(sid35)})`);
+
+  // B-8: +70s — profile permanent + offline derived (same crash timeline)
+  await sleep(35_000);
+  const profile70 = (await kvRead(getKvProfiles(), profileKey("test-b", "b-leaser"))) as any;
+  const st70 = profile70 ? statusFromLastSeen(profile70.last_seen_at, 30_000, 60_000) : null;
+  check("B-8a", !!profile70, `t+70s profile a.test-b.b-leaser still present (profile=null? ${profile70 === null})`);
+  check("B-8b", st70 === "offline", `t+70s profile statusFromLastSeen → offline (got ${st70})`);
+
+  // Evidence snapshot BEFORE the re-register overwrites the profile
+  writeFileSync(
+    join(ROOT, ".pi", "e2e-reports", "kv-dump-b-crash.json"),
+    JSON.stringify(await dumpKv(), null, 2),
+  );
+
+  // B-7c: same-name re-register succeeds after lease reclaim (name 30s 回收)
+  let reregOk = false;
+  let reregErr = "";
+  for (let i = 0; i < 6 && !reregOk; i++) {
+    try {
+      await registry.register(mkIdentity("b-leaser"), { context_used_pct: 0, model: "deepseek-v4-flash" });
+      reregOk = true;
+    } catch (err: any) {
+      reregErr = err?.message ?? String(err);
+      await sleep(2_000);
+    }
+  }
+  check("B-7c", reregOk, `same-name re-register succeeded after lease expiry${reregOk ? "" : ` — ${reregErr}`}`);
+}
+
+// ━━ B-10: pure statusFromLastSeen ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function runB10(): void {
+  const now = Date.now();
+  const iso = (agoMs: number) => new Date(now - agoMs).toISOString();
+  check("B-10a", statusFromLastSeen(iso(10_000), 30_000, 60_000) === "online", "last_seen 10s ago → online");
+  check("B-10b", statusFromLastSeen(iso(40_000), 30_000, 60_000) === "stale", "last_seen 40s ago → stale");
+  check("B-10c", statusFromLastSeen(iso(70_000), 30_000, 60_000) === "offline", "last_seen 70s ago → offline");
+}
+
+// ━━ main ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function main(): Promise<void> {
+  log(`dim-b harness start — root=${ROOT} tmux_pane=${process.env.TMUX_PANE ?? "(none!)"} pid=${process.pid}`);
+  if (!process.env.TMUX_PANE) log("WARNING: TMUX_PANE not set — B-7 executeAgentSpawn will fail");
+
+  const cfg = {
+    natsUrl: process.env.PI_COMMS_NATS_URL || DEFAULT_NATS_URL,
+    authToken: resolveToken(),
+    subnet: SUBNET,
+    heartbeatMs: 10_000,
+    messageTtlMs: 1_800_000,
+    registryTtlMs: 30_000,
+    staleAfterMs: 30_000,
+    offlineAfterMs: 60_000,
+    historyTtlMs: 24 * 60 * 60 * 1000,
+  };
+  await connectNats(cfg);
+  await ensureStream(cfg.messageTtlMs, SUBNET);
+  registry.setRegistryTuning(30_000, 60_000);
+  messaging.setSubnet(SUBNET);
+  messaging.setMessageTtlMs(1_800_000);
+  log(`connected to ${cfg.natsUrl}, stream COMMS_${SUBNET} ensured`);
+
+  // Long-lived identities: b-harness + b-noreply, 10s heartbeats
+  const harnessId = await registry.register(mkIdentity("b-harness"), { context_used_pct: 0, model: "deepseek-v4-flash" });
+  const noReplyId = await registry.register(mkIdentity("b-noreply"), { context_used_pct: 0, model: "deepseek-v4-flash" });
+  log(`registered b-harness=${harnessId.name} b-noreply=${noReplyId.name}`);
+
+  setInterval(() => {
+    void registry.heartbeat(harnessId, { context_used_pct: 0, model: "deepseek-v4-flash" }).catch(() => {});
+  }, 10_000);
+  setInterval(() => {
+    void registry.heartbeat(noReplyId, { context_used_pct: 0, model: "deepseek-v4-flash" }).catch(() => {});
+  }, 10_000);
+  log("heartbeat loops started (b-harness + b-noreply, 10s)");
+
+  // Wait for the name leases to be visible before B-6 send (first heartbeat put)
+  await sleep(2_000);
+
+  runB10();
+
+  await Promise.all([
+    runB6(harnessId),
+    runB9(harnessId),
+    runB7B8(),
+  ]);
+
+  writeFileSync(DUMP_FILE, JSON.stringify(await dumpKv(), null, 2));
+  log(`KV dump → ${DUMP_FILE}`);
+
+  log("=== B-6..B-10 summary ===");
+  const passed = results.filter((r) => r.pass).length;
+  for (const r of results) log(`${r.pass ? "PASS" : "FAIL"} ${r.id} — ${r.note}`);
+  log(`B-6..B-10: ${passed}/${results.length} passed`);
+
+  console.log("HARNESS_READY");
+  log("harness now heartbeating b-harness/b-noreply; interactive flow (B-1..B-5) can start. Waiting for stop flag...");
+
+  // Keep-alive: heartbeats continue until the stop flag appears (max 40 min)
+  const waitStart = Date.now();
+  while (!existsSync(FLAG) && Date.now() - waitStart < 40 * 60_000) {
+    await sleep(2_000);
+  }
+  if (existsSync(FLAG)) {
+    writeFileSync(DUMP_FILE, JSON.stringify(await dumpKv(), null, 2));
+    log(`final KV dump → ${DUMP_FILE}`);
+    log("HARNESS_DONE — stop flag seen");
+    const passed2 = results.filter((r) => r.pass).length;
+    log(`final tally: ${passed2}/${results.length} passed`);
+    for (const r of results) log(`${r.pass ? "PASS" : "FAIL"} ${r.id}`);
+  } else {
+    log("HARNESS_TIMEOUT — 40min elapsed, exiting");
+  }
+  process.exit(0);
+}
+
+main().catch((err) => {
+  console.error("[HARNESS_CRASH]", err);
+  process.exit(1);
+});

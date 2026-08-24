@@ -1,0 +1,123 @@
+/**
+ * role-context — Role templates and agent context setup.
+ *
+ * Standalone extension for role-setting and context-setting, independent of
+ * comms:
+ *   - Registers the --role CLI flag (role template name, e.g. scout, worker,
+ *     coordinator)
+ *   - Injects the role template into the system prompt on before_agent_start
+ *     (chained append — never clobbers an explicit --system-prompt)
+ *
+ * The context capability (LLMContext builders, session file writing) lives in
+ * lib/role-context/, consumed by agent-lifecycle as a dependency.
+ *
+ * Usage:
+ *   pi -e extensions/comms.ts \
+ *      -e extensions/role-context.ts \
+ *      --role coordinator \
+ *      --cname coordinator-main
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getRoleTemplate, type RoleTemplate } from "./lib/role-context/template";
+
+/** Value of `--<name> <value>` (or `--<name>=<value>`) in argv, if present. */
+function argValue(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(`--${name}`);
+  const v = i >= 0 ? argv[i + 1] : undefined;
+  if (v && !v.startsWith("-")) return v;
+  const eq = argv.find((a) => a.startsWith(`--${name}=`));
+  return eq ? eq.slice(name.length + 3) : undefined;
+}
+
+export default function (pi: ExtensionAPI) {
+  // pi.getFlag() quirks:
+  //   - inside before_agent_start it returns null for every flag;
+  //   - outside session_start it only returns values for flags THIS extension
+  //     registered (`--cname` belongs to comms → null here).
+  // So: capture our own flag during session_start, read `--cname` from argv.
+  let roleFlag: string | undefined;
+
+  pi.registerFlag("role", {
+    description: "Role template name (e.g. scout, worker, coordinator)",
+    type: "string",
+    default: undefined,
+  });
+
+  pi.on("session_start", async () => {
+    roleFlag = pi.getFlag("role") as string | undefined;
+
+    // Enforce the role's tool whitelist: pi activates its default tools
+    // (read/write/edit/bash/grep/find/ls) for every session, and
+    // setActiveTools is additive in the other extensions — so without this,
+    // every role can call bash regardless of its defaultTools, letting e.g.
+    // a Coordinator "not execute" yet run commands. Replace the active set
+    // with exactly the role's defaultTools (load order puts this extension
+    // last, so the whitelist wins over the additive merges).
+    // Applies to spawned agents too (they also pass --role) — the tool
+    // constraint is independent of the prompt injection below.
+    if (!roleFlag) return;
+    const template = getRoleTemplate(roleFlag);
+    if (!template) return;
+    const tools = template.defaultTools
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    pi.setActiveTools(tools);
+    pi.appendEntry("role-context", { event: "tools_whitelisted", role: roleFlag, tools });
+  });
+
+  // ━━ Role template injection (--role) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Inject the role template as a chained append to the current system prompt.
+  // Guard rails:
+  //   - An explicit --system-prompt on the command line wins (spawned agents
+  //     pass the interpolated template this way) — never double-inject.
+  //     (systemPromptOptions.customPrompt is NOT a reliable guard: it is
+  //     always populated with pi's own default template from
+  //     ~/.pi/agent/SYSTEM.md, so it cannot distinguish explicit prompts.)
+  //   - Unknown role → no-op (appendEntry records it), boot still succeeds.
+  //   - Every decision is recorded via appendEntry so injection is observable.
+
+  pi.on("before_agent_start", async (event) => {
+    const role = roleFlag;
+    if (!role) return; // no --role: leave the prompt untouched
+
+    // The spawn path (agent-lifecycle's launch script) already carries the
+    // interpolated role template as --system-prompt, so skip it.
+    if (process.argv.some((a) => a === "--system-prompt" || a.startsWith("--system-prompt="))) {
+      pi.appendEntry("role-context", {
+        event: "role_skip",
+        role,
+        reason: "system_prompt_flag",
+      });
+      return;
+    }
+
+    let template: RoleTemplate | undefined;
+    try {
+      template = getRoleTemplate(role);
+    } catch (err) {
+      pi.appendEntry("role-context", {
+        event: "role_skip",
+        role,
+        reason: "load_error",
+        error: String(err),
+      });
+      return;
+    }
+    if (!template) {
+      pi.appendEntry("role-context", { event: "role_skip", role, reason: "unknown_role" });
+      return;
+    }
+
+    const name = argValue(process.argv, "cname") || "agent";
+    const rolePrompt = template.buildSystemPrompt(name, template.defaultTools);
+    pi.appendEntry("role-context", {
+      event: "role_injected",
+      role,
+      name,
+      chars: rolePrompt.length,
+    });
+    return { systemPrompt: `${event.systemPrompt}\n\n${rolePrompt}` };
+  });
+}
