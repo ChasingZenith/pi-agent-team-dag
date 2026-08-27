@@ -18,7 +18,7 @@ Reliability is baked in: **JetStream durable consumers** redeliver a crashed age
 
 ### 2. agent-lifecycle — on-demand agent spawning
 
-`extensions/agent-lifecycle.ts` + `extensions/lib/launch-script.ts` · [docs/2-create-and-kill-agent-on-net.md](docs/2-create-and-kill-agent-on-net.md)
+`extensions/agent-lifecycle/` + `extensions/lib/launch-script.ts` · [docs/2-create-and-kill-agent-on-net.md](docs/2-create-and-kill-agent-on-net.md)
 
 Spawns and kills Pi agents in tmux panes with identity flags, model pinning, and auto-exit:
 
@@ -38,7 +38,7 @@ Also provides LLMContext builders and SessionManager-backed session creation/for
 
 ### 4. teammate-provider — the central teammate registry
 
-`extensions/teammate-provider.ts` + role template `extensions/lib/role-context/roles/manager/teammate-provider.md` · [docs/3-teammate-provider.md](docs/3-teammate-provider.md)
+`extensions/teammate-provider/` + role template `extensions/lib/role-context/roles/manager/teammate-provider.md` · [docs/3-teammate-provider.md](docs/3-teammate-provider.md)
 
 A standalone comms agent registered as `teammate-provider` — the unique, network-wide registry for finding or creating agents. Agents send it structured requests (role, task, collaborators, context); its LLM scans the network, then **matches an existing agent or spawns a new one** via `tp_spawn_agent`, briefs the teammate, and replies with its name — the caller can't tell whether the agent was found or created.
 
@@ -96,7 +96,8 @@ From either side, an agent can `comms_send(target: "planner", message, remind_ms
 just comms-server
 
 # Terminal 2 — the central teammate registry
-pi -e extensions/comms.ts -e extensions/teammate-provider.ts --cname teammate-provider
+# (comms + agent-lifecycle auto-load via extensions/teammate-provider/package.json pi.extensions)
+pi -e extensions/teammate-provider --cname teammate-provider
 
 # Terminal 3 — a coordinator that delegates everything to the team
 # (task-graph.ts gives it the task graph tools: create/update/set_status/read/list/ready/render)
@@ -146,8 +147,10 @@ agent-team-on-coms-net/
 │   ├── comms.ts         # entry — comms extension (tools, consumers, lifecycle)
 │   ├── task-graph.ts       # task graph tools (create/update/set_status/read/list/ready/render)
 │   ├── role-context.ts     # --role flag + role-prompt injection (before_agent_start)
-│   ├── agent-lifecycle.ts  # agent_spawn / agent_kill tools (tmux panes)
-│   ├── teammate-provider.ts# teammate registry agent
+│   ├── agent-lifecycle/    # agent_spawn / agent_kill tools (tmux panes)
+│   │   └── index.ts        # …entry (package.json pi.extensions declares deps)
+│   ├── teammate-provider/  # teammate registry agent
+│   │   └── index.ts        # …entry (package.json pi.extensions declares deps)
 │   ├── auto-exit.ts        # auto-exit on task completion (used by launch scripts)
 │   └── lib/
 │       ├── comms/       # protocol, messaging, registry, batch, nats, config, ui

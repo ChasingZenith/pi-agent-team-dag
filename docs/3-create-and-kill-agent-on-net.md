@@ -27,7 +27,9 @@ extensions/
 │   ├── launch-script.ts     # agent 启动脚本构建器（含 --role, --system-prompt 等）
 │   └── role-context/        # role-context 组件（template / fork / roles/，见 docs/2 §1）
 ├── auto-exit.ts             # agent_settled 判定自动退出（含 pending send 防线）
-└── agent-lifecycle.ts       # agent_spawn/agent_kill 工具 + 导出 executeAgentSpawn/executeAgentSpawnByRole
+└── agent-lifecycle/         # 目录入口
+    ├── package.json         # pi.extensions 清单(依赖 comms,自动加载)
+    └── index.ts             # agent_spawn/agent_kill 工具 + 导出 executeAgentSpawn/executeAgentSpawnByRole
 ```
 
 > 启动脚本加载的 `role-context.ts` 及其 `lib/role-context/`（角色模板、LLMContext 构建、session fork）属于独立组件 role-context，见 docs/2。
@@ -44,7 +46,7 @@ extensions/
 │                                                                  │
 │  ┌──────────────────────────────┐                                │
 │  │ 主 Pi 进程                    │                                │
-│  │ agent-lifecycle.ts           │                                │
+│  │ agent-lifecycle/          │                                │
 │  │ comms.ts                  │                                │
 │  │                              │                                │
 │  │ agent_spawn ──→ agent_kill   │                                │
@@ -75,7 +77,7 @@ extensions/
 
 **组件说明：**
 
-- **agent-lifecycle.ts**：主扩展，注册 `agent_spawn` 和 `agent_kill` 两个工具；导出核心函数与共享状态供其他扩展直接调用（见 §8）。
+- **agent-lifecycle**（`extensions/agent-lifecycle/index.ts`）：主扩展，注册 `agent_spawn` 和 `agent_kill` 两个工具；导出核心函数与共享状态供其他扩展直接调用（见 §8）。
 - **lib/launch-script.ts**：构建启动脚本，写入临时目录并发送到 tmux window 执行（见 §7.1）。
 - **lib/tmux.ts**：tmux 底层操作封装——`checkTmux()`（校验环境）、`tmuxNewWindow()`（在 spawner 所在 session 中创建新窗口）、`tmuxSendScript()`（发送脚本到窗口）、`tmuxKillWindow()`（关闭窗口，见 §7.2）。
 - **role-context**（`lib/role-context/` + `role-context.ts`）：独立组件——agent-lifecycle 只导入使用（模板、fork、`--role` 注入），见 docs/2。
@@ -85,8 +87,8 @@ extensions/
 ## 3. 启动方式
 
 ```bash
-# 基础用法（需要和 comms.ts 一起加载）
-pi -e extensions/agent-lifecycle.ts -e extensions/comms.ts
+# 入口扩展,comms 由其清单自动加载
+pi -e extensions/agent-lifecycle
 ```
 
 > **前置条件**：必须在 tmux 会话内运行（`TMUX_PANE` 环境变量存在）。
@@ -227,7 +229,7 @@ exec pi \
 ### 8.1 共享状态
 
 ```typescript
-// agent-lifecycle.ts — 模块级 Map，在扩展实例和导出函数间共享
+// agent-lifecycle/index.ts — 模块级 Map，在扩展实例和导出函数间共享
 const moduleAgents = new Map<string, AgentState>();
 
 interface AgentState {
@@ -246,7 +248,7 @@ interface AgentState {
 
 ### 8.2 导出函数（供其他扩展直接调用）
 
-`agent-lifecycle.ts` 不仅注册工具，还**导出**核心函数供其他扩展直接导入：
+`agent-lifecycle` 不仅注册工具，还**导出**核心函数供其他扩展直接导入：
 
 | 函数 | 签名 | 用途 |
 |------|------|------|

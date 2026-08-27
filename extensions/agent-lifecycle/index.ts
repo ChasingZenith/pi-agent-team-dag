@@ -23,7 +23,9 @@
  *   agent_kill  — Kill an agent by closing its tmux window
  *
  * Usage:
- *   pi -e extensions/agent-lifecycle.ts -e extensions/comms.ts
+ *   pi -e extensions/agent-lifecycle
+ *   (comms is declared in this extension's package.json pi.extensions and
+ *   loaded first — spawned agents join the comms hub via its launch script)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -46,10 +48,10 @@ import {
   llmContextFromRole,
   SESSION_PATH,
   type LLMContext,
-} from "./lib/role-context/template";
-import { checkTmux, tmuxNewWindow, tmuxKillWindow } from "./lib/tmux";
-import { agentFileStem, writeAndSendScript } from "./lib/launch-script";
-import { forkSession, writePreloadedSessionFile } from "./lib/role-context/fork";
+} from "../lib/role-context/template";
+import { checkTmux, tmuxNewWindow, tmuxKillWindow } from "../lib/tmux";
+import { agentFileStem, writeAndSendScript } from "../lib/launch-script";
+import { forkSession, writePreloadedSessionFile } from "../lib/role-context/fork";
 
 // Expanded (ctrl+O) rendering: show the full call args — the same information
 // the LLM sees in its context.
@@ -67,7 +69,7 @@ export {
   getRoleTemplate,
   listRoleNames,
   interpolate,
-} from "./lib/role-context/template";
+} from "../lib/role-context/template";
 
 // ---------------------------------------------------------------------------
 // Types

@@ -1,0 +1,10 @@
+{
+  "name": "pi-agent-team-dag-agent-lifecycle",
+  "private": true,
+  "pi": {
+    "extensions": [
+      "../comms.ts",
+      "./index.ts"
+    ]
+  }
+}

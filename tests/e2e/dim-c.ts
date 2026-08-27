@@ -10,7 +10,7 @@
  *   noreply-harness 注册 c-noreply 并每 5s 心跳，直到进程被终止（C-7 长驻）
  *   fork-probe      F-1：fork spawn 集成 — 父 fixture → fork 文件 → 真实 pi 子进程加载
  */
-import { executeAgentSpawn, executeAgentSpawnByRole, executeAgentKill, listRoleNames } from "../../extensions/agent-lifecycle.ts";
+import { executeAgentSpawn, executeAgentSpawnByRole, executeAgentKill, listRoleNames } from "../../extensions/agent-lifecycle/index.ts";
 import * as registry from "../../extensions/lib/comms/registry.ts";
 import * as messaging from "../../extensions/lib/comms/messaging.ts";
 import * as nats from "../../extensions/lib/comms/nats.ts";

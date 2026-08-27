@@ -12,7 +12,7 @@
       "./extensions/comms.ts",
       "./extensions/task-graph.ts",
       "./extensions/task-comms-ops.ts",
-      "./extensions/agent-lifecycle.ts"
+      "./extensions/agent-lifecycle/index.ts"
     ]
   },
   "devDependencies": {

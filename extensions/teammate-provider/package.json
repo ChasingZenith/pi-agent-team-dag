@@ -1,0 +1,11 @@
+{
+  "name": "pi-agent-team-dag-teammate-provider",
+  "private": true,
+  "pi": {
+    "extensions": [
+      "../comms.ts",
+      "../agent-lifecycle/index.ts",
+      "./index.ts"
+    ]
+  }
+}

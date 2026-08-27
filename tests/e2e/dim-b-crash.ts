@@ -14,7 +14,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { executeAgentSpawn } from "../../extensions/agent-lifecycle.ts";
+import { executeAgentSpawn } from "../../extensions/agent-lifecycle/index.ts";
 import * as registry from "../../extensions/lib/comms/registry.ts";
 import {
   statusFromLastSeen,

@@ -322,9 +322,8 @@ pi -e extensions/comms.ts --cname scout
 # 远程 NATS(token 走环境变量或 server.secret.json,不经过 argv)
 PI_COMMS_AUTH_TOKEN=<tok> pi -e extensions/comms.ts --nats-url nats://192.168.1.100:4222
 
-# 与其他扩展组合(comms 必须在依赖它的扩展之前加载)
-pi -e extensions/comms.ts \
-   -e extensions/agent-lifecycle.ts
+# 与其他扩展组合 — 组合扩展入口自声明依赖,comms 由其清单自动加载
+pi -e extensions/agent-lifecycle
 ```
 
 ---

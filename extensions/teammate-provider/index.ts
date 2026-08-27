@@ -14,11 +14,10 @@
  * Dependencies: TP builds on agent-lifecycle (executeAgentSpawnByRole +
  * re-exported role queries) — it never imports lib/role-context directly.
  *
- * Launch (agent-lifecycle must be loaded too — its role-aware spawn and
- * registry back tp_spawn_agent):
- *   pi -e extensions/comms.ts \
- *      -e extensions/agent-lifecycle.ts \
- *      -e extensions/teammate-provider.ts \
+ * Launch (dependencies are declared in this extension's package.json
+ * pi.extensions — comms and index.ts's libs are loaded before it, and
+ * agent-lifecycle's role-aware spawn and registry back tp_spawn_agent):
+ *   pi -e extensions/teammate-provider \
  *      --cname teammate-provider
  */
 
@@ -29,7 +28,7 @@ import {
   executeAgentSpawnByRole,
   getRoleTemplate,
   listRoleNames,
-} from "./agent-lifecycle";
+} from "../agent-lifecycle";
 
 // Expanded (ctrl+O) rendering: show the full call args / result content —
 // the same information the LLM sees in its context.

@@ -16,8 +16,8 @@ import {
   executeAgentSpawnByRole,
   executeAgentKill,
   isAgentNameTaken,
-} from "../../extensions/agent-lifecycle.ts";
-import lifecycle from "../../extensions/agent-lifecycle.ts";
+} from "../../extensions/agent-lifecycle/index.ts";
+import lifecycle from "../../extensions/agent-lifecycle/index.ts";
 import { Type } from "@sinclair/typebox";
 import {
   connectE2e,

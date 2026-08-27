@@ -93,21 +93,21 @@ TP 提供 **1 个工具**供自身的 LLM 使用。查看在线 agent 直接调 
 
 ```
 extensions/
-└── teammate-provider.ts           ← TP agent 主逻辑
+└── teammate-provider/
+    ├── package.json       ← pi.extensions 清单(依赖 comms、agent-lifecycle)
+    └── index.ts           ← TP agent 主逻辑
 ```
 
-> 其余文件（`agent-lifecycle.ts`、`launch-script.ts`、`tmux.ts`、`lib/role-context/` 等）均属于 agent-lifecycle / role-context，见 docs/2 §1；角色模板目录 `lib/role-context/roles/`（manager/：coordinator、teammate-provider；specialist/：scout / web-searcher / planner / experts-reviewer / consultor / worker / requirements-clarifier）同样归属 role-context。
+> 其余文件（`agent-lifecycle/index.ts`、`lib/launch-script.ts`、`lib/tmux.ts`、`lib/role-context/` 等）均属于 agent-lifecycle / role-context，见 docs/2 §1；角色模板目录 `lib/role-context/roles/`（manager/：coordinator、teammate-provider；specialist/：scout / web-searcher / planner / experts-reviewer / consultor / worker / requirements-clarifier）同样归属 role-context。
 
-**启动时必须加载三个扩展**：
+**加载入口扩展即可**——comms、agent-lifecycle 由 `extensions/teammate-provider/package.json` 的 `pi.extensions` 清单声明，按依赖顺序自动加载：
 
 ```bash
-pi -e extensions/comms.ts \
-   -e extensions/agent-lifecycle.ts \
-   -e extensions/teammate-provider.ts \
+pi -e extensions/teammate-provider \
    --cname teammate-provider
 ```
 
-> **为何需要 agent-lifecycle.ts**：role-aware spawn（`executeAgentSpawnByRole`：角色验证 → 去重命名 → 上下文构建 → tmux spawn）与角色查询（`listRoleNames`/`buildRoleCatalog`）都由它提供（docs/3 §8.2）；其 `session_shutdown` 处理器负责在 TP 关闭时清理所有 spawned agent 的 tmux window。
+> **为何需要 agent-lifecycle**：role-aware spawn（`executeAgentSpawnByRole`：角色验证 → 去重命名 → 上下文构建 → tmux spawn）与角色查询（`listRoleNames`/`buildRoleCatalog`）都由它提供（docs/3 §8.2）；其 `session_shutdown` 处理器负责在 TP 关闭时清理所有 spawned agent 的 tmux window。
 >
 > TP 自身**不加载** role-context.ts（TP 的 prompt 是角色模板 `roles/manager/teammate-provider.md`，由自身的 `before_agent_start` 经 agent-lifecycle 转发 `getRoleTemplate` 读取并插值，与 spawn 路径同一套 role-context 机制）；spawn 出的 agent 由 launch script 自动加载 role-context.ts 以注册 `--role`。
 
