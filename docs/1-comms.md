@@ -14,7 +14,7 @@
 - 消息**持久化**:服务器重启不丢;agent 崩溃自动重投(max_deliver 3)
 - **跨重启复用**:地址以名字锚定、不随进程变化——同名重启复用同一 durable consumer(干净关闭也不删除),未 ack 的 prompt 重投、已 ack 的不重放、离线期间积累的消息续投(stream TTL 内);outbox/inbox 历史同样跨重启可读(见 §2.1.1、§9)
 - **显式回复**:回复 = `comms_send(target=<发送方>, reply_to_msg_id=<收到的 msg_id>)`,无自动应答;回复自动以入站 turn 到达,无需轮询(见 §2.4、§6.2)
-- **合并定时提醒**:`comms_send(remind_s=<seconds>)` 未收到回复时周期注入**一条合并提醒**(覆盖所有 pending 发送),到期自动标记 `expired`,可随时 `comms_dismiss` 结束跟踪;默认 `remind_s=0` 为 fire-and-forget(见 §2.4)
+- **合并定时提醒**:`comms_send(remind_s=<seconds>)` 未收到回复时周期注入**一条合并提醒**(覆盖所有 pending 发送),到期自动标记 `expired`,可随时 `comms_dismiss` 停止提醒;默认 `remind_s=0` 为 fire-and-forget(见 §2.4)
 - **投递模式可选**:`comms_send(deliver_as=…)` 控制消息到达对端 agent 的投递方式 — `steer`(默认)/ `follow-up` / `next turn`(语义见 §6.2)
 - Bearer token 认证(NATS 原生,默认自动生成,0600 持久化)
 - 客户端原生自动重连(指数退避由 NATS 客户端处理)
@@ -91,7 +91,7 @@ Agent A (发送方)              NATS                    Agent B (接收方)
 
 - **`comms_profiles`(无 TTL,永久)** — `a.<subnet>.<name>` 完整资料。key 用**名字**:一个名字一份资料,名字被新运行抢占时自动覆盖旧资料(不产生重启后的重复资料);agent 离线后资料**保留可见**,状态由 `last_seen_at` 推导,不会从注册表消失。正常退出(`clearOwn`)显式删除自己的资料;崩溃则留下供 peers 查看。
 - **`comms_names`(bucket 级 TTL 30s,租约)** — `n.<subnet>.<name>` 名字租约,值是名字本身(名字即地址,无需映射)。心跳 = 每 10s 重新 put(滑动过期)。停止心跳 → 30s 后名字自动释放,可被新 agent 抢占。**没有 stale/offline 扫描循环**——存在性(名字)靠 TTL,活跃度(状态)靠推导。
-- **`comms_history`(bucket 级 TTL 默认 24h)** — `h.<subnet>.<name>.<out|in>.<msg_id>` 双向**消息内容历史**:发出与收到的每条消息全文,compact(上下文压缩)或 agent 重启后由 `comms_outbox` / `comms_inbox` 重读。key 锚定名字,跨重启可读,outbox/inbox 的列表模式覆盖 agent 的**全部**历史而非仅当前进程。发送跟踪状态(提醒、过期)是进程内存,重启后由历史记录推导(`replied` / `dismissed` / `expired` / `waiting`)。写入是 best-effort(不阻塞发送与消息注入),TTL 首次创建生效。
+- **`comms_history`(bucket 级 TTL 默认 24h)** — `h.<subnet>.<name>.<out|in>.<msg_id>` 双向**消息内容历史**:发出与收到的每条消息全文,compact(上下文压缩)或 agent 重启后由 `comms_outbox` / `comms_inbox` 重读。key 锚定名字,跨重启可读,outbox/inbox 的列表模式覆盖 agent 的**全部**历史而非仅当前进程。发送提醒状态(提醒、过期)是进程内存,重启后由历史记录推导(`replied` / `dismissed` / `expired` / `waiting`)。写入是 best-effort(不阻塞发送与消息注入),TTL 首次创建生效。
 
 状态推导(只对资料):`status: online` — last_seen_at 距今 < 30s;`stale` — 30s ~ 60s;`offline` — 超过 60s。离线资料**保留**在缓存里显示 ✗(这是"永久资料"的语义)。
 
@@ -104,12 +104,12 @@ Agent A (发送方)              NATS                    Agent B (接收方)
 **合并定时提醒(remind_s)**:`comms_send(..., remind_s=<seconds>)` 为这条消息挂一个提醒 — 只要还有未回复的发送,每过 `remind_s` 秒就向 context 注入**一条合并提醒**,列出**所有** pending 发送(msg_id、目标、目标实时状态、已等时长、TTL 倒计时),而不是每条消息一条提醒。提醒在以下情况停止:
 
 - 收到命中该 msg_id 的回复(带 `reply_to_msg_id`)
-- 调用 `comms_dismiss(msg_id)` 结束跟踪(语义见 §6.5)
+- 调用 `comms_dismiss(msg_id)` 停止提醒(语义见 §6.5)
 - pending 条目被 FIFO 驱逐(超过 256 条)、进程关闭,或消息超过 stream TTL(自动标记为 `expired`,不再无限提醒)
 
-提醒是**发送方侧**的机制——回复与否完全由接收方 LLM 决定;对方不带 `reply_to_msg_id` 回复时,发送方的提醒不会自动停止,由发送方看到内容后自行 `comms_dismiss` 结束跟踪。
+提醒是**发送方侧**的机制——回复与否完全由接收方 LLM 决定;对方不带 `reply_to_msg_id` 回复时,发送方的提醒不会自动停止,由发送方看到内容后自行 `comms_dismiss` 停止提醒。
 
-**fire-and-forget(`remind_s=0`,默认)**:`comms_send(...)` 不设 `remind_s`(默认 0)即发送**纯通知**——发布与 comms_history 落库照常,但**不进入发送跟踪表**:不期待回复、不挂提醒、不出现在 `comms_outbox` 的 waiting 列表、**不阻塞 auto-exit**(守卫是"有 pending sends 不退出")。仅当需要等待回复时才显式设置 `remind_s>0`(如 300 = 每 5 分钟)。用于无需回复的单向通知(如 task 变更公告,见 docs/5)——收方按需用其他工具取详情,无人回复。
+**fire-and-forget(`remind_s=0`,默认)**:`comms_send(...)` 不设 `remind_s`(默认 0)即发送**纯通知**——发布与 comms_history 落库照常,但**不进入提醒登记表**:不期待回复、不挂提醒、不出现在 `comms_outbox` 的 waiting 列表、**不阻塞 auto-exit**(守卫是"有 pending sends 不退出")。仅当需要等待回复时才显式设置 `remind_s>0`(如 300 = 每 5 分钟)。用于无需回复的单向通知(如 task 变更公告,见 docs/5)——收方按需用其他工具取详情,无人回复。
 
 ### 2.5 名称与消息寻址
 
@@ -221,7 +221,7 @@ session_shutdown / SIGINT / SIGTERM
 ### 6.2 `comms_send` — 发起消息 / 回复 / 群发
 - `target`(peer 名称,**大小写敏感**)或 `targets`(数组,群发,每个收件人一个 `msg_id`)、`message`
 - **回复自动到达**:回复以入站 turn 注入,**无需轮询**
-- `remind_s`(可选,秒,默认 0):挂起提醒 — 未收到回复时每过 `remind_s` 秒向 context 注入**一条合并提醒**(覆盖所有 pending 发送);收到回复、`comms_dismiss`、或消息过期后停止。**`remind_s=0`(默认) = fire-and-forget 纯通知**(不跟踪、不提醒、不阻塞 auto-exit;见 §2.4)
+- `remind_s`(可选,秒,默认 0):挂起提醒 — 未收到回复时每过 `remind_s` 秒向 context 注入**一条合并提醒**(覆盖所有 pending 发送);收到回复、`comms_dismiss`、或消息过期后停止。**`remind_s=0`(默认) = fire-and-forget 纯通知**(不受提醒管辖、不阻塞 auto-exit;见 §2.4)
 - `reply_to_msg_id`(可选):**回复模式** — 填你要回复的入站消息的 msg_id;发送方收到后自动记录回复并停止该 msg_id 的提醒循环。回复 = 显式 `comms_send(target=<发送方>, reply_to_msg_id=<msg_id>)`,**没有自动应答**
 - `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,三个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `follow-up`(目标当前 turn 完全结束后处理,空闲时立即触发)/ `next turn`(进入目标的 next-turn 队列,在目标**下一次 turn 开始时**注入 — 目标忙碌时等其当前 turn 结束再注入;**空闲时不主动触发**,等下一次 turn(用户输入或其他注入)到来时随其注入)。三种模式的区分只对**非 comms 批处理轮次**(用户输入轮次 / 其他扩展注入)成立:忙碌时分别为下一 LLM 调用边界 / 当前 turn 结束后 / 下一个 turn 开始时;目标正在回答 **comms 批处理轮次**时,批处理轮次不可被打断,`steer` / `follow-up` 一致等到该轮结束、在下一轮开始时投递。空闲时 `steer` / `follow-up` 立即触发,`next turn` 不触发
 - 入站批处理:收到的消息先入队,agent 轮次空闲时按到达顺序一次性取出全部,合并注入;批内按 `deliver_as` **分组注入**(steer 组一次、follow-up 组一次,steer 组先行 — 与 pi 的队列消费顺序一致),**不做模式提升** — 每条消息保持自己的投递模式,与 pi.sendMessage 逐条行为一致。`next turn` 消息不参与批处理 — 到达即直送目标 pi 的 next-turn 队列并在注入时确认(pi 进程崩溃时随进程丢失,与 pi 原生 nextTurn 消息一致);其余消息 gate 到 agent_settled 再 ack,崩溃恢复一致
@@ -230,9 +230,9 @@ session_shutdown / SIGINT / SIGTERM
 - 注意:发送的前提是目标**正在心跳**(名字租约存在);一旦发送成功,消息就留在 stream(TTL 内)——目标随后崩溃/重启,同名重启后由复用同一 consumer 收到(崩溃重投);目标已停机超过租约期(心跳停止 30s 后名字被回收)再发送则报 `target not found`
 
 ### 6.3 `comms_outbox` — 重读自己发送的消息(含状态与回复)
-- 数据源:**持久化消息历史(comms_history,bucket TTL 默认 24h)** — compact 或重启后仍可重读(重启后发送跟踪状态由历史推导:`replied` / `dismissed` / `expired` / `waiting`)
+- 数据源:**持久化消息历史(comms_history,bucket TTL 默认 24h)** — compact 或重启后仍可重读(重启后发送提醒状态由历史推导:`replied` / `dismissed` / `expired` / `waiting`)
 - `msg_id`(可选):单条详情 — 发送全文、状态(`waiting` / `ended` + `reason`)、收到的回复全文;省略时列出最近发送(新→旧,状态 + 内容摘要,`limit` 默认 10,最大 100)
-- `reason`(仅 `ended`):`replied`(收到回复,内容在返回里)/ `expired`(超过消息 TTL 仍未收到回复,目标很可能从未收到)/ `dismissed`(已被 `comms_dismiss` 结束跟踪,迟到的真回复仍会覆盖)/ `error`(处理出错)
+- `reason`(仅 `ended`):`replied`(收到回复,内容在返回里)/ `expired`(超过消息 TTL 仍未收到回复,目标很可能从未收到)/ `dismissed`(已被 `comms_dismiss` 停止提醒,迟到的真回复仍会覆盖)/ `error`(处理出错)
 - 状态优先取自会话内存(含 `remind` 提醒状态);内存没有时(重启后)由历史记录推导
 
 ### 6.4 `comms_inbox` — 重读收到的消息
@@ -240,7 +240,7 @@ session_shutdown / SIGINT / SIGTERM
 - `msg_id`(可选):单条详情 — 发送方、时间戳、reply 关联、全文;省略时列出最近收到的消息(新→旧,发送方 + 内容摘要,`limit` 默认 10,最大 100)
 - 回复也会落在这里(标注 `reply to <msg_id>`);已回复的发送在 `comms_outbox` 侧同样可查
 
-### 6.5 `comms_dismiss` — 结束跟踪(停止提醒)
+### 6.5 `comms_dismiss` — 停止提醒
 - `msg_id`:自己 `comms_send` 返回的 msg_id(只能结束自己发起的发送)
 - 停止该消息的提醒,并标记为 `ended/dismissed` — 从 active 列表移出,`comms_outbox` 显示 `ended/dismissed`(重启后仍保持,靠历史记录持久化);迟到的真回复仍会覆盖为 `replied`
 

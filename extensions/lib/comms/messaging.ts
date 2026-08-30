@@ -155,14 +155,14 @@ export interface PendingInfo {
 	remind_s: number;
 }
 
-/** One ended (no longer tracked) send, for the no-arg comms_outbox. */
+/** One ended (reminder stopped) send, for the no-arg comms_outbox. */
 export interface EndedInfo {
 	msg_id: string;
 	/** Peer NAME the send went to. */
 	target: string;
 	/** ms since the send was made. */
 	elapsed_ms: number;
-	/** Why tracking ended: replied / expired / dismissed / error. */
+	/** Why the reminder stopped: replied / expired / dismissed / error. */
 	reason: "replied" | "expired" | "dismissed" | "error";
 }
 
@@ -364,7 +364,7 @@ export interface SendOptions {
 	 * happen, but NO pending entry is parked: no reply resolution, no
 	 * reminder, no comms_outbox "waiting" entry, and the auto-exit guard is
 	 * not armed.
-	 * - > 0 (e.g. 300 = every 5 min): tracked + reminded — one consolidated
+	 * - > 0 (e.g. 300 = every 5 min): reminder armed — one consolidated
 	 *   reminder whenever due, until reply, dismiss, eviction, TTL expiry or
 	 *   shutdown.
 	 */
@@ -430,15 +430,15 @@ export async function send(
 	const targetStatus = statusOfName(identity.subnet, target);
 
 	const now = Date.now();
-	// Tracking is armed only by an explicit remindS > 0 (seconds). Omitted
+	// The reminder is armed only by an explicit remindS > 0 (seconds). Omitted
 	// and 0 are equivalent fire-and-forget: publish and persist to history
 	// but park nothing — one-way sends must not arm the auto-exit guard,
 	// show up as comms_outbox "waiting" entries, or take up pending table
 	// slots.
 	const remindS = opts?.remindS ?? 0;
-	const tracked = remindS > 0;
+	const reminderArmed = remindS > 0;
 
-	if (tracked) {
+	if (reminderArmed) {
 		const pending: PendingReply = {
 			target_name: target,
 			sentAt: now,
@@ -471,8 +471,8 @@ export async function send(
 
 /**
  * Non-blocking status poll for comms_outbox. Three states:
- * - "waiting": still tracked, no reply yet (remindS > 0 = reminder armed).
- * - "ended": no longer tracked — reason says why: "replied" (result in
+ * - "waiting": still under reminder, no reply yet (remindS > 0 = reminder armed).
+ * - "ended": reminder stopped — reason says why: "replied" (result in
  *   `result`), "expired" (sentAt + TTL passed, no reply), or "dismissed"
  *   (a late reply still overwrites `result`).
  * - "unknown": no parked entry (unknown msg_id, or FIFO-evicted).
@@ -495,7 +495,7 @@ export function pollReply(msgId: string): {
 }
 
 /**
- * All parked, still-tracked sends with computed elapsed/status/expiry,
+ * All parked sends still under reminder, with computed elapsed/status/expiry,
  * oldest first (used by the no-arg comms_outbox and the consolidated
  * reminder injector). Dismissed/replied/expired entries are excluded — they
  * are reported via listEndedReplies.
@@ -543,7 +543,7 @@ export function listEndedReplies(): EndedInfo[] {
 }
 
 /**
- * Stop tracking a parked msg_id (comms_dismiss): stops its reminder and
+ * Stop reminding on a parked msg_id (comms_dismiss): stops its reminder and
  * records it as ended/dismissed. Direction is implied by the msg_id: only
  * sends we made ourselves are parked here. The entry is KEPT parked with
  * result { error: "dismissed" }, so a genuinely late reply still overwrites

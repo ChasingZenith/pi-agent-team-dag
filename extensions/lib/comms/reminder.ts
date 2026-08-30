@@ -24,7 +24,7 @@ export interface ReminderEntry {
 	sentAt: number;
 	/** Reminder cadence in seconds; <= 0 → never remind. */
 	remindS: number;
-	/** ms epoch of the last injected reminder (seed value; the scheduler tracks updates). */
+	/** ms epoch of the last injected reminder (seed value; the scheduler updates it thereafter). */
 	lastRemindAt: number;
 	/** ms epoch after which the entry is expired (dropped from reminding), or null when no TTL. */
 	expiresAt: number | null;

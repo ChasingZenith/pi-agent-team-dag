@@ -77,7 +77,7 @@ function commsRuntime(): CommsRuntime {
 // Constants
 // =============================================================================
 
-/** Reminder interval in seconds for tracked sends (delegations): every 5 min. */
+/** Reminder interval in seconds for sends with a reminder (delegations): every 5 min. */
 const REMIND_S = 300;
 
 // =============================================================================

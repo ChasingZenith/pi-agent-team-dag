@@ -299,7 +299,7 @@ export interface InboundContext {
 export interface PendingReply {
 	/**
 	 * Terminal result: reply (response, error null) or a non-reply end —
-	 * error "dismissed" (sender stopped tracking via comms_dismiss) or any
+	 * error "dismissed" (sender stopped the reminder via comms_dismiss) or any
 	 * other error string (processing error).
 	 */
 	result?: { response?: any; error?: string | null };

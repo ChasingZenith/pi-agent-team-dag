@@ -54,7 +54,7 @@ export interface HistoryOutRecord {
 	ts: number;
 	/** The peer's reply, folded in when it arrives. */
 	reply?: OutReply;
-	/** How tracking ended, persisted so dismiss survives a restart. */
+	/** How the reminder ended, persisted so dismiss survives a restart. */
 	ended?: { reason: "dismissed"; ts: number };
 }
 
