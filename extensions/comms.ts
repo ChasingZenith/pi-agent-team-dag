@@ -73,12 +73,7 @@ import * as batch from "./lib/comms/batch.ts";
 import * as history from "./lib/comms/history.ts";
 import { COMMS_RUNTIME_EVENT } from "./lib/comms/runtime";
 import { displayName, shouldOwnName } from "./lib/comms/session-name";
-import {
-	abbreviateModel,
-	statusDot,
-	themeStatusDot,
-	themeStatusWord,
-} from "./lib/comms/ui/display.ts";
+import { abbreviateModel, statusDot } from "./lib/comms/ui/display.ts";
 
 // ━━ Identity flags ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -439,22 +434,6 @@ export default function (pi: ExtensionAPI) {
 		renderCall(_args, theme) {
 			return new Text(theme.fg("toolTitle", theme.bold("comms_list_peer")), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const details = result.details as any;
-			const header = theme.fg("accent", `📡 ${details?.agents?.length ?? 0} peer(s)`);
-			if (!options.expanded || !details?.agents?.length) {
-				return new Text(header, 0, 0);
-			}
-			const rows = details.agents.map((a: any) => {
-				const pct = typeof a.context_used_pct === "number" ? `${a.context_used_pct}%` : "?%";
-				const isSelf = !!details.self && a.name === details.self.name;
-				return (
-					`${themeStatusDot(theme, a.status)} ${a.name}${isSelf ? theme.fg("accent", " (you)") : ""}` +
-					` ${theme.fg("dim", abbreviateModel(a.model))} ${theme.fg("muted", pct)}`
-				);
-			}).join("\n");
-			return new Text(header + "\n" + rows, 0, 0);
-		},
 	});
 
 	pi.registerTool({
@@ -548,37 +527,6 @@ export default function (pi: ExtensionAPI) {
 			const full = text + (msg ? `\nmessage: ${msg}` : "") + (opts.length ? "\n" + opts.join(" · ") : "");
 			return new Text(full, 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const d = result.details as any;
-			const t = result.content[0];
-			if (!d || !Array.isArray(d.results) || d.results.length === 0) {
-				return new Text(t?.type === "text" ? t.text : "", 0, 0);
-			}
-			if (!options.expanded) {
-				const lines = d.results.map((r: any) =>
-					`${theme.fg("accent", `to ${r.target ?? "?"}`)}  msg_id ${theme.fg("dim", r.msg_id ?? "?")}` +
-					(r.target_status ? ` (${themeStatusWord(theme, r.target_status)})` : ""),
-				);
-				return new Text(lines.join("\n"), 0, 0);
-			}
-			// Expanded: full per-recipient detail, failures, and send options.
-			const lines: string[] = [];
-			for (const r of d.results) {
-				lines.push(
-					theme.fg("accent", `to ${r.target ?? "?"}`) + (r.target_status ? ` (${themeStatusWord(theme, r.target_status)})` : "") +
-					`\n  msg_id ${r.msg_id ?? "?"}`,
-				);
-			}
-			for (const e of d.errors ?? []) {
-				lines.push(theme.fg("error", `to ${e.target}: FAILED — ${e.error}`));
-			}
-			const notes: string[] = [];
-			if (d.reply_to_msg_id) notes.push(`reply to ${d.reply_to_msg_id}`);
-			if (d.remind_s) notes.push(`remind every ${d.remind_s} s`);
-			if (d.deliver_as) notes.push(`deliver as ${d.deliver_as}`);
-			if (notes.length) lines.push(theme.fg("dim", notes.join(" · ")));
-			return new Text(lines.join("\n"), 0, 0);
-		},
 	});
 
 	pi.registerTool({
@@ -665,17 +613,6 @@ export default function (pi: ExtensionAPI) {
 			const msgId = typeof a.msg_id === "string" && a.msg_id ? a.msg_id : "(recent)";
 			return new Text(theme.fg("toolTitle", theme.bold("comms_outbox ")) + theme.fg("accent", msgId), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			// No details — derive the one-line label from the content text itself.
-			const t = result.content[0];
-			const raw = t?.type === "text" ? t.text : "";
-			if (!options.expanded) {
-				const first = raw.split("\n")[0].replace(/^comms_outbox: /, "");
-				return new Text(theme.fg("accent", first.length > 48 ? `${first.slice(0, 45)}…` : first), 0, 0);
-			}
-			// Expanded: the full content — complete send list or full detail.
-			return new Text(raw, 0, 0);
-		},
 	});
 
 	pi.registerTool({
@@ -740,17 +677,6 @@ export default function (pi: ExtensionAPI) {
 			const msgId = typeof a.msg_id === "string" && a.msg_id ? a.msg_id : "(recent)";
 			return new Text(theme.fg("toolTitle", theme.bold("comms_inbox ")) + theme.fg("accent", msgId), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			// No details — derive the one-line label from the content text itself.
-			const t = result.content[0];
-			const raw = t?.type === "text" ? t.text : "";
-			if (!options.expanded) {
-				const first = raw.split("\n")[0].replace(/^comms_inbox: /, "");
-				return new Text(theme.fg("accent", first.length > 48 ? `${first.slice(0, 45)}…` : first), 0, 0);
-			}
-			// Expanded: the full content — complete message list or full detail.
-			return new Text(raw, 0, 0);
-		},
 	});
 
 
@@ -799,21 +725,11 @@ pi.registerTool({
 		renderCall(args, theme) {
 			const a = args as any;
 			const msgId = a.msg_id ?? "?";
-			const s = typeof a.remind_s === "number" && a.remind_s > 0 ? ` ×${a.remind_s}s` : " stop";
+			// Wording mirrors the result content ("remind every 300 s").
+			const s = typeof a.remind_s === "number" && a.remind_s > 0
+				? ` · remind every ${a.remind_s} s`
+				: " · stop";
 			return new Text(theme.fg("toolTitle", theme.bold("comms_remind ")) + theme.fg("accent", msgId + s), 0, 0);
-		},
-		renderResult(result, options, theme) {
-			const d = result.details as any;
-			const status = d?.outcome ?? "?";
-			if (!options.expanded) {
-				// "reminded" only ever means remind_s > 0 — remind(…, 0) yields "stopped".
-				if (status === "reminded") return new Text(theme.fg("success", `✓ remind ${d.remind_s}s`), 0, 0);
-				if (status === "stopped") return new Text(theme.fg("success", "✓ stopped"), 0, 0);
-				return new Text(theme.fg("error", `✗ ${status}`), 0, 0);
-			}
-			// Expanded: the full content — what happened and why.
-			const t = result.content[0];
-			return new Text(t?.type === "text" ? t.text : "", 0, 0);
 		},
 	});
 
@@ -856,17 +772,6 @@ pi.registerTool({
 			}
 			// Expanded: the declared current_task value.
 			const task = (args as any).current_task as string | undefined;
-			return new Text(text + (task ? `\ncurrent_task: ${task}` : ""), 0, 0);
-		},
-		renderResult(result, options, theme) {
-			const d = result.details as any;
-			const updated = d?.updated as string[] | undefined;
-			const text = !updated?.length
-				? theme.fg("dim", "no changes")
-				: theme.fg("success", `✓ ${updated.join(", ")}`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the resulting current_task (cleared or set).
-			const task = d?.current_task as string | undefined;
 			return new Text(text + (task ? `\ncurrent_task: ${task}` : ""), 0, 0);
 		},
 	});

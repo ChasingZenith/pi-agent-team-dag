@@ -245,14 +245,6 @@ export default function (pi: ExtensionAPI) {
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const id = (d?.id as string) || "?";
-			const text = theme.fg("success", `✎ new ${id}`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full result content, as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
-		},
 	});
 
 	// =============================================================================
@@ -404,15 +396,6 @@ export default function (pi: ExtensionAPI) {
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const id = (d?.id as string) || "?";
-			const v = d?.version as number;
-			const text = theme.fg("accent", `✎ v${v} ${id}`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full result content, as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
-		},
 	});
 
 	// =============================================================================
@@ -536,19 +519,6 @@ export default function (pi: ExtensionAPI) {
 			if (!context.expanded) return new Text(text, 0, 0);
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
-		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const id = (d?.id as string) || "?";
-			const st = (d?.status as string) || "?";
-			const unlocked = (d?.unlocked as string[]) ?? [];
-			const color = st === "done" ? "success" : st === "blocked" ? "error" : "accent";
-			const glyph = STATUS_GLYPH[st as TaskStatus] ?? "◻";
-			const extra = unlocked.length > 0 ? ` +${unlocked.length}` : "";
-			const text = theme.fg(color, `${glyph} ${st} ${id}${extra}`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full result content, as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
 		},
 	});
 

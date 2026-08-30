@@ -584,21 +584,6 @@ export default function (pi: ExtensionAPI) {
       // Expanded: the full call args (llmContext/model/autoExit), as the LLM saw them.
       return new Text(text + "\n" + fmtArgs(a), 0, 0);
     },
-    renderResult(result, options, theme) {
-      // No details contract — derive the one-line label from the content text itself.
-      const t = result.content[0];
-      const raw = t?.type === "text" ? t.text : "";
-      const first = raw.split("\n")[0];
-      if (!options.expanded) {
-        return new Text(
-          theme.fg(first.startsWith("Agent") ? "success" : "error", first),
-          0,
-          0,
-        );
-      }
-      // Expanded: the full result content, as the LLM saw it.
-      return new Text(raw, 0, 0);
-    },
   });
 
   // --- agent_kill ---
@@ -628,21 +613,6 @@ export default function (pi: ExtensionAPI) {
       if (!context.expanded) return new Text(text, 0, 0);
       // Expanded: the full call args, as the LLM saw them.
       return new Text(text + "\n" + fmtArgs(a), 0, 0);
-    },
-    renderResult(result, options, theme) {
-      // No details contract — derive the one-line label from the content text itself.
-      const t = result.content[0];
-      const raw = t?.type === "text" ? t.text : "";
-      const first = raw.split("\n")[0];
-      if (!options.expanded) {
-        return new Text(
-          theme.fg(first.includes("killed") ? "success" : "error", first),
-          0,
-          0,
-        );
-      }
-      // Expanded: the full result content, as the LLM saw it.
-      return new Text(raw, 0, 0);
     },
   });
 

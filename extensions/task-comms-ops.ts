@@ -44,11 +44,6 @@ function fmtArgs(a: Record<string, unknown>): string {
 		.join("\n");
 }
 
-function expandedContent(result: { content?: Array<{ type: string; text?: string }> }, fallback: string): string {
-	const t = result.content?.[0];
-	return t?.type === "text" && t.text ? t.text : fallback;
-}
-
 // =============================================================================
 // Comms runtime access
 // =============================================================================
@@ -272,15 +267,6 @@ export default function (pi: ExtensionAPI) {
 			// Expanded: the full call args (including the delegation message), as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const text =
-				theme.fg("success", `➤ ${(d?.agent as string) || "?"} `) +
-				theme.fg("dim", (d?.task_id as string) || "");
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full result content (msg_id, target status, session), as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
-		},
 	});
 
 	// =============================================================================
@@ -382,14 +368,6 @@ export default function (pi: ExtensionAPI) {
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const id = (d?.id as string) || "?";
-			const text = theme.fg("success", `▶ ${id}`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full result content, as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
-		},
 	});
 
 	// =============================================================================
@@ -478,14 +456,6 @@ export default function (pi: ExtensionAPI) {
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
 		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const id = (d?.id as string) || "?";
-			const text = theme.fg("success", `✎ report ${id}`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full result content, as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
-		},
 	});
 
 	// =============================================================================
@@ -564,15 +534,6 @@ export default function (pi: ExtensionAPI) {
 				if (!context.expanded) return new Text(text, 0, 0);
 				// Expanded: the full call args (change_summary), as the LLM saw them.
 				return new Text(text + "\n" + fmtArgs(args), 0, 0);
-			},
-			renderResult(result: any, options: any, theme: any) {
-				const d = result.details as Record<string, unknown> | undefined;
-				const st = (d?.status as string) || "?";
-				const color = st === "done" ? "success" : st === "blocked" || st === "cancelled" ? "error" : "accent";
-				const text = theme.fg(color, `● ${st} ${(d?.id as string) || "?"}`);
-				if (!options.expanded) return new Text(text, 0, 0);
-				// Expanded: the full result content (unlocked/notified lists), as the LLM saw it.
-				return new Text(expandedContent(result, text), 0, 0);
 			},
 		};
 	}

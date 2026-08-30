@@ -39,14 +39,6 @@ function fmtArgs(a: Record<string, unknown>): string {
     .join("\n");
 }
 
-function expandedContent(
-  result: { content?: Array<{ type: string; text?: string }> },
-  fallback: string,
-): string {
-  const t = result.content?.[0];
-  return t?.type === "text" && t.text ? t.text : fallback;
-}
-
 // =============================================================================
 // Extension
 // =============================================================================
@@ -115,21 +107,6 @@ export default function (pi: ExtensionAPI) {
       if (!context.expanded) return new Text(text, 0, 0);
       // Expanded: the full call args (role/tools/name), as the LLM saw them.
       return new Text(text + "\n" + fmtArgs(a), 0, 0);
-    },
-    renderResult(result, options, theme) {
-      const d = result.details as Record<string, unknown> | undefined;
-      let text: string;
-      if (d?.error)
-        text = theme.fg("error", "✗ " + (d.error as string));
-      else if (d?.alreadyExists)
-        text = theme.fg("success", "● " + (d.agentName as string) + " already online");
-      else
-        text =
-          theme.fg("success", (d?.error ? "⚠" : "➕") + " " + ((d?.agentName as string) || "?")) +
-          theme.fg("dim", ` [${(d?.role as string) || "?"}]`);
-      if (!options.expanded) return new Text(text, 0, 0);
-      // Expanded: the full result content (role, tools, window), as the LLM saw it.
-      return new Text(expandedContent(result, text), 0, 0);
     },
   });
 
