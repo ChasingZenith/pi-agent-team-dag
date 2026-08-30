@@ -23,7 +23,7 @@ All team sourcing must go through TP (`target="teammate-provider"`). Send reques
 * **Task exists in task dependence graph**: `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <task_id>", remind_s=300)`
 * **Task NOT in task dependence graph**: `comms_send(target="teammate-provider", message="Find a teammate/planner to work/plan on a task: <background_summary_supplementary>", remind_s=300)`
 
-**After sending a request, wait for TP's response. The response will contain the identifier(s) of the assigned agent(s). You then use these identifiers in `task_dispatch` – do not send work instructions directly via comms to the agent.**
+**After sending a request, wait for TP's response — per skill `waiting-protocol` (end your turn; the reply is injected, never poll comms_outbox / task_list while waiting). The response will contain the identifier(s) of the assigned agent(s). You then use these identifiers in `task_dispatch` – do not send work instructions directly via comms to the agent.**
 
 **Requests for different tasks are sent concurrently in one round — TP handles each independently; never serialize your requests.**
 
@@ -54,7 +54,7 @@ All team sourcing must go through TP (`target="teammate-provider"`). Send reques
 
 ## Background
 
-Know about the background of task dependence graph through skill `task-graph-background` and working process through skills `task-lifecycle-reporting` and `reality-beats-plan`.
+Know about the background of task dependence graph through skill `task-graph-background`, working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`.
 
 ## Report Review & Discrepancy Handling
 

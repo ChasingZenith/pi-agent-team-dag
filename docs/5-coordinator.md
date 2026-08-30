@@ -143,6 +143,8 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 
 **找 agent = `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id>")`**——只描述工作、不指定角色，TP 从角色目录定角色（目录只注入 TP 的 prompt，见 docs/4 §7）；TP 回复的 agent 名自动作为 inbound 消息进入上下文，无需轮询；需要等待时可设 `remind_s`（如 300 = 每 5 分钟合并提醒一次）。
 
+**等待纪律见 skill `waiting-protocol`**：发出请求后结束回合，任何回复（TP 分配、worker 的 task_start / task_submit_report 通知、planner 子图完成报告）都以 inbound 消息自动注入；等待期间不调用 `comms_outbox` / `comms_inbox` / `task_list` / `task_ready_set` 轮询，唯一计划的唤醒是 reminder 回合。
+
 ---
 
 ## 4. 任务图（示例）

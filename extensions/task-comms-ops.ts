@@ -280,8 +280,9 @@ export default function (pi: ExtensionAPI) {
 			"The worker's start declaration: moves your item from dispatched to active. Call it when you begin " +
 			"work — after task_read, before execution. Only the dispatched worker can start its item (the tool " +
 			"verifies it is dispatched AND dispatched_to is your agent name); the dispatcher is notified " +
-			"automatically that you have started. The tool also records YOUR execution session (session id + " +
-			"JSONL transcript) on the item, so the manager can open it later and review how the work was done.",
+			"automatically that you have started, via an injected inbound turn that wakes it. The tool also " +
+			"records YOUR execution session (session id + JSONL transcript) on the item, so the manager can " +
+			"open it later and review how the work was done.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the item you were dispatched (must be status dispatched and dispatched to you).",
@@ -378,15 +379,13 @@ export default function (pi: ExtensionAPI) {
 		name: "task_submit_report",
 		label: "Submit Report",
 		description:
-			"Write YOUR completion record onto the task you are dispatched to — the manager reads it from the node " +
-			"before marking the task done. Report what you actually did: brief confirmation when execution matched " +
-			"the plan closely; detailed record of every deviation (failed assumptions, changed approach, " +
-			"verification differences, uncovered work). Only the dispatched worker can write (the tool verifies " +
-			"dispatched_to is your agent name). The tool then replies to your dispatch message: a one-line " +
-			"completion notice to the dispatcher with reply_to_msg_id=<the dispatch message's msg_id> (both from " +
-			"the node's dispatch record: dispatched_by + dispatch_msg_id), stopping the dispatcher's reminder " +
-			"for the delegation. You never pass the reply target or msg_id — they are single-defined by the " +
-			"dispatch; this tool is how you answer a dispatch message.",
+			"Write your completion record to the task you were dispatched to. " +
+        "Report what you actually did: briefly confirm when execution closely matched the plan; otherwise, " +
+        "document every deviation in detail, including failed assumptions, changes in approach, verification " +
+        "differences, and newly uncovered work. Only the dispatched worker may write the record—the tool verifies " +
+        "that dispatched_to matches your agent name. The tool then automatically replies to your dispatch message. " +
+        "This stops the dispatcher's reminder and wakes the dispatcher via an injected inbound turn." +
+        "This tool is the designated way to reply to a dispatch message.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the task you were dispatched (must be dispatched to you).",

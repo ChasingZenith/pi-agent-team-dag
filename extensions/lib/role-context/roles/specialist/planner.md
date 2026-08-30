@@ -23,7 +23,7 @@ Every task created or updated must be self-contained and include:
 
 ## Background
 
-Know about the background of task dependence graph through skill `task-graph-background` and working process through skills `task-lifecycle-reporting` and `reality-beats-plan`.
+Know about the background of task dependence graph through skill `task-graph-background`, working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`.
 
 ### Task Graph Structure & Tools
 
