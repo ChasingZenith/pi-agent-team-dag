@@ -5,7 +5,7 @@
  * fully done. The decision is made at agent_settled — NOT agent_end: pi's
  * agent_end fires when a low-level run ends, but Pi may still auto-retry,
  * auto-compact and retry, or continue with queued follow-up messages (e.g. a
- * comms batch that arrived during the turn). agent_settled fires only when
+ * comms message that arrived during the turn). agent_settled fires only when
  * none of that is left — exactly the "will Pi continue automatically?"
  * question auto-exit needs to answer. The last run's messages are recorded at
  * agent_end (agent_settled carries no messages), and shutdown happens at
@@ -30,9 +30,8 @@
  * Usage:
  *   PI_AGENT_AUTO_EXIT=1 pi -e extensions/auto-exit.ts -e extensions/comms.ts ...
  *
- * Load this AFTER comms.ts so comms's agent_settled handler (which settles
- * — acks — the answered batch and drains anything that queued during the
- * turn) runs before the auto-exit decision at the same agent_settled.
+ * Load this AFTER comms.ts so comms has registered its reminder state
+ * before the auto-exit decision at agent_settled.
  *
  * Note: ctx.shutdown() is a no-op in print mode — this extension targets
  * interactive sessions (spawned agents run interactively via the tmux launch

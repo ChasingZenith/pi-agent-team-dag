@@ -225,8 +225,8 @@ session_shutdown / SIGINT / SIGTERM
 - **回复自动到达**:回复以入站 turn 注入,**无需轮询**
 - `remind_s`(可选,秒,默认 0):挂起提醒 — 未收到回复时每过 `remind_s` 秒向 context 注入**一条合并提醒**(覆盖所有激活提醒);收到回复或消息过期后自动停止,`comms_remind(msg_id, 0)` 取消。**`remind_s=0`(默认) = 纯通知**(不挂提醒、不阻塞 auto-exit;事后可用 `comms_remind(msg_id, N)` 挂上;见 §2.4)
 - `reply_to_msg_id`(可选):**回复模式** — 填你要回复的入站消息的 msg_id;发送方收到后自动记录回复并停止该 msg_id 的提醒循环。回复 = 显式 `comms_send(target=<发送方>, reply_to_msg_id=<msg_id>)`,**没有自动应答**
-- `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `follow-up`(目标当前 turn 完全结束后处理,空闲时立即触发)。两种模式的区分只对**非 comms 批处理轮次**(用户输入轮次 / 其他扩展注入)成立:忙碌时分别为下一 LLM 调用边界 / 当前 turn 结束后;目标正在回答 **comms 批处理轮次**时,批处理轮次不可被打断,`steer` / `follow-up` 一致等到该轮结束、在下一轮开始时投递。空闲时 `steer` / `follow-up` 立即触发
-- 入站批处理:收到的消息先入队,agent 轮次空闲时按到达顺序一次性取出全部,合并注入;批内按 `deliver_as` **分组注入**(steer 组一次、follow-up 组一次,steer 组先行 — 与 pi 的队列消费顺序一致),**不做模式提升** — 每条消息保持自己的投递模式,与 pi.sendMessage 逐条行为一致;消息 gate 到 agent_settled 再 ack,崩溃恢复一致
+- `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `follow-up`(目标当前 turn 完全结束后处理,空闲时立即触发)。两个模式都是 pi 侧语义:消息到达即注入,由 pi 自行排队与投递,comms 层不做任何等待或批次合并
+- 入站注入:每条消息到达即注入 — 单条 framing(标注 sender / msg_id / reply 状态),携带自己的 `deliver_as`(缺省 `steer`,不做模式提升);**注入成功后立即 ack**,失败保持 unacked,5 分钟 `ack_wait` 后由 stream 重投重试;注入后、回合完成前目标崩溃的消息不会被重投,由发送方 `remind_s` 兜底
 - 无跃点限制:转发链不设防循环上限,由使用方自行约束
 - 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `stale` / `offline`)
 - 注意:发送的前提是目标**正在心跳**(名字租约存在);一旦发送成功,消息就留在 stream(TTL 内)——目标随后崩溃/重启,同名重启后由复用同一 consumer 收到(崩溃重投);目标已停机超过租约期(心跳停止 30s 后名字被回收)再发送则报 `target not found`
@@ -286,9 +286,9 @@ status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers
 | agent 崩溃(SIGKILL) | **名字索引(comms_names)TTL 30s 后过期释放**;资料(comms_profiles)**永久保留**,状态由 last_seen_at 推导为 offline;已投递未 ack 的 prompt 重投见下行;发起方的合并提醒继续(见 §2.4) |
 | nats-server 重启 | stream/KV 落盘恢复,消息不丢;客户端自动重连 |
 | 目标离线 | 消息在 stream 中排队(30min TTL);目标重连后由复用同一 consumer 送达(游标续投);TTL 过期未投的消息由 stream 清理;提醒与 expired 语义见 §2.4 |
-| 并发入站 | 队列批处理:按到达顺序合并为一轮注入,agent_settled 统一 ack;turn 中途到达的消息等待下一轮 |
+| 并发入站 | 每条消息到达即注入(目标忙碌时由 pi 的 steer / followUp 队列排队),注入成功即 ack,失败按 ack_wait 重投;无批次等待 |
 | 回复忘记 reply_to_msg_id | 对方回复走普通消息注入,发起方提醒不会自动停止 — 发起方看到内容后自行 `comms_remind(msg_id, 0)` 取消 |
-| 接收方崩溃(未 ack 的消息) | 未 ack 的消息在 5 分钟(ack_wait)后重投,重投后重新注入;已 ack 的消息不重投 |
+| 接收方崩溃(未 ack 的消息) | 未 ack 的消息在 5 分钟(ack_wait)后重投,重投后重新注入;注入成功后已 ack 的消息不重投 — 注入后、回合完成前崩溃的部分由发送方 remind 兜底 |
 | 转发链 | 无跃点限制,转发不受限(由使用方自行约束转发范围) |
 
 ### Token 安全
@@ -344,7 +344,6 @@ extensions/lib/comms/
   registry.ts                         — 注册/心跳/update_profile/watch 缓存
   messaging.ts                        — prompt consumer + send/reply_to_msg_id/合并提醒/过期/去重
   reminder.ts                         — 合并提醒调度器(单 interval,onTick 全量列表)
-  batch.ts                            — 入站队列 + 批次注入/ack(入站 framing,标注身份和 msg_id)
   audit.ts                            — comms-log 审计辅助
   ui/display.ts                      — 共享显示 helper(model 缩写/状态点,纯文本 + theme 着色版;工具渲染内联在 comms.ts)
 scripts/comms-nats/

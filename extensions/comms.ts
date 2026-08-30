@@ -17,10 +17,10 @@
  *     REPLY is a send carrying reply_to_msg_id=<the msg_id you received>; the
  *     sender resolves it and stops the reminder.
  *   - delivery: replies arrive automatically as an inbound turn; there is no
- *     blocking await and no auto-reply. deliver_as (steer / follow-up)
+ *     blocking await and no auto-reply. deliver_as (steer / followUp)
  *     selects how a send is injected at the target — mapped 1:1 to
- *     pi.sendMessage's deliverAs; a batch of messages is split by
- *     deliver_as and each group injected with its own mode (no promotion).
+ *     pi.sendMessage's deliverAs; each message is injected on arrival
+ *     with its own mode (no promotion).
  *   - remind: a reminder is per-message. comms_send(remind_s)
  *     arms it inline; comms_remind(msg_id, remind_s) sets, adjusts or (0)
  *     cancels it afterwards, for any msg_id. While reminders are active, ONE
@@ -58,7 +58,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
-import type { DeliverAsValue, Identity } from "./lib/comms/protocol.ts";
+import type { DeliverAsValue, Identity, InboundContext } from "./lib/comms/protocol.ts";
 import { nowIso, ulid, sanitizeAgentName } from "./lib/comms/protocol.ts";
 import { readConfig, readFrontmatterFromArgv } from "./lib/comms/config.ts";
 import { connectNats, ensureStream, closeNats } from "./lib/comms/nats.ts";
@@ -66,7 +66,6 @@ import * as registry from "./lib/comms/registry.ts";
 import * as messaging from "./lib/comms/messaging.ts";
 import type { ActiveReminder } from "./lib/comms/messaging.ts";
 import { setAudit, audit } from "./lib/comms/audit.ts";
-import * as batch from "./lib/comms/batch.ts";
 import * as history from "./lib/comms/history.ts";
 import { COMMS_RUNTIME_EVENT } from "./lib/comms/runtime";
 import { displayName, shouldOwnName } from "./lib/comms/session-name";
@@ -83,6 +82,44 @@ import { abbreviateModel, statusDot } from "./lib/comms/ui/display.ts";
  * channel).
  */
 let identity: Identity | null = null;
+
+// ━━ Inbound framing (single message) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// The injected-turn prompt for ONE inbound message. The framing shows the
+// msg_id — the address a reply needs — and marks protocol state: a message
+// that IS a reply to one of our pending sends (reply_to_pending) is labelled
+// as a reply to the pending msg_id (this breaks the ping-pong loop); a message
+// that CLAIMED to be a reply but matched no pending send
+// (attempted_reply_to_msg_id) gets a mismatch note instead of being silently
+// treated as an ordinary prompt.
+
+function buildInboundPrompt(inbound: InboundContext): string {
+	if (inbound.reply_to_pending) {
+		return (
+			`[inbound comms message: this is ${inbound.sender_name}'s reply to your comms_send(msg_id=${inbound.reply_to_msg_id})]\n\n` +
+			`${inbound.message}`
+		);
+	}
+	return (
+		`[inbound comms message from ${inbound.sender_name} @ ${inbound.sender_cwd} msg_id=${inbound.msg_id}]\n` +
+		mismatchedReplyNote(inbound) +
+		`\n${inbound.message}`
+	);
+}
+
+/**
+ * When a message claimed to be a reply to one of our sends but the msg_id did
+ * not resolve (foreign id / wrong sender), surface the mismatch instead of
+ * silently injecting it as an ordinary prompt. Empty string when the message
+ * is a genuine plain message.
+ */
+function mismatchedReplyNote(inbound: InboundContext): string {
+	if (!inbound.attempted_reply_to_msg_id) return "";
+	return (
+		`[note: this message was marked as a reply to your msg_id=${inbound.attempted_reply_to_msg_id}, ` +
+		`but it did not match your pending sends — treat it as a normal message; ` +
+		`use comms_outbox(msg_id=${inbound.attempted_reply_to_msg_id}) to check]\n`
+	);
+}
 
 export default function (pi: ExtensionAPI) {
 	// Agent name flag is `--cname`: pi's harness owns `--name` and resumes it.
@@ -264,25 +301,25 @@ export default function (pi: ExtensionAPI) {
 		// (shouldOwnName).
 		applySessionName(identity.current_task);
 
-		// Batch injector (pi.sendMessage wrapper) + consolidated reminder
-		//    injector + messaging config + consumers. The deliverAs comes from
-		//    batch.ts: it splits the batch by deliver_as and injects each
-		//    group with its OWN mode ("steer" then "followUp" — no promotion).
-		batch.setBatchInjector((inboundBatch, message, deliverAs) => {
+		// Inbound injector (pi.sendMessage wrapper) + consolidated reminder
+		//    injector + messaging config + consumers. Every inbound message is
+		//    injected immediately on arrival as its own turn — single-message
+		//    framing (buildInboundPrompt), deliverAs is the message's own mode
+		//    (a missing mode defaults to "steer"; the mode is never promoted). The
+		//    messaging layer awaits the returned promise and acks (or leaves
+		//    unacked for redelivery) once it settles.
+		const injector = async (inbound: InboundContext) => {
 			if (!pi.sendMessage) throw new Error("no session to inject into");
-			pi.sendMessage(
+			return pi.sendMessage(
 				{
 					customType: "comms-inbound",
-					content: message,
+					content: buildInboundPrompt(inbound),
 					display: true,
-					details: {
-						msg_ids: inboundBatch.map((i) => i.msg_id),
-						sender_names: inboundBatch.map((i) => i.sender_name),
-					},
+					details: { msg_id: inbound.msg_id, sender_name: inbound.sender_name },
 				},
-				{ deliverAs, triggerTurn: true },
+				{ deliverAs: inbound.deliver_as ?? "steer", triggerTurn: true },
 			);
-		});
+		};
 		messaging.setRemindInjector((pending: ActiveReminder[]) => {
 			if (!pi.sendMessage) return; // is it really needed?
 			const lines = pending.map((x) =>
@@ -307,7 +344,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		messaging.setMessageTtlMs(cfg.messageTtlMs);
 		history.setHistoryMessageTtlMs(cfg.messageTtlMs); // same TTL drives outbox expired status
-		await messaging.startConsumers(identity, (inbound) => batch.enqueue(inbound));
+		await messaging.startConsumers(identity, injector);
 
 		// Watch the registry (peer cache), re-rendering the footer status and
 		// the belowEditor peers widget whenever the peer set changes
@@ -438,9 +475,10 @@ export default function (pi: ExtensionAPI) {
 			"Send a message to one or more peers on the comms hub.\n\n" +
 			"Calling this function sends the message to the specified peer(s). Each receiver automatically receives the message as an inbound turn or injection — the receiver does NOT need to poll or check an inbox. The exact time and way the message is injected depends on `deliver_as`.\n\n" +
 			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_s` to remind yourself if a reply has not arrived.\n\n" +
-			"REMINDERS AND REPLIES (`remind_s`, seconds; defaults to 0)\n" +
+			"REMINDERS (`remind_s`, seconds; defaults to 0)\n" +
 			"`remind_s = 0` (the default): no reminder; `remind_s > 0`: arm a reminder for this send — while it is active, a reminder turn is periodically injected to you. Same reminder semantics as comms_remind.\n\n" +
-			"You may also use this function to reply to a message received from another peer. Set `reply_to_msg_id` to the `msg_id` of the inbound message you are answering. This explicitly identifies which message your response is replying to. When the original sender receives the reply, their reminder for that message is automatically stopped, so they no longer receive reminders for it.",
+			"REPLYING TO A RECEIVED MESSAGE — REQUIRED FOR PEER-TO-PEER REPLIES\n" +
+			"Writing a response in your own conversation does NOT send it to the peer. To reply, call this tool with `target` set to the peer name from the message framing and `reply_to_msg_id` set to that message's `msg_id`. For any received question, task, or confirmation request, use this tool unless the message explicitly provides another reply method. A valid `reply_to_msg_id` lets the sender associate your message with the original request and stop any reminder for it. Omit `reply_to_msg_id` only when sending a new message that is not a reply.",
 		parameters: Type.Object({
 			target: Type.Optional(Type.String({ description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
 			targets: Type.Optional(Type.Array(Type.String(), { description: "Group send: multiple peer names (CASE-SENSITIVE). Set either target or targets; one msg_id is returned per recipient." })),
@@ -455,7 +493,7 @@ export default function (pi: ExtensionAPI) {
 			})),
 			deliver_as: Type.Optional(Type.Union([
 				Type.Literal("steer", { description: "The message will be injected at the target's next LLM-call boundary (after its current turn's tool calls, before the next response — does not interrupt mid-stream); triggers a turn when idle." }),
-				Type.Literal("follow-up", { description: "The message will be injected after the target's current turn fully ends (immediate when idle)." }),
+				Type.Literal("followUp", { description: "The message will be injected after the target's current turn fully ends (immediate when idle)." }),
 			], { description: "Delivery mode at the target (default \"steer\")." })),
 		}),
 		async execute(_callId, params) {
@@ -802,30 +840,6 @@ pi.registerTool({
 			const task = (args as any).current_task as string | undefined;
 			return new Text(text + (task ? `\ncurrent_task: ${task}` : ""), 0, 0);
 		},
-	});
-
-	// ━━ agent_settled: settle the answered batch ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	// Replies are explicit (comms_send + reply_to_msg_id) — nothing is auto-
-	// submitted here.
-	//
-	// This runs at pi's agent_settled — NOT agent_end: a batch steered into
-	// the run that just ended is acked only after it was really consumed —
-	// any continuation run that drains pi's steering queue runs before
-	// agent_settled, so there is no acked-but-unseen window (an agent_end
-	// settle would ack while the steer still sat in pi's queue).
-	// Ordering contract: auto-exit's shutdown decision also happens at
-	// agent_settled; comms is loaded before auto-exit, so this handler runs
-	// first and the answered batch is acked before the process exits.
-
-	pi.on("agent_settled", async () => {
-		if (!identity || bootFailed) return;
-		const answered = batch.getActiveBatch();
-		if (answered && answered.length > 0) {
-			batch.settleBatch(answered);
-		}
-		// The answered batch is settled; release the turn gate and immediately
-		// drain anything that queued up during the turn.
-		batch.releaseTurn();
 	});
 
 	// ━━ Clean shutdown (idempotent) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -13,14 +13,14 @@
  *    consumer is first created — it is the offline queue for messages that
  *    predate the consumer (explicit ack, ack_wait 5-min redelivery window
  *    (ACK_WAIT_MS), max_deliver 3).
- *    The prompt is held UNACKED from receipt until its batch is settled at
- *    agent_settled — "processing" is literally ack-pending, and a crashed
- *    process redelivers instead of losing. A redelivery of a still-pending
- *    message is NOT dedupe-acked — the stream copy stays alive until its
- *    batch settles (see handlePrompt + batch.isPending).
- *  - inbound batching: prompts queue on arrival; batch.ts drains the WHOLE
- *    queue in order into one active batch between turns, so a burst of
- *    concurrent prompts is answered in a single turn.
+ *  - inject-then-ack: every prompt is injected into pi as it arrives and
+ *    acked the moment injection succeeds — at-most-once delivery at the NATS
+ *    layer; nothing is held ack-pending for a settle phase. A prompt whose
+ *    injection throws stays UNACKED, so ack_wait redelivers it as the retry:
+ *    a redelivered copy is dedupe-acked when the injection had already
+ *    succeeded, re-injected when it had failed (max_deliver 3 bounds the
+ *    retries). The one crash window — injected and acked, but the turn never
+ *    answered — is covered by the sender's remind_s as a fallback.
  *  - replies: a REPLY is a prompt marked with PromptPayload.reply_to_msg_id
  *    (comms_send with reply_to_msg_id). On receipt the sender resolves the
  *    msg_id against its own pending sends: a match records the reply as the
@@ -51,7 +51,6 @@ import {
 	type JsMsg,
 	nanos,
 } from "nats";
-import * as batch from "./batch.ts";
 import type { DeliverAsValue, Identity, InboundContext, PromptPayload } from "./protocol.ts";
 import {
 	ACK_WAIT_MS,
@@ -213,7 +212,7 @@ async function runConsumerLoop(
 	stream: string,
 	durable: string,
 	filterSubject: string,
-	onMsg: (m: JsMsg) => Promise<void> | void,
+	onMsg: (m: JsMsg) => Promise<void>,
 ): Promise<void> {
 	while (!shuttingDown) {
 		try {
@@ -221,11 +220,16 @@ async function runConsumerLoop(
 			const msgs = await consumer.consume();
 
 			for await (const m of msgs) {
-				try {
-					await onMsg(m);
-				} catch {
+				// Inject concurrently: each prompt's own inject-then-ack stays
+				// sequenced inside handlePrompt (a message is acked only after
+				// ITS injection), but a slow injection never holds back the
+				// prompts behind it — pi.sendMessage queues the calls in
+				// arrival order, so delivery order is preserved. Injections
+				// that fail stay unacked and rely on ack_wait redelivery; the
+				// .catch below is a defensive guard (nak for prompt re-delivery).
+				void onMsg(m).catch(() => {
 					try { m.nak(30_000); } catch { /* ignore */ }
-				}
+				});
 			}
 			// Iterator ended without shutdown — consumer went away; recreate.
 			if (!shuttingDown) {
@@ -239,25 +243,29 @@ async function runConsumerLoop(
 }
 
 /**
- * Start the durable prompt consumer. onPrompt is wired by the entry to
- * batch.enqueue (queue + drain). Replies arrive on the same subject with a
+ * Start the durable prompt consumer. The injector is wired by the entry to
+ * pi.sendMessage: every arriving prompt is injected immediately and acked on
+ * success (see handlePrompt). Replies arrive on the same subject with a
  * reply_to_msg_id marker — one consumer carries both.
  */
 export async function startConsumers(
 	identity: Identity,
-	onPrompt: (inbound: InboundContext) => void,
+	injector: (inbound: InboundContext) => Promise<void>,
 ): Promise<void> {
 	setSubnet(identity.subnet);
 	const stream = streamName(identity.subnet);
 
 	void runConsumerLoop(stream, promptDurable(identity.name), msgSubjectPrefix(identity.subnet, identity.name), (m) => {
-		handlePrompt(m, onPrompt, identity);
+		// Each prompt is injected as it arrives (the loop does not await one
+		// before the next); handlePrompt sequences the message's own
+		// inject-then-ack, and pi's sendMessage queues calls in arrival order.
+		return handlePrompt(m, injector, identity);
 	});
 }
 
 // ━━ Prompt / reply inbound ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, identity: Identity): void {
+async function handlePrompt(m: JsMsg, injector: (inbound: InboundContext) => Promise<void>, identity: Identity): Promise<void> {
 	let payload: PromptPayload;
 	try {
 		payload = m.json<PromptPayload>();
@@ -267,13 +275,11 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 	}
 	const msgId = payload.msg_id;
 
-	// Redelivery dedupe: this prompt was already received once. Ack the copy
-	// ONLY when the message is no longer pending in the batch layer — a
-	// message still queued or still in the in-flight batch keeps its stream
-	// copy until its batch settles (dedupe-acking it would discard content
-	// that was never injected).
+	// Redelivery dedupe: this prompt was already injected (and acked below).
+	// Any copy that re-arrives — a lost ack, a racing redelivery — is acked
+	// and dropped; never re-injected. (A redelivery after a FAILED injection
+	// has no mark left: the catch below deletes it, so the retry re-enters.)
 	if (processedIds.has(msgId)) {
-		if (batch.isPending(msgId)) return;
 		try { m.ack(); } catch { /* ignore */ }
 		return;
 	}
@@ -291,8 +297,8 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 		sender_name: payload.sender?.name ?? "unknown",
 		sender_cwd: payload.sender?.cwd ?? "?",
 		message: payload.message,
-		// Unknown/missing deliver_as values normalize to undefined — the batch
-		// then falls back to the default ("steer").
+		// Unknown/missing deliver_as values normalize to undefined — the
+		// injector then falls back to the default ("steer").
 		deliver_as: parseDeliverAs(payload.deliver_as),
 		jsMsg: m,
 	};
@@ -301,7 +307,7 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 	// reminders stops that reminder; the reply is folded into the out history
 	// record below (outbox derives replied from it) and the message still gets
 	// injected as a normal turn — the reply content is what the sender needs
-	// to see (batch.ts marks it as a reply). The match is on the sender NAME
+	// to see (inbound.reply_to_pending marks it as a reply). The match is on the sender NAME
 	// (the stable identity): a sender that crashed and restarted under the
 	// same name still resolves. Anything else — a stray or forged
 	// reply_to_msg_id, or a mix-up between parallel conversations — must NOT
@@ -320,9 +326,8 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 	}
 
 	// Persist inbound content + fold the reply into the out record (best-effort,
-	// non-blocking — a history write must not delay or fail the injection path;
-	// the message stays unacked with its batch regardless). Redeliveries re-enter
-	// here and overwrite the same key — idempotent.
+	// non-blocking — a history write must not delay or fail the injection path).
+	// Redeliveries re-enter here and overwrite the same key — idempotent.
 	void history.recordInbound(identity, inbound)
 		.catch((err: any) => audit("history_write_failed", { direction: "in", msg_id: msgId, reason: err?.message ?? String(err) }));
 	if (payload.reply_to_msg_id) {
@@ -333,18 +338,19 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 		}).catch((err: any) => audit("history_write_failed", { direction: "reply", msg_id: msgId, reply_to: payload.reply_to_msg_id, reason: err?.message ?? String(err) }));
 	}
 
+	// Inject into pi, then ack on success. The injector is AWAITED — the
+	// message reaches pi (pi.sendMessage) before it is acked, and the
+	// consumer loop waits for each injection before delivering the next.
 	try {
-		// The entry's onPrompt wrapper calls batch.enqueue (queue + drain);
-		// if a turn is already active the prompt stays queued in batch.ts.
-		onPrompt(inbound);
-	} catch (err: any) {
-		// Injection failed — batch.ts requeued the whole batch (this message
-		// included) unacked, so do NOT ack the triggering message: it stays
-		// with its batch for the next drain. Its dedupe mark is dropped too —
-		// it was never actually injected, so a redelivery may re-enter.
-		// (The batch's other members keep their marks: a successful retry
-		// settles them, and if injection never recovers the process is
-		// shutting down anyway.)
+		await injector(inbound);
+		try { m.ack(); } catch { /* ignore */ }
+	} catch {
+		// Injection failed: the message stays UNACKED, so NATS redelivers it
+		// on ack_wait and the retry re-enters handlePrompt from the top. The
+		// dedupe mark is dropped — it was never actually injected, so the
+		// redelivered copy may be re-injected. Not rethrown: redelivery IS
+		// the retry mechanism (a throw here would only surface in the
+		// consumer loop and nak it again).
 		processedIds.delete(msgId);
 	}
 }
@@ -379,7 +385,7 @@ export interface SendOptions {
 	/**
 	 * Delivery mode at the target (wire DeliverAsValue, see protocol.ts):
 	 * "steer" (default) — injected at the target's next LLM-call boundary /
-	 * triggers a turn when idle; "follow-up" — after the target's current
+	 * triggers a turn when idle; "followUp" — after the target's current
 	 * turn fully ends.
 	 */
 	deliverAs?: DeliverAsValue;
@@ -467,8 +473,8 @@ export async function send(
 	return { msg_id: msgId, target_status: targetStatus };
 }
 
-// (batch acking lives in batch.ts — every drained batch member is acked
-// there, so a crashed turn redelivers instead of being lost)
+// (Prompt acking happens in handlePrompt — a message is acked the moment its
+// injection succeeds; a failed injection stays unacked and retries via ack_wait.)
 
 // ━━ Reminders ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

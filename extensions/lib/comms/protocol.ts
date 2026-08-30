@@ -222,10 +222,12 @@ export interface Identity {
  *  - "steer"     (default) — injected at the target's next LLM-call boundary
  *                 (after the current turn's tool calls, before the next
  *                 response, not mid-stream); triggers a turn when idle.
- *  - "follow-up" — processed after the target's current turn fully ends
+ *  - "followUp"  — processed after the target's current turn fully ends
  *                 (immediate when idle).
+ * The wire value matches the pi sendMessage deliverAs parameter naming
+ * ("steer" | "followUp" — unified naming across wire and API).
  */
-export type DeliverAsValue = "steer" | "follow-up";
+export type DeliverAsValue = "steer" | "followUp";
 
 /**
  * Validate a wire deliver_as value (it crossed the NATS boundary — could be
@@ -233,7 +235,7 @@ export type DeliverAsValue = "steer" | "follow-up";
  * receiver); known values pass through.
  */
 export function parseDeliverAs(value: unknown): DeliverAsValue | undefined {
-	return value === "steer" || value === "follow-up" ? value : undefined;
+	return value === "steer" || value === "followUp" ? value : undefined;
 }
 
 export interface PromptPayload {
@@ -260,7 +262,7 @@ export interface PromptPayload {
 	deliver_as?: DeliverAsValue;
 }
 
-/** An inbound message (or reply) queued for the next batch-injected turn. */
+/** An inbound message (or reply) injected on arrival into the target session. */
 export interface InboundContext {
 	msg_id: string;
 	sender_name: string;
@@ -272,15 +274,16 @@ export interface InboundContext {
 	reply_to_pending?: boolean;
 	/** Set when the message's reply_to_msg_id FAILED to resolve against our
 	 *  pending sends (foreign id, or a sender other than the target we sent
-	 *  to) — the batch framing surfaces the mismatch so the agent can chase it
+	 *  to) — the framing surfaces the mismatch so the agent can chase it
 	 *  via comms_outbox instead of silently treating it as an ordinary prompt. */
 	attempted_reply_to_msg_id?: string;
 	/**
 	 * Delivery mode requested by the sender (wire DeliverAsValue, validated).
-	 * Undefined = sender did not specify — the batch falls back to "steer".
+	 * Undefined = sender did not specify — delivery falls back to "steer".
 	 */
 	deliver_as?: DeliverAsValue;
-	/** The JetStream message — held unacked until its batch is settled. */
+	/** The JetStream message — acked by the receiver as soon as injection
+	 *  succeeds; left unacked on failure so the stream redelivers it. */
 	jsMsg: JsMsg;
 }
 
