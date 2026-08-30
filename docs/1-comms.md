@@ -99,7 +99,7 @@ Agent A (发送方)              NATS                    Agent B (接收方)
 
 ### 2.4 显式回复 + 定时提醒
 
-回复是**显式的**:调用 `comms_send(target=<发送方名字>, message="<回复内容>", reply_to_msg_id=<入站消息的 msg_id>)`——系统不自动应答,回复必须由接收方显式发起。发送方收到 `reply_to_msg_id` 命中自己**激活提醒条目**的消息时,自动把回复内容写入该发送的历史记录(`comms_outbox` 可查)并**停止该消息的提醒**;回复本身以普通入站 turn 自动到达——**接收方无需轮询**(工具语义见 §6.2)。
+回复是**显式的**:调用 `comms_send(target=<发送方名字>, message="<回复内容>", reply_to_msg_id=<入站消息的 msg_id>)`——系统不自动应答,回复必须由接收方显式发起。发送方收到 `reply_to_msg_id` 命中自己**激活提醒条目**的消息时,自动把回复的 msg_id 记入该发送的历史记录(`comms_outbox` 可查状态与 reply msg_id,完整回复经 `comms_inbox <reply_msg_id>` 重读)并**停止该消息的提醒**;回复本身以普通入站 turn 自动到达——**接收方无需轮询**(工具语义见 §6.2)。
 
 **合并定时提醒**:提醒是**按消息**挂载的:每条提醒绑定一条消息的 `msg_id`,方向覆盖两个方向——自己**发出的**(等待回复)与**收到的**(收到后要跟进)。`comms_send(..., remind_s=<seconds>)` 挂上;之后用 `comms_remind(msg_id, remind_s)` 设置/调整/取消(语义见 §6.5)。激活的提醒每过一个间隔向 context 注入**一条合并提醒**,列出**所有**激活提醒(方向、对方、内容摘要、提醒间隔、已等时长、TTL 倒计时),而不是每条消息一条提醒。提醒在以下情况结束:
 
@@ -233,13 +233,13 @@ session_shutdown / SIGINT / SIGTERM
 
 ### 6.3 `comms_outbox` — 重读自己发送的消息(含状态与回复)
 - 数据源:**持久化消息历史(comms_history,bucket TTL 默认 24h)** — compact 或重启后仍可重读;状态由历史记录推导:`replied` / `expired` / `waiting`
-- `msg_id`(可选):单条详情 — 发送全文、状态(`waiting` / `ended` + `reason`)、收到的回复全文;如果该消息的提醒激活中,额外标注 `· remind N`(会话内存,重启后消失)。省略时列出最近发送(新→旧,状态 + 内容摘要,`limit` 默认 10,最大 100)
-- `reason`(仅 `ended`):`replied`(收到回复,内容在返回里)/ `expired`(超过消息 TTL 仍未收到回复,目标很可能从未收到)
+- `msg_id`(可选):单条详情 — 发送全文、状态(`waiting` / `ended` + `reason`)、收到回复时的**回复 msg_id**(完整内容经 `comms_inbox <msg_id>` 重读,不在 outbox 里重复);如果该消息的提醒激活中,额外标注 `· remind N`(会话内存,重启后消失)。省略时列出最近发送(新→旧,状态 + 内容摘要,`limit` 默认 10,最大 100);总数超过 `limit` 时标题标注总数并只列最新 `limit` 条
+- `reason`(仅 `ended`):`replied`(收到回复,返回里有回复的 msg_id,内容经 `comms_inbox` 重读)/ `expired`(超过消息 TTL 仍未收到回复,目标很可能从未收到)
 
 ### 6.4 `comms_inbox` — 重读收到的消息
 - 数据源:同一持久化消息历史 — compact 或重启后重读收到的内容、找回丢失的 msg_id
-- `msg_id`(可选):单条详情 — 发送方、时间戳、reply 关联、全文;省略时列出最近收到的消息(新→旧,发送方 + 内容摘要,`limit` 默认 10,最大 100)
-- 回复也会落在这里(标注 `reply to <msg_id>`);已回复的发送在 `comms_outbox` 侧同样可查
+- `msg_id`(可选):单条详情 — 发送方、时间戳、reply 关联、全文;省略时列出最近收到的消息(新→旧,发送方 + 内容摘要,`limit` 默认 10,最大 100);总数超过 `limit` 时标题标注总数并只列最新 `limit` 条
+- 回复也会落在这里(标注 `reply to <msg_id>`);回复的**完整内容只在 inbox**(outbox 侧只记 msg_id,见 §6.3)
 
 ### 6.5 `comms_remind` — 设置 / 调整 / 取消提醒
 - `msg_id`:**任意消息**的 msg_id — 自己发出的(`comms_send` 返回)或收到的(`comms_inbox` 返回)

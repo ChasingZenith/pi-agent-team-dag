@@ -15,10 +15,11 @@
  *   out records  what WE sent (target, content, optional reply link + ended)
  *   in  records  what we RECEIVED (sender, content, optional reply_to_msg_id)
  *
- * The reply is folded INTO the out record when it arrives (one key read makes
- * an outbox(msg_id) detail self-contained). All writes are best-effort
- * fire-and-forget by the callers — a history write must never fail a send or
- * delay injection.
+ * A reply is BOTH a normal inbound record (read via comms_inbox) and folded
+ * into the matching out record as metadata only (msg_id/sender/ts, so outbox
+ * derivation can see "replied") — the reply's content is never duplicated
+ * into the out record. All writes are best-effort fire-and-forget by the
+ * callers — a history write must never fail a send or delay injection.
  *
  * TTL note: the bucket TTL is applied on FIRST creation only (views.kv binds
  * an existing bucket without re-applying options) — changing
@@ -62,7 +63,6 @@ export interface HistoryOutRecord {
 export interface OutReply {
 	msg_id: string;
 	sender: string;
-	message: string;
 	ts: number;
 }
 
@@ -81,7 +81,7 @@ export interface HistoryInRecord {
  *  beyond max chars — for list-mode rows, never a semantic summary. */
 export function flatten(text: string, max = 120): string {
 	const clean = text.replace(/\s+/g, " ").trim();
-	return clean.length > max ? `${clean.slice(0, max)}…` : clean;
+	return clean.length > max ? `${clean.slice(0, max)}… (truncated)` : clean;
 }
 
 // ━━ Writes (best-effort; callers fire-and-forget with .catch) ━━━━━━━━━━━━━━━
@@ -144,7 +144,7 @@ export function deriveOutStatus(rec: HistoryOutRecord): { state: "waiting" | "en
 	return { state: "waiting" };
 }
 
-async function list<T>(prefix: string, limit: number): Promise<T[]> {
+async function list<T>(prefix: string): Promise<T[]> {
 	// history({ key }) treats the key as an EXACT subject filter — append ">"
 	// to make it a prefix match ("h…out.>" matches "h…out.<msgid>", and the
 	// dot boundary keeps a sibling like "<sid>.out2.<msg>" out). Re-filter
@@ -163,11 +163,12 @@ async function list<T>(prefix: string, limit: number): Promise<T[]> {
 	return entries;
 }
 
-/** Our outbound history, newest first, capped at limit. */
-export async function listOutbound(subnet: string, name: string, limit: number): Promise<HistoryOutRecord[]> {
-	const recs = await list<HistoryOutRecord>(historyOutPrefix(subnet, name), limit);
+/** Our outbound history, newest first, capped at limit. total = all records
+ *  (before the cap) so the caller can tell the agent when the list is cut. */
+export async function listOutbound(subnet: string, name: string, limit: number): Promise<{ records: HistoryOutRecord[]; total: number }> {
+	const recs = await list<HistoryOutRecord>(historyOutPrefix(subnet, name));
 	recs.sort((a, b) => b.ts - a.ts);
-	return recs.slice(0, limit);
+	return { records: recs.slice(0, limit), total: recs.length };
 }
 
 export async function getOutbound(subnet: string, name: string, msgId: string): Promise<HistoryOutRecord | null> {
@@ -181,11 +182,12 @@ export async function getOutbound(subnet: string, name: string, msgId: string): 
 	}
 }
 
-/** Our inbound history, newest first, capped at limit. */
-export async function listInbound(subnet: string, name: string, limit: number): Promise<HistoryInRecord[]> {
-	const recs = await list<HistoryInRecord>(historyInPrefix(subnet, name), limit);
+/** Our inbound history, newest first, capped at limit (total = all records,
+ *  before the cap — same contract as listOutbound). */
+export async function listInbound(subnet: string, name: string, limit: number): Promise<{ records: HistoryInRecord[]; total: number }> {
+	const recs = await list<HistoryInRecord>(historyInPrefix(subnet, name));
 	recs.sort((a, b) => b.ts - a.ts);
-	return recs.slice(0, limit);
+	return { records: recs.slice(0, limit), total: recs.length };
 }
 
 export async function getInbound(subnet: string, name: string, msgId: string): Promise<HistoryInRecord | null> {

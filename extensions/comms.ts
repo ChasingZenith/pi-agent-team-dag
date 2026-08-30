@@ -535,9 +535,10 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Re-read the messages YOU sent (comms_send), with status and any reply — from the persistent " +
 			"message history (comms_history KV bucket, default TTL 24h), so it works even after a compact or restart.\n\n" +
-			"With no msg_id: list your recent sends, newest first (status + content summary; limit defaults to 10).\n" +
+			"With no msg_id: list your recent sends, newest first (status + content summary; limit defaults to 10 — " +
+			"if the total exceeds the limit, the header says so and shows only the latest ones).\n" +
 			"With msg_id: full detail — sent content, state (waiting / ended: replied / expired), the live remind " +
-			"marker if a reminder is active, and the reply content when replied. A reply also lands in comms_inbox.\n\n" +
+			"marker if a reminder is active, and the reply's msg_id when replied.\n\n" +
 			"Reminder state is per-process memory; after a restart the status is derived from the " +
 			"persisted history instead.",
 		parameters: Type.Object({
@@ -559,7 +560,7 @@ export default function (pi: ExtensionAPI) {
 			// persisted record (survives restarts); the live reminder table only
 			// overlays the remind marker on top.
 			if (!msgId) {
-				const records = await history.listOutbound(self.subnet, self.name, limit);
+				const { records, total } = await history.listOutbound(self.subnet, self.name, limit);
 				const live = new Map<string, ActiveReminder>();
 				for (const x of messaging.listActiveReminders()) live.set(x.msg_id, x);
 
@@ -577,10 +578,13 @@ export default function (pi: ExtensionAPI) {
 					if (records.some((r) => r.msg_id === id)) continue;
 					lines.push(`  ${id} to ${li.target} — ${li.summary} — "(content not recorded)"`);
 				}
-				const text = lines.length > 0
-					? `comms_outbox: ${lines.length} send(s)\n${lines.join("\n")}`
-					: "comms_outbox: no sends recorded";
-				return { content: [{ type: "text" as const, text }] };
+				if (lines.length === 0) {
+					return { content: [{ type: "text" as const, text: "comms_outbox: no sends recorded" }] };
+				}
+				const header = total > records.length
+					? `comms_outbox: ${total} send(s) — showing latest ${records.length}`
+					: `comms_outbox: ${total} send(s)`;
+				return { content: [{ type: "text" as const, text: `${header}\n${lines.join("\n")}` }] };
 			}
 
 			// Detail mode: status derives from the persisted record (survives
@@ -603,8 +607,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			text += `\nmessage: ${rec.message}`;
 			if (s.reason === "replied" && rec.reply) {
-				const response = rec.reply.message;
-				text += `\nreply: ${typeof response === "string" ? response : JSON.stringify(response, null, 2)}`;
+				text += `\nreplied by ${rec.reply.sender} — reply msg_id ${rec.reply.msg_id}`;
 			}
 			return { content: [{ type: "text" as const, text }] };
 		},
@@ -620,7 +623,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Comms Inbox",
 		description:
 			"List or re-read messages you RECEIVED from other peers.\n\n" +
-			"With no msg_id: list your recent received messages, newest first (sender and content summary; default limit: 10).\n" +
+			"With no msg_id: list your recent received messages, newest first (sender and content summary; default limit: 10 — " +
+			"if the total exceeds the limit, the header says so and shows only the latest ones).\n" +
 			"With msg_id: retrieve the full details of that specific message, including the sender, timestamp, reply linkage, and full content.\n\n" +
 			"Normally, inbound messages are automatically delivered to you as inbound turns or injections. You do NOT need to poll this inbox to check for new messages; they are automatically disclosed in your LLM context when delivered.\n\n" +
 			"This tool is primarily for recovering or re-reading past communication when the current context is no longer sufficient — for example, after context compaction or a restart, when communication with peers appears inconsistent, or when you need to recover a previous message or its msg_id. Received-message history is kept separately in persistent message history for up to 24 hours.\n\n" +
@@ -642,7 +646,7 @@ export default function (pi: ExtensionAPI) {
 
 			// List mode: recent received messages, newest first.
 			if (!msgId) {
-				const records = await history.listInbound(self.subnet, self.name, limit);
+				const { records, total } = await history.listInbound(self.subnet, self.name, limit);
 				if (records.length === 0) {
 					return {
 						content: [{ type: "text" as const, text: "comms_inbox: no received messages recorded" }],
@@ -652,8 +656,11 @@ export default function (pi: ExtensionAPI) {
 					`  ${r.msg_id} from ${r.sender}` +
 					(r.reply_to_msg_id ? ` (reply to ${r.reply_to_msg_id})` : "") +
 					` — "${history.flatten(r.message)}"`);
+				const header = total > records.length
+					? `comms_inbox: ${total} message(s) — showing latest ${records.length}`
+					: `comms_inbox: ${total} message(s)`;
 				return {
-					content: [{ type: "text" as const, text: `comms_inbox: ${records.length} message(s)\n${lines.join("\n")}` }],
+					content: [{ type: "text" as const, text: `${header}\n${lines.join("\n")}` }],
 				};
 			}
 

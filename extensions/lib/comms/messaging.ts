@@ -332,7 +332,6 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 		void history.recordReplyIntoOut(identity, payload.reply_to_msg_id, {
 			msg_id: msgId,
 			sender: inbound.sender_name,
-			message: payload.message,
 			ts: Date.now(),
 		}).catch((err: any) => audit("history_write_failed", { direction: "reply", msg_id: msgId, reply_to: payload.reply_to_msg_id, reason: err?.message ?? String(err) }));
 	}
