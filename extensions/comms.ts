@@ -291,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 			);
 		});
 		messaging.setRemindInjector((pending: PendingInfo[]) => {
-			if (!pi.sendMessage) return;
+			if (!pi.sendMessage) return; // is it really needed?
 			const lines = pending.map((x) =>
 				`  msg_id ${x.msg_id} to ${x.target} (${x.target_status}) — ${fmtMs(x.elapsed_ms)} elapsed` +
 				(x.expires_in_ms !== null ? ` · expires in ${fmtMs(x.expires_in_ms)}` : ""));
@@ -300,10 +300,7 @@ export default function (pi: ExtensionAPI) {
 					customType: "comms-reminder",
 					content:
 						`[comms reminder] ${pending.length} pending send(s) awaiting replies:\n` +
-						lines.join("\n") +
-						`\nFor each send: ① comms_outbox(msg_id=…) to check status; ` +
-						`② comms_dismiss(msg_id=…) if the target is offline or you no longer need it; ` +
-						`③ or solve it another way. No reply needed to this reminder.`,
+						lines.join("\n"),
 					display: true,
 					details: { pending },
 				},
@@ -456,20 +453,18 @@ export default function (pi: ExtensionAPI) {
 		name: "comms_send",
 		label: "Comms Send",
 		description:
-			"Send a message to one or more peer agents on the comms hub. The reply arrives AUTOMATICALLY as an " +
-			"inbound turn — you do NOT need to poll or wait.\n\n" +
-			"The target must be heartbeating (its name lease alive); the message is held by the stream up to its TTL — " +
-			"a target that crashes after the send and restarts under the same name still receives it. A target whose " +
-			"name was reclaimed fails with target not found.\n\n" +
-			"REPLYING to an inbound message: set reply_to_msg_id=<the msg_id you received>. The sender stops its " +
-			"reminder for that msg_id and records your reply (readable via comms_outbox).\n\n" +
-			"TRACKING (optional remind_ms): omit it for a tracked send with no reminder; remind_ms>0 (e.g. 300000 = " +
-			"every 5 min) arms ONE consolidated reminder per interval covering all your pending sends while any reply " +
-			"is pending — it does NOT block; remind_ms=0 sends fire-and-forget (no tracking — no reminder, no reply " +
-			"expectation, not listed as waiting in comms_outbox; still recorded in comms_history). Use 0 only for " +
-			"one-way announcements nobody needs to reply to. Stop tracking a send with comms_dismiss(msg_id=...).\n\n" +
-			"DELIVERY MODE (optional deliver_as): \"steer\" (default), \"follow-up\", or \"next turn\" — see the " +
-			"deliver_as parameter for what each mode does.",
+			"Send a message to one or more peers on the comms hub.\n\n" +
+			"Calling this function sends the message to the specified peer(s). Each receiver automatically receives the message as an inbound turn or injection — the receiver does NOT need to poll or check an inbox. The exact time and way the message is injected depends on `deliver_as`.\n\n" +
+			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_ms` to remind yourself if a reply has not arrived.\n\n" +
+			"REMINDERS AND REPLY TRACKING (`remind_ms`)\n" +
+			"By default, a sent message is tracked as awaiting a possible reply. If you set `remind_ms > 0`, the system periodically reminds YOU, the sender, while one or more tracked messages remain unanswered. The reminder is not sent to the receiver and does not retry delivery. Its purpose is to help you notice that the peer may still be working, may have missed the message, or may need additional information or assistance. When reminded, you can decide whether to send a follow-up, clarify or synchronize information, help unblock the peer, or revise your plan.\n\n" +
+			"- Omit `remind_ms`: track the send, but do not schedule reminders.\n" +
+			"- `remind_ms > 0`: track the send and remind the sender while replies are pending. One consolidated reminder covers all pending sends.\n" +
+			"- `remind_ms = 0`: fire-and-forget. The message is not tracked as awaiting a reply and generates no reminder. Use this only for one-way announcements that do not need a response.\n\n" +
+			"You may also use this function to reply to a message received from another peer. Set `reply_to_msg_id` to the `msg_id` of the inbound message you are answering. This explicitly identifies which message your response is replying to. When the original sender receives the reply, their pending reminder/tracking for that message is automatically resolved, so they no longer receive reminders for it.\n\n" +
+			"DELIVERY MODE (`deliver_as`)\n" +
+			"`deliver_as` controls when the receiver gets the message relative to its current turn. See the `deliver_as` parameter for the behavior of `\"steer\"` (default), `\"follow-up\"`, and `\"next turn\"`.",
+
 		parameters: Type.Object({
 			target: Type.Optional(Type.String({ description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
 			targets: Type.Optional(Type.Array(Type.String(), { description: "Group send: multiple peer names (CASE-SENSITIVE). Set either target or targets; one msg_id is returned per recipient." })),
@@ -477,16 +472,16 @@ export default function (pi: ExtensionAPI) {
 			remind_ms: Type.Optional(Type.Number({
 				minimum: 0,
 				maximum: 3_600_000,
-				description: "Reminder interval in ms. Omitted: tracked but no reminder (replies still resolve, comms_outbox can poll). >0 (1000-3600000, e.g. 300000 = every 5 min): while any send is unanswered, one consolidated reminder is injected every remind_ms. 0: fire-and-forget announcement — sent WITHOUT tracking: no reminder, no reply resolution, no comms_outbox \"waiting\" entry (still recorded in comms_history). Use 0 only for one-way announcements nobody needs to reply to.",
+				description: "Reminder interval in ms. Omitted: tracked but no reminder (replies still resolve — they arrive as inbound turns). >0 (1000-3600000): while any send is unanswered, one consolidated reminder is injected every remind_ms. 0: fire-and-forget announcement — sent WITHOUT tracking: no reminder, no reply resolution, no comms_outbox \"waiting\" entry (still recorded in comms_history). Use 0 only for one-way announcements nobody needs to reply to.",
 			})),
 			reply_to_msg_id: Type.Optional(Type.String({
 				description: "Reply mode: the msg_id of the message you are answering (an inbound msg_id you received). Marks this send as a reply; the sender stops its reminder and records your message as the reply.",
 			})),
 			deliver_as: Type.Optional(Type.Union([
-				Type.Literal("steer", { description: "Injected at the target's next LLM-call boundary (after its current turn's tool calls, before the next response — does not interrupt mid-stream); triggers a turn when idle." }),
-				Type.Literal("follow-up", { description: "Processed after the target's current turn fully ends (immediate when idle)." }),
-				Type.Literal("next turn", { description: "Delivered at the start of the target's NEXT turn (pi's nextTurn): enters the target's next-turn queue and is injected when the next turn starts — waits while the target is busy; never triggers a turn itself (an idle target sees it on its next user input or other injection)." }),
-			], { description: "Delivery mode at the target (default \"steer\"). The modes differ while the target is busy with a user prompt or another extension's turn; during a comms-injected batch turn every mode waits for that turn to end." })),
+				Type.Literal("steer", { description: "The message will be injected at the target's next LLM-call boundary (after its current turn's tool calls, before the next response — does not interrupt mid-stream); triggers a turn when idle." }),
+				Type.Literal("follow-up", { description: "The message will be injected after the target's current turn fully ends (immediate when idle)." }),
+				Type.Literal("next turn", { description: "The message will be injected at the start of the target's NEXT turn (pi's nextTurn): enters the target's next-turn queue and is injected when the next turn starts — waits while the target is busy; never triggers a turn itself (an idle target sees it on its next user input or other injection)." }),
+			], { description: "Delivery mode at the target (default \"steer\")." })),
 		}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
@@ -704,12 +699,12 @@ export default function (pi: ExtensionAPI) {
 		name: "comms_inbox",
 		label: "Comms Inbox",
 		description:
-			"Re-read the messages you RECEIVED — from the persistent message history (comms_history KV bucket, " +
-			"default TTL 24h), so content survives a compact or restart. Replies arrive as normal inbound turns and " +
-			"also land here, marked as replies. Normally you do NOT need this — use it to re-read an inbound message " +
-			"whose content was compacted away, or to recover a msg_id.\n\n" +
-			"With no msg_id: list your recent received messages, newest first (sender + content summary; limit " +
-			"defaults to 10).\nWith msg_id: full detail — sender, timestamp, reply linkage, and the full content.",
+			"List or re-read messages you RECEIVED from other peers.\n\n" +
+			"With no msg_id: list your recent received messages, newest first (sender and content summary; default limit: 10).\n" +
+			"With msg_id: retrieve the full details of that specific message, including the sender, timestamp, reply linkage, and full content.\n\n" +
+			"Normally, inbound messages are automatically delivered to you as inbound turns or injections. You do NOT need to poll this inbox to check for new messages; they are automatically disclosed in your LLM context when delivered.\n\n" +
+			"This tool is primarily for recovering or re-reading past communication when the current context is no longer sufficient — for example, after context compaction or a restart, when communication with peers appears inconsistent, or when you need to recover a previous message or its msg_id. Received-message history is kept separately in persistent message history for up to 24 hours.\n\n" +
+			"Use this tool to look up or recover past inbound messages, not as a polling mechanism for new messages.",
 		parameters: Type.Object({
 			msg_id: Type.Optional(Type.String({ description: "msg_id of a received message. Omit to list your recent received messages (newest first)." })),
 			limit: Type.Optional(Type.Number({
@@ -830,8 +825,6 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Declare what you are currently working on to the comms hub. Peers — especially the Teammate Provider " +
 			"when matching you to incoming work — use it to decide whether you are available for reuse. " +
-			"Task lifecycle tools set it automatically (task_start declares the task title, task_submit_report " +
-			"clears it) — use this tool to override the auto value or declare other work. " +
 			"Only the fields you pass are updated; visible to peers immediately.",
 		parameters: Type.Object({
 			current_task: Type.Optional(Type.String({

@@ -194,7 +194,7 @@ export default function (pi: ExtensionAPI) {
 				description: "The agent to delegate to — the name from the Teammate Provider's reply to your comms_send.",
 			}),
 			message: Type.String({
-				description: "Supplemental info to help the worker execute (a constant dispatch header is always placed first automatically).",
+				description: "Supplemental info to help the worker execute (a constant dispatch header is always placed first automatically). ONLY information not already in the task's description — e.g. peer names to collaborate with. The dispatch header instructs the worker to task_read the task itself, so the description, goals, background and acceptance criteria are already at its side; do NOT restate them here (two copies drift). Pass \"\" if there is nothing to add.",
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate) {
@@ -249,8 +249,8 @@ export default function (pi: ExtensionAPI) {
 						type: "text" as const,
 						text:
 							`task_dispatch: "${r.item.id}" → ${p.agent} (msg ${sendResult.msg_id.slice(-8)}, target ${sendResult.target_status})\n` +
-							`  status: dispatched, dispatched_to: ${p.agent} — the worker flips it to active via task_start when it starts\n` +
-							`  The reply will arrive as an inbound message; reminders fire every 5 min until then.`,
+							`  status: dispatched, dispatched_to: ${p.agent}\n` +
+							` reminders fire every 5 min.`,
 					},
 				],
 				details: {

@@ -33,8 +33,8 @@ Record the confirmed requirement in the task graph and hand it to a Coordinator 
    * **Constraints** — deadlines, technology, resources
    * **Non-goals** — what is explicitly out of scope
    * **Risks** — known risks / open questions for the Coordinator
-2. **Request an owner through the Teammate Provider.** `comms_send(target="{{tp_name}}", message="Find a coordinator to work on a task: <task_id>", remind_ms=<ms>)` — the TP spawns a Coordinator and returns its name.
-3. **Dispatch.** `task_dispatch(task_id=<task_id>, agent=<the coordinator's name from the TP's reply>, message=<context not already in the description>)`. The Coordinator takes ownership by calling `task_start`.
+2. **Request an owner through the Teammate Provider.** `comms_send(target="{{tp_name}}", message="Find a coordinator to work on a task: <task_id>", remind_ms=<ms>)` — the TP finds you a Coordinator and returns its name.
+3. **Dispatch.** `task_dispatch(task_id=<task_id>, agent=<the coordinator's name from the TP's reply>, message=<only context not already in the description; pass "" if nothing to add>)`.
 
 The goal may be long-term — the Coordinator will decompose it into tasks. Your job ends at the dispatch: once the task is dispatched, confirm and exit.
 
