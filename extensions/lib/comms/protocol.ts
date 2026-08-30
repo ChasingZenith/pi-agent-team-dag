@@ -224,13 +224,8 @@ export interface Identity {
  *                 response, not mid-stream); triggers a turn when idle.
  *  - "follow-up" — processed after the target's current turn fully ends
  *                 (immediate when idle).
- *  - "next turn" — enters the target's next-turn queue (pi's deliverAs
- *                 "nextTurn"): injected at the start of the target's next
- *                 turn, whenever that is; it never triggers a turn itself
- *                 (an idle target waits for the next user input or other
- *                 injection).
  */
-export type DeliverAsValue = "steer" | "follow-up" | "next turn";
+export type DeliverAsValue = "steer" | "follow-up";
 
 /**
  * Validate a wire deliver_as value (it crossed the NATS boundary — could be
@@ -238,7 +233,7 @@ export type DeliverAsValue = "steer" | "follow-up" | "next turn";
  * receiver); known values pass through.
  */
 export function parseDeliverAs(value: unknown): DeliverAsValue | undefined {
-	return value === "steer" || value === "follow-up" || value === "next turn" ? value : undefined;
+	return value === "steer" || value === "follow-up" ? value : undefined;
 }
 
 export interface PromptPayload {

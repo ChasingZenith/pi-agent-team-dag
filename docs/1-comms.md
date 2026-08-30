@@ -15,7 +15,7 @@
 - **跨重启复用**:地址以名字锚定、不随进程变化——同名重启复用同一 durable consumer(干净关闭也不删除),未 ack 的 prompt 重投、已 ack 的不重放、离线期间积累的消息续投(stream TTL 内);outbox/inbox 历史同样跨重启可读(见 §2.1.1、§9)
 - **显式回复**:回复 = `comms_send(target=<发送方>, reply_to_msg_id=<收到的 msg_id>)`,无自动应答;回复自动以入站 turn 到达,无需轮询(见 §2.4、§6.2)
 - **合并定时提醒**:提醒按**消息**挂载→ `comms_send(remind_s=<seconds>)` 挂上,事后用 `comms_remind(msg_id, remind_s)` 设置/调整/取消;激活的提醒每过一个间隔注入**一条合并提醒**(覆盖所有激活提醒),到期停止提醒;完全不带提醒的发送(默认 `remind_s=0`)即单向纯通知(见 §2.4)
-- **投递模式可选**:`comms_send(deliver_as=…)` 控制消息到达对端 agent 的投递方式 — `steer`(默认)/ `follow-up` / `next turn`(语义见 §6.2)
+- **投递模式可选**:`comms_send(deliver_as=…)` 控制消息到达对端 agent 的投递方式 — `steer`(默认)/ `follow-up`(语义见 §6.2)
 - Bearer token 认证(NATS 原生,默认自动生成,0600 持久化)
 - 客户端原生自动重连(指数退避由 NATS 客户端处理)
 
@@ -225,8 +225,8 @@ session_shutdown / SIGINT / SIGTERM
 - **回复自动到达**:回复以入站 turn 注入,**无需轮询**
 - `remind_s`(可选,秒,默认 0):挂起提醒 — 未收到回复时每过 `remind_s` 秒向 context 注入**一条合并提醒**(覆盖所有激活提醒);收到回复或消息过期后自动停止,`comms_remind(msg_id, 0)` 取消。**`remind_s=0`(默认) = 纯通知**(不挂提醒、不阻塞 auto-exit;事后可用 `comms_remind(msg_id, N)` 挂上;见 §2.4)
 - `reply_to_msg_id`(可选):**回复模式** — 填你要回复的入站消息的 msg_id;发送方收到后自动记录回复并停止该 msg_id 的提醒循环。回复 = 显式 `comms_send(target=<发送方>, reply_to_msg_id=<msg_id>)`,**没有自动应答**
-- `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,三个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `follow-up`(目标当前 turn 完全结束后处理,空闲时立即触发)/ `next turn`(进入目标的 next-turn 队列,在目标**下一次 turn 开始时**注入 — 目标忙碌时等其当前 turn 结束再注入;**空闲时不主动触发**,等下一次 turn(用户输入或其他注入)到来时随其注入)。三种模式的区分只对**非 comms 批处理轮次**(用户输入轮次 / 其他扩展注入)成立:忙碌时分别为下一 LLM 调用边界 / 当前 turn 结束后 / 下一个 turn 开始时;目标正在回答 **comms 批处理轮次**时,批处理轮次不可被打断,`steer` / `follow-up` 一致等到该轮结束、在下一轮开始时投递。空闲时 `steer` / `follow-up` 立即触发,`next turn` 不触发
-- 入站批处理:收到的消息先入队,agent 轮次空闲时按到达顺序一次性取出全部,合并注入;批内按 `deliver_as` **分组注入**(steer 组一次、follow-up 组一次,steer 组先行 — 与 pi 的队列消费顺序一致),**不做模式提升** — 每条消息保持自己的投递模式,与 pi.sendMessage 逐条行为一致。`next turn` 消息不参与批处理 — 到达即直送目标 pi 的 next-turn 队列并在注入时确认(pi 进程崩溃时随进程丢失,与 pi 原生 nextTurn 消息一致);其余消息 gate 到 agent_settled 再 ack,崩溃恢复一致
+- `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `follow-up`(目标当前 turn 完全结束后处理,空闲时立即触发)。两种模式的区分只对**非 comms 批处理轮次**(用户输入轮次 / 其他扩展注入)成立:忙碌时分别为下一 LLM 调用边界 / 当前 turn 结束后;目标正在回答 **comms 批处理轮次**时,批处理轮次不可被打断,`steer` / `follow-up` 一致等到该轮结束、在下一轮开始时投递。空闲时 `steer` / `follow-up` 立即触发
+- 入站批处理:收到的消息先入队,agent 轮次空闲时按到达顺序一次性取出全部,合并注入;批内按 `deliver_as` **分组注入**(steer 组一次、follow-up 组一次,steer 组先行 — 与 pi 的队列消费顺序一致),**不做模式提升** — 每条消息保持自己的投递模式,与 pi.sendMessage 逐条行为一致;消息 gate 到 agent_settled 再 ack,崩溃恢复一致
 - 无跃点限制:转发链不设防循环上限,由使用方自行约束
 - 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `stale` / `offline`)
 - 注意:发送的前提是目标**正在心跳**(名字租约存在);一旦发送成功,消息就留在 stream(TTL 内)——目标随后崩溃/重启,同名重启后由复用同一 consumer 收到(崩溃重投);目标已停机超过租约期(心跳停止 30s 后名字被回收)再发送则报 `target not found`

@@ -5,8 +5,7 @@
  * with its own mode (steer first, follow-up second — never promoted), all
  * under ONE gate, settled together at agent_settled. This is the part of
  * the deliver_as change with real deadlock and ack-risk, so it gets direct
- * coverage here. ("next turn" bypasses the gate entirely — its
- * straight-to-pi path is exercised in batch-deliver.test.ts.)
+ * coverage here.
  *
  * tryDrain is module-private; these tests drive it through the public API
  * (enqueue / releaseTurn / settleBatch / setBatchInjector) with a fake
@@ -87,30 +86,6 @@ describe("tryDrain gate and settle behavior", () => {
     batch.releaseTurn();
     expect(calls.length).toBe(2);
     expect(calls[1].batch).toEqual([m2]);
-    expect(calls[1].deliverAs).toBe("steer");
-  });
-
-  test("a next-turn message bypasses the gate entirely: injected immediately, acked, no gate held", async () => {
-    const batch = await freshBatch();
-    const calls: InjectedCall[] = [];
-    batch.setBatchInjector(recordingInjector(calls));
-
-    // "next turn" goes straight to pi's next-turn queue — the batch layer
-    // never gates it (pi never triggers a turn for it, so there would be no
-    // agent_settled to release a gate).
-    const next = mkInbound({ deliver_as: "next turn" });
-    batch.enqueue(next);
-    expect(calls.length).toBe(1);
-    expect(calls[0].deliverAs).toBe("nextTurn");
-    expect(calls[0].batch).toEqual([next]);
-    expect((next as any)._ackSpy.acked).toBe(true);
-    expect(batch.getActiveBatch()).toBeNull();
-
-    // No gate was held: a steer message drains immediately.
-    const steer = mkInbound();
-    batch.enqueue(steer);
-    expect(calls.length).toBe(2);
-    expect(calls[1].batch).toEqual([steer]);
     expect(calls[1].deliverAs).toBe("steer");
   });
 

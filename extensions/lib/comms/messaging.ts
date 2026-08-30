@@ -17,10 +17,7 @@
  *    agent_settled — "processing" is literally ack-pending, and a crashed
  *    process redelivers instead of losing. A redelivery of a still-pending
  *    message is NOT dedupe-acked — the stream copy stays alive until its
- *    batch settles (see handlePrompt + batch.isPending). The one exception:
- *    "next turn" messages are acked as soon as pi's next-turn queue accepts
- *    them (see batch.ts injectNextTurn) — delivery from there on is pi's
- *    memory, exactly like pi's own nextTurn messages.
+ *    batch settles (see handlePrompt + batch.isPending).
  *  - inbound batching: prompts queue on arrival; batch.ts drains the WHOLE
  *    queue in order into one active batch between turns, so a burst of
  *    concurrent prompts is answered in a single turn.
@@ -383,9 +380,7 @@ export interface SendOptions {
 	 * Delivery mode at the target (wire DeliverAsValue, see protocol.ts):
 	 * "steer" (default) — injected at the target's next LLM-call boundary /
 	 * triggers a turn when idle; "follow-up" — after the target's current
-	 * turn fully ends; "next turn" — delivered to pi's next-turn queue,
-	 * injected at the start of the target's next turn, never triggers a turn
-	 * (see batch.ts injectNextTurn).
+	 * turn fully ends.
 	 */
 	deliverAs?: DeliverAsValue;
 }

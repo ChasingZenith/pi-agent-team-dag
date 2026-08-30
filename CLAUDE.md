@@ -13,7 +13,7 @@ A pi extension providing Networked agent-to-agent communication (`comms` on NATS
 
 ## Conventions
 - Documentation in `doc/` should only contain description for the latest version. Don't mention any thing about changes.
-- Checks: `bun test` for the test suite (tests/*.test.ts, bun:test). Type check with `bunx tsc --noEmit` — never `npx tsc` (tsc is not installed); expect pre-existing noise (TS5097 `.ts` import extensions, TS2322 `details` on comms tools, agent-lifecycle/fork/runtime errors) and look only for NEW errors
+- Checks: `bun test` for the test suite (tests/*.test.ts, bun:test). Type check with `bunx tsc --noEmit` — never `npx tsc` (tsc is not installed);
 - When the tool call return content is simple, there is no need to write custom RenderResult funciton
 
 ## Reference

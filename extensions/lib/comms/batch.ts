@@ -19,11 +19,7 @@
  *     steer), matching pi's sendMessage. The order — steer first, follow-up
  *     second — mirrors pi's own consumption order (the steering queue
  *     drains at every LLM boundary, the follow-up queue only when the agent
- *     would stop). "next turn" never enters the batch: enqueue routes it
- *     straight to pi's next-turn queue (deliverAs "nextTurn" — pi schedules
- *     the injection at the target's next turn; it does NOT trigger a turn,
- *     so it must not go through the turn gate, which is released only by
- *     agent_settled).
+ *     would stop).
  *   - releaseTurn: the entry calls it at pi's agent_settled — NOT agent_end
  *     (the run-active flag is reset right before the event is emitted;
  *     agent_end listeners still run inside the active run). The answered
@@ -33,9 +29,7 @@
  *     and a crashed process redelivers anything unacked. While a message is
  *     pending (queued or in the in-flight batch), redeliveries are NOT
  *     dedupe-acked (messaging.handlePrompt + isPending) — the stream copy
- *     stays alive until the batch settles. The one exception: a "next turn"
- *     message is acked as soon as pi's queue accepts it (injectNextTurn) —
- *     its delivery is pi's memory, exactly like pi's own nextTurn messages.
+ *     stays alive until the batch settles.
  *
  * Zero Pi dependencies: only protocol.ts types. Everything here is plain
  * state + function calls; auditing is done by the callers (messaging / the
@@ -47,10 +41,9 @@ import type { InboundContext } from "./protocol.ts";
 /**
  * pi.sendMessage deliverAs values (pi-internal names). The batch layer
  * injects per delivery-mode group with the group's own mode ("steer" /
- * "followUp" — see tryDrain) and routes "next turn" straight to pi's
- * next-turn queue (see enqueue) — nothing is promoted or rewritten.
+ * "followUp" — see tryDrain) — nothing is promoted or rewritten.
  */
-export type PiDeliverAs = "steer" | "followUp" | "nextTurn";
+export type PiDeliverAs = "steer" | "followUp";
 
 // ━━ Module state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -90,18 +83,8 @@ export function setBatchInjector(inject: (batch: InboundContext[], message: stri
  * messaging.handlePrompt via the entry's onPrompt wrapper. If the drain's
  * injection throws (the gate is released first), the error propagates to the
  * caller, which drops the message's dedupe mark so a redelivery may re-enter.
- *
- * "next turn" messages never enter the queue: they are routed straight to
- * pi's next-turn queue (injectNextTurn) — pi schedules the injection at the
- * target's next turn and does NOT trigger one, so these must not go through
- * the turn gate (released only by agent_settled; a next-turn injection
- * causes no turn and the gate would never open again).
  */
 export function enqueue(inbound: InboundContext): void {
-	if (inbound.deliver_as === "next turn") {
-		injectNextTurn(inbound);
-		return;
-	}
 	inboundQueue.set(inbound.msg_id, inbound);
 	tryDrain();
 }
@@ -129,8 +112,7 @@ export function settleBatch(batch: InboundContext[]): void {
  * consults this before dedupe-acking a redelivery — a pending message must
  * keep its stream copy until its batch settles (acking the redelivery would
  * discard the copy while the content was never injected, breaking the crash
- * fallback). False once settled. "next turn" messages are acked as soon as
- * they reach pi's queue (injectNextTurn), so they never count as pending.
+ * fallback). False once settled.
  */
 export function isPending(msgId: string): boolean {
 	if (inboundQueue.has(msgId)) return true;
@@ -233,8 +215,7 @@ function takeAll(): InboundContext[] {
  * flight (the gate — activeBatch — is held until settleBatch at
  * agent_settled; tryDrain is synchronous, so the gate cannot change between
  * the check and the injections). Without an injector, settles the batch
- * directly (senders observe a timeout). "next turn" messages never reach
- * this path (enqueue routes them to injectNextTurn).
+ * directly (senders observe a timeout).
  *
  * Delivery mode: the batch is split by deliver_as (splitByDeliverAs) and
  * each group is injected separately with its own mode — the steer group
@@ -285,8 +266,6 @@ function tryDrain(): void {
  * (or unknown wire values — parseDeliverAs normalized them) default to
  * steer, the pi default. The groups are injected separately (see tryDrain)
  * so every member keeps its own delivery mode; nothing is promoted.
- * "next turn" never reaches a batch — enqueue routes it away before
- * queuing, so this only ever sees "steer" / "follow-up" / undefined.
  */
 function splitByDeliverAs(batch: InboundContext[]): { steer: InboundContext[]; followUp: InboundContext[] } {
 	const steer: InboundContext[] = [];
@@ -296,24 +275,6 @@ function splitByDeliverAs(batch: InboundContext[]): { steer: InboundContext[]; f
 		else steer.push(inbound);
 	}
 	return { steer, followUp };
-}
-
-/**
- * Deliver a "next turn" message straight to pi's next-turn queue, bypassing
- * the batch gate. pi's sendMessage(nextTurn) only enqueues (it never triggers
- * a turn — the message is injected at the target's next turn, whenever that
- * is), so there is no agent_settled to release a gate here: the message is
- * acked immediately once pi has accepted it. A failure leaves it unacked so
- * NATS redelivery re-enters enqueue and retries.
- */
-function injectNextTurn(inbound: InboundContext): void {
-	if (!batchInjector) {
-		// No session to deliver into — ack-only settle (senders observe a timeout).
-		settleBatch([inbound]);
-		return;
-	}
-	batchInjector([inbound], buildBatchPrompt([inbound]), "nextTurn");
-	settleBatch([inbound]);
 }
 
 /** Put a failed batch back at the front of the queue, keeping insertion order. */

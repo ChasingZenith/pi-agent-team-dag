@@ -17,13 +17,10 @@
  *     REPLY is a send carrying reply_to_msg_id=<the msg_id you received>; the
  *     sender resolves it and stops the reminder.
  *   - delivery: replies arrive automatically as an inbound turn; there is no
- *     blocking await and no auto-reply. deliver_as (steer / follow-up /
- *     next turn) selects how a send is injected at the target — mapped 1:1
- *     to pi.sendMessage's deliverAs; a batch of messages is split by
+ *     blocking await and no auto-reply. deliver_as (steer / follow-up)
+ *     selects how a send is injected at the target — mapped 1:1 to
+ *     pi.sendMessage's deliverAs; a batch of messages is split by
  *     deliver_as and each group injected with its own mode (no promotion).
- *     "next turn" bypasses the batch: it is routed straight to pi's
- *     next-turn queue (injected at the target's next turn; it never
- *     triggers a turn).
  *   - remind: a reminder is per-message. comms_send(remind_s)
  *     arms it inline; comms_remind(msg_id, remind_s) sets, adjusts or (0)
  *     cancels it afterwards, for any msg_id. While reminders are active, ONE
@@ -270,9 +267,7 @@ export default function (pi: ExtensionAPI) {
 		// Batch injector (pi.sendMessage wrapper) + consolidated reminder
 		//    injector + messaging config + consumers. The deliverAs comes from
 		//    batch.ts: it splits the batch by deliver_as and injects each
-		//    group with its OWN mode ("steer" then "followUp" — no promotion);
-		//    "next turn" messages are routed by batch.enqueue straight to
-		//    pi's "nextTurn" (see batch.ts injectNextTurn).
+		//    group with its OWN mode ("steer" then "followUp" — no promotion).
 		batch.setBatchInjector((inboundBatch, message, deliverAs) => {
 			if (!pi.sendMessage) throw new Error("no session to inject into");
 			pi.sendMessage(
@@ -461,7 +456,6 @@ export default function (pi: ExtensionAPI) {
 			deliver_as: Type.Optional(Type.Union([
 				Type.Literal("steer", { description: "The message will be injected at the target's next LLM-call boundary (after its current turn's tool calls, before the next response — does not interrupt mid-stream); triggers a turn when idle." }),
 				Type.Literal("follow-up", { description: "The message will be injected after the target's current turn fully ends (immediate when idle)." }),
-				Type.Literal("next turn", { description: "The message will be injected at the start of the target's NEXT turn (pi's nextTurn): enters the target's next-turn queue and is injected when the next turn starts — waits while the target is busy; never triggers a turn itself (an idle target sees it on its next user input or other injection)." }),
 			], { description: "Delivery mode at the target (default \"steer\")." })),
 		}),
 		async execute(_callId, params) {
@@ -819,8 +813,6 @@ pi.registerTool({
 	// any continuation run that drains pi's steering queue runs before
 	// agent_settled, so there is no acked-but-unseen window (an agent_end
 	// settle would ack while the steer still sat in pi's queue).
-	// ("next turn" messages never reach this path — they are acked when pi's
-	// queue accepts them, see batch.enqueue → injectNextTurn.)
 	// Ordering contract: auto-exit's shutdown decision also happens at
 	// agent_settled; comms is loaded before auto-exit, so this handler runs
 	// first and the answered batch is acked before the process exits.
