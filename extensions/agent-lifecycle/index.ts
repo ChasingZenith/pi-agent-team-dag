@@ -4,7 +4,7 @@
  * Manages spawning and killing agents in tmux windows. The spawned agents
  * auto-connect to the comms hub (via comms.ts loaded in their launch
  * script); all messaging is handled through comms tools (comms_send,
- * comms_outbox, comms_dismiss, etc.) — this extension does NOT
+ * comms_outbox, comms_remind, etc.) — this extension does NOT
  * re-implement any comms client logic.
  *
  * Role/context capability (LLMContext builders, session files, role

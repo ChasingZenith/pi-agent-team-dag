@@ -231,16 +231,16 @@ describe("extension event flow", () => {
     expect(h.shutdownCount()).toBe(0);
   });
 
-  it("consults listPendingReplies before shutting down — the internal defense", async () => {
-    // The pending-send defense reads module-level comms state that cannot
+  it("consults listActiveReminders before shutting down — the internal defense", async () => {
+    // The active-reminder defense reads module-level comms state that cannot
     // be seeded without a live NATS connection (covered by e2e). Here we
-    // verify the guard is wired: with zero pending sends a finished run
+    // verify the guard is wired: with zero active reminders a finished run
     // proceeds to shutdown, and the extension still loads the real messaging
-    // module (so the guard is the live listPendingReplies, not a stub).
+    // module (so the guard is the live listActiveReminders, not a stub).
     const messaging = await import("../extensions/lib/comms/messaging.ts");
     const h = load("1");
     h.run([user(), assistant("stop")]);
     expect(h.shutdownCount()).toBe(1);
-    expect(messaging.listPendingReplies()).toEqual([]);
+    expect(messaging.listActiveReminders()).toEqual([]);
   });
 });

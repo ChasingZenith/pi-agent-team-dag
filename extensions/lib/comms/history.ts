@@ -16,9 +16,9 @@
  *   in  records  what we RECEIVED (sender, content, optional reply_to_msg_id)
  *
  * The reply is folded INTO the out record when it arrives (one key read makes
- * an outbox(msg_id) detail self-contained); dismiss is persisted as `ended` so
- * the status survives a restart. All writes are best-effort fire-and-forget by
- * the callers — a history write must never fail a send or delay injection.
+ * an outbox(msg_id) detail self-contained). All writes are best-effort
+ * fire-and-forget by the callers — a history write must never fail a send or
+ * delay injection.
  *
  * TTL note: the bucket TTL is applied on FIRST creation only (views.kv binds
  * an existing bucket without re-applying options) — changing
@@ -54,7 +54,8 @@ export interface HistoryOutRecord {
 	ts: number;
 	/** The peer's reply, folded in when it arrives. */
 	reply?: OutReply;
-	/** How the reminder ended, persisted so dismiss survives a restart. */
+	/** LEGACY (comms_dismiss era) — read for old records only; never written
+	 *  any more because reminders no longer produce a terminal status. */
 	ended?: { reason: "dismissed"; ts: number };
 }
 
@@ -129,25 +130,15 @@ export async function recordReplyIntoOut(identity: Identity, replyToMsgId: strin
 	await getKvHistory().put(key, JSON.stringify(rec));
 }
 
-/** Persist a dismiss (ended marker) — survives restarts. No-op when the out
- *  record is absent (never sent, or already evicted from the history bucket). */
-export async function markDismissed(identity: Identity, msgId: string): Promise<void> {
-	const key = historyOutKey(identity.subnet, identity.name, msgId);
-	const entry = await getKvHistory().get(key);
-	if (!entry) return;
-	const rec = entry.json<HistoryOutRecord>();
-	rec.ended = { reason: "dismissed", ts: Date.now() };
-	await getKvHistory().put(key, JSON.stringify(rec));
-}
-
 // ━━ Reads ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
  * Derive the send status purely from a persisted out record (used after a
- * restart, when the in-memory pending table is gone).
+ * restart, when the in-memory reminder table is gone).
  */
 export function deriveOutStatus(rec: HistoryOutRecord): { state: "waiting" | "ended"; reason?: "replied" | "expired" | "dismissed" } {
 	if (rec.reply) return { state: "ended", reason: "replied" };
+	// LEGACY: old comms_dismiss-era records carry a persisted ended marker.
 	if (rec.ended) return { state: "ended", reason: rec.ended.reason };
 	if (messageTtlMs > 0 && Date.now() - rec.ts > messageTtlMs) return { state: "ended", reason: "expired" };
 	return { state: "waiting" };

@@ -289,29 +289,6 @@ export interface InboundContext {
 	jsMsg: JsMsg;
 }
 
-/**
- * Parked sender-side send. The timing fields drive the shared reminder
- * scheduler (reminder.ts) and the expiry/poll logic in messaging.ts:
- *   sentAt        — ms epoch of the send (expiry = sentAt + stream TTL).
- *   remindS       — reminder cadence in seconds; 0 = no reminder configured.
- *   lastRemindAt  — ms epoch of the last injected reminder.
- */
-export interface PendingReply {
-	/**
-	 * Terminal result: reply (response, error null) or a non-reply end —
-	 * error "dismissed" (sender stopped the reminder via comms_dismiss) or any
-	 * other error string (processing error).
-	 */
-	result?: { response?: any; error?: string | null };
-	/** Peer NAME the send went to — the identity we sent to (reply matching
-	 *  compares this against the sender's name, so a restarted sender still
-	 *  resolves). */
-	target_name: string;
-	sentAt: number;
-	remindS: number;
-	lastRemindAt: number;
-}
-
 // ━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export function ulid(): string {

@@ -244,11 +244,11 @@ describe("task-comms-ops extension shell", () => {
     expect(res.details.version).toBe(3); // create v1 → dispatch v2 → report v3
     expect(readTask(CWD, "task-x")!.completion_report).toBe("Implemented.\nDeviation: the API returned camelCase.");
     // the reply: to the dispatcher, marked as a reply to the dispatch message,
-    // fire-and-forget (remindMs 0)
+    // no reminder (remindS 0)
     expect(sent).toHaveLength(2);
     expect(sent[1].target).toBe("manager-1");
     expect(sent[1].opts.replyToMsgId).toBe(dispatchMsgId);
-    expect(sent[1].opts.remindMs).toBe(0);
+    expect(sent[1].opts.remindS).toBe(0);
     expect(sent[1].body).toBe("worker-1 finished task task-x");
     // audit lands on the task-comms-ops channel with the reply recorded
     expect(

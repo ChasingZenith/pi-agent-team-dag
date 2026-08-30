@@ -24,19 +24,21 @@
  *     "next turn" bypasses the batch: it is routed straight to pi's
  *     next-turn queue (injected at the target's next turn; it never
  *     triggers a turn).
- *   - remind: send(remind_s=<seconds>) arms a consolidated reminder — while any
- *     send is unanswered, ONE reminder turn is injected per interval
- *     covering all pending sends (with target status + TTL countdown);
- *     entries expire at the stream TTL. Default 0 = fire-and-forget (no
- *     reminder). Stop the reminder with comms_dismiss(msg_id).
+ *   - remind: a reminder is per-message. comms_send(remind_s)
+ *     arms it inline; comms_remind(msg_id, remind_s) sets, adjusts or (0)
+ *     cancels it afterwards, for any msg_id. While reminders are active, ONE
+ *     consolidated reminder turn is injected per interval covering all items
+ *     (with direction, peer status + TTL countdown); out items expire at the
+ *     stream TTL. Default 0 = no reminder. Reminders are scheduling state
+ *     only — cancelling one changes nothing about the message itself.
  *   - history: every outbound and inbound message content is persisted to the
  *     comms_history KV bucket (TTL default 24h) — comms_outbox / comms_inbox
- *     re-read content after a compact or restart, when the in-memory pending
+ *     re-read content after a compact or restart, when the in-memory reminder
  *     table and the context are both gone.
  *
  * Consumer surface (agent-lifecycle, teammate-provider):
  *
- *   tools         comms_list_peer / comms_send / comms_outbox / comms_inbox / comms_dismiss / comms_update_profile
+ *   tools         comms_list_peer / comms_send / comms_outbox / comms_inbox / comms_remind / comms_update_profile
  *   audit channel "comms-log"
  *   customType    "comms-inbound" / "comms-reminder"
  *   status key    "comms"
@@ -65,7 +67,7 @@ import { readConfig, readFrontmatterFromArgv } from "./lib/comms/config.ts";
 import { connectNats, ensureStream, closeNats } from "./lib/comms/nats.ts";
 import * as registry from "./lib/comms/registry.ts";
 import * as messaging from "./lib/comms/messaging.ts";
-import type { EndedInfo, PendingInfo } from "./lib/comms/messaging.ts";
+import type { ActiveReminder } from "./lib/comms/messaging.ts";
 import { setAudit, audit } from "./lib/comms/audit.ts";
 import * as batch from "./lib/comms/batch.ts";
 import * as history from "./lib/comms/history.ts";
@@ -291,19 +293,24 @@ export default function (pi: ExtensionAPI) {
 				{ deliverAs, triggerTurn: true },
 			);
 		});
-		messaging.setRemindInjector((pending: PendingInfo[]) => {
+		messaging.setRemindInjector((pending: ActiveReminder[]) => {
 			if (!pi.sendMessage) return; // is it really needed?
 			const lines = pending.map((x) =>
-				`  msg_id ${x.msg_id} to ${x.target} (${x.target_status}) — ${fmtMs(x.elapsed_ms)} elapsed` +
-				(x.expires_in_ms !== null ? ` · expires in ${fmtMs(x.expires_in_ms)}` : ""));
+				`  ${x.dir === "in" ? "from" : "to"} ${x.target} (${x.target_status}) — ${x.summary}` +
+				`\n    msg_id ${x.msg_id} · remind every ${fmtMs(x.remind_s * 1000)} · ${fmtMs(x.elapsed_ms)} elapsed` +
+				(x.expires_in_ms !== null
+					? x.expires_in_ms > 0
+						? ` · expires in ${fmtMs(x.expires_in_ms)}`
+						: " · expired — resend or cancel"
+					: ""));
 			pi.sendMessage(
 				{
 					customType: "comms-reminder",
 					content:
-						`[comms reminder] ${pending.length} pending send(s) awaiting replies:\n` +
+						`[comms reminder] ${pending.length} active reminder(s):\n` +
 						lines.join("\n"),
 					display: true,
-					details: { pending },
+					details: { reminders: pending },
 				},
 				{ deliverAs: "followUp", triggerTurn: true },
 			);
@@ -458,11 +465,8 @@ export default function (pi: ExtensionAPI) {
 			"Calling this function sends the message to the specified peer(s). Each receiver automatically receives the message as an inbound turn or injection — the receiver does NOT need to poll or check an inbox. The exact time and way the message is injected depends on `deliver_as`.\n\n" +
 			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_s` to remind yourself if a reply has not arrived.\n\n" +
 			"REMINDERS AND REPLIES (`remind_s`, seconds; defaults to 0)\n" +
-			"`remind_s = 0` (the default): fire-and-forget — the message is not registered as awaiting a reply and generates no reminder. `remind_s > 0` (1-3600): the send is armed with a reminder and the system periodically reminds YOU, the sender, while one or more sends with an active reminder remain unanswered. The reminder is not sent to the receiver and does not retry delivery. One consolidated reminder covers all pending sends. Its purpose is to help you notice that the peer may still be working, may have missed the message, or may need additional information or assistance. When reminded, you can decide whether to send a follow-up, clarify or synchronize information, help unblock the peer, or revise your plan. `remind_s = 300` = remind every 5 min.\n\n" +
-			"You may also use this function to reply to a message received from another peer. Set `reply_to_msg_id` to the `msg_id` of the inbound message you are answering. This explicitly identifies which message your response is replying to. When the original sender receives the reply, their pending reminder for that message is automatically resolved, so they no longer receive reminders for it.\n\n" +
-			"DELIVERY MODE (`deliver_as`)\n" +
-			"`deliver_as` controls when the receiver gets the message relative to its current turn. See the `deliver_as` parameter for the behavior of `\"steer\"` (default), `\"follow-up\"`, and `\"next turn\"`.",
-
+			"`remind_s = 0` (the default): no reminder; `remind_s > 0`: arm a reminder for this send — while it is active, a reminder turn is periodically injected to you. Same reminder semantics as comms_remind.\n\n" +
+			"You may also use this function to reply to a message received from another peer. Set `reply_to_msg_id` to the `msg_id` of the inbound message you are answering. This explicitly identifies which message your response is replying to. When the original sender receives the reply, their reminder for that message is automatically stopped, so they no longer receive reminders for it.",
 		parameters: Type.Object({
 			target: Type.Optional(Type.String({ description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
 			targets: Type.Optional(Type.Array(Type.String(), { description: "Group send: multiple peer names (CASE-SENSITIVE). Set either target or targets; one msg_id is returned per recipient." })),
@@ -470,7 +474,7 @@ export default function (pi: ExtensionAPI) {
 			remind_s: Type.Optional(Type.Number({
 				minimum: 0,
 				maximum: 3600,
-				description: "Reminder interval in SECONDS, default 0. 0: fire-and-forget — the message is NOT registered as awaiting a reply: no reminder, no comms_outbox \"waiting\" entry, auto-exit is not blocked (still recorded in comms_history). >0 (1-3600): arm the send with a reminder and inject one consolidated reminder every remind_s seconds while any send with an active reminder is unanswered. 300 = every 5 min.",
+				description: "Reminder interval in seconds, default 0. 0: no reminder (one-way send) — still recorded in comms_history; no reminder, auto-exit not blocked; arm one later with comms_remind. 1–3600: arm the reminder.",
 			})),
 			reply_to_msg_id: Type.Optional(Type.String({
 				description: "Reply mode: the msg_id of the message you are answering (an inbound msg_id you received). Marks this send as a reply; the sender stops its reminder and records your message as the reply.",
@@ -492,7 +496,8 @@ export default function (pi: ExtensionAPI) {
 			if (targets.length === 0) throw new Error("comms_send: provide either target or targets");
 
 			const replyToMsgId = typeof p.reply_to_msg_id === "string" && p.reply_to_msg_id.length > 0 ? p.reply_to_msg_id : undefined;
-			// Default 0 = fire-and-forget; only remind_s > 0 arms a reminder.
+			// Default 0 = no reminder; only remind_s > 0 arms one. (A later
+			// comms_remind can still arm a reminder on the sent message.)
 			const remindS = typeof p.remind_s === "number" ? p.remind_s : 0;
 			// Delivery mode at the target (schema-enforced union; omitted → target default "steer").
 			const deliverAs = typeof p.deliver_as === "string" ? p.deliver_as as DeliverAsValue : undefined;
@@ -583,9 +588,9 @@ export default function (pi: ExtensionAPI) {
 			"Re-read the messages YOU sent (comms_send), with status and any reply — from the persistent " +
 			"message history (comms_history KV bucket, default TTL 24h), so it works even after a compact or restart.\n\n" +
 			"With no msg_id: list your recent sends, newest first (status + content summary; limit defaults to 10).\n" +
-			"With msg_id: full detail — sent content, state (waiting / ended: replied / expired / dismissed / error), " +
-			"and the reply content when replied. A reply also lands in comms_inbox.\n\n" +
-			"Reminder + expiry state is per-process memory; after a restart the status is derived from the " +
+			"With msg_id: full detail — sent content, state (waiting / ended: replied / expired), the live remind " +
+			"marker if a reminder is active, and the reply content when replied. A reply also lands in comms_inbox.\n\n" +
+			"Reminder state is per-process memory; after a restart the status is derived from the " +
 			"persisted history instead.",
 		parameters: Type.Object({
 			msg_id: Type.Optional(Type.String({ description: "msg_id returned by comms_send. Omit to list your recent sends (newest first)." })),
@@ -602,29 +607,27 @@ export default function (pi: ExtensionAPI) {
 			const msgId = typeof p.msg_id === "string" && p.msg_id.length > 0 ? p.msg_id : undefined;
 			const limit = typeof p.limit === "number" && p.limit > 0 ? Math.min(p.limit, 100) : 10;
 
-			// List mode: recent sends (newest first). Status comes from the live
-			// pending table when the send still has an active reminder, from the
-			// persisted record otherwise (replied/dismissed/expired survive).
+			// List mode: recent sends (newest first). Status derives from the
+			// persisted record (survives restarts); the live reminder table only
+			// overlays the remind marker on top.
 			if (!msgId) {
 				const records = await history.listOutbound(self.subnet, self.name, limit);
-				const live = new Map<string, PendingInfo | EndedInfo>();
-				for (const x of messaging.listPendingReplies()) live.set(x.msg_id, x);
-				for (const x of messaging.listEndedReplies()) live.set(x.msg_id, x);
+				const live = new Map<string, ActiveReminder>();
+				for (const x of messaging.listActiveReminders()) live.set(x.msg_id, x);
 
 				const lines: string[] = [];
 				for (const rec of records) {
-					const li = live.get(rec.msg_id);
-					const status = li
-						? "reason" in li ? `ended/${li.reason}` : "waiting"
-						: (() => { const s = history.deriveOutStatus(rec); return s.reason ? `ended/${s.reason}` : s.state; })();
+					const rm = live.get(rec.msg_id);
+					const s = history.deriveOutStatus(rec);
+					const status = (s.reason ? `ended/${s.reason}` : s.state) +
+						(rm ? ` · remind ${fmtMs(rm.remind_s * 1000)}` : "");
 					lines.push(`  ${rec.msg_id} to ${rec.target} — ${status} — "${history.flatten(rec.message)}"`);
 				}
-				// In-memory sends with no history record yet (sent before this
+				// Active reminders with no history record yet (sent before this
 				// session's first successful write) — show with a placeholder.
 				for (const [id, li] of live) {
 					if (records.some((r) => r.msg_id === id)) continue;
-					const status = "reason" in li ? `ended/${li.reason}` : "waiting";
-					lines.push(`  ${id} to ${li.target} — ${status} — "(content not recorded)"`);
+					lines.push(`  ${id} to ${li.target} — ${li.summary} — "(content not recorded)"`);
 				}
 				const text = lines.length > 0
 					? `comms_outbox: ${lines.length} send(s)\n${lines.join("\n")}`
@@ -632,44 +635,27 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text" as const, text }] };
 			}
 
-			// Detail mode: join the persisted record with the live poll. Memory
-			// wins while this session still reminds the send; the record (plus
-			// derived status) is the fallback after a restart.
+			// Detail mode: status derives from the persisted record (survives
+			// restarts); the live reminder table only overlays the remind marker.
 			const rec = await history.getOutbound(self.subnet, self.name, msgId);
-			const poll = messaging.pollReply(msgId);
-			let state: string;
-			let reason: string | null = null;
-			let remindS = 0;
-			let response: any = null;
-			if (poll.state !== "unknown") {
-				state = poll.state;
-				reason = poll.reason ?? null;
-				remindS = poll.remindS;
-				if (state === "ended" && reason === "replied") response = poll.result?.response ?? null;
-			} else if (rec) {
-				const s = history.deriveOutStatus(rec);
-				state = s.state;
-				reason = s.reason ?? null;
-				if (s.reason === "replied") response = rec.reply?.message ?? null;
-			} else {
+			if (!rec) {
 				return {
 					content: [{ type: "text" as const, text: "comms_outbox: unknown msg_id — no history record (never sent, or evicted from the history bucket)" }],
 				};
 			}
-			const statusLabel = reason ? `${state}/${reason}` : state;
-			let text = `comms_outbox: ${msgId}${rec ? ` to ${rec.target}` : ""} — ${statusLabel}`;
-			if (rec) text += `\nsent at ${new Date(rec.ts).toISOString()}`;
-			if (state === "waiting") {
+			const s = history.deriveOutStatus(rec);
+			const remindS = messaging.getActiveRemindS(msgId) ?? 0;
+			const statusLabel = s.reason ? `${s.state}/${s.reason}` : s.state;
+			let text = `comms_outbox: ${msgId} to ${rec.target} — ${statusLabel}`;
+			text += `\nsent at ${new Date(rec.ts).toISOString()}`;
+			if (s.state === "waiting") {
 				text += `\nno reply yet${remindS > 0 ? ` · remind ${fmtMs(remindS * 1000)}` : ""}`;
-			} else if (reason === "expired") {
-				text += "\nthe message TTL passed with no reply — the target likely never received it. Resend, dismiss, or solve it another way.";
-			} else if (reason === "dismissed") {
-				text += "\nreminder stopped (a late reply, if any, will still overwrite)";
-			} else if (reason === "error") {
-				text += `\n${poll.result?.error ?? "processing error"}`;
+			} else if (s.reason === "expired") {
+				text += "\nthe message TTL passed with no reply — the target likely never received it. Resend, or solve it another way.";
 			}
-			if (rec) text += `\nmessage: ${rec.message}`;
-			if (response !== null) {
+			text += `\nmessage: ${rec.message}`;
+			if (s.reason === "replied" && rec.reply) {
+				const response = rec.reply.message;
 				text += `\nreply: ${typeof response === "string" ? response : JSON.stringify(response, null, 2)}`;
 			}
 			return { content: [{ type: "text" as const, text }] };
@@ -767,47 +753,62 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
-		name: "comms_dismiss",
-		label: "Comms Dismiss",
-		description:
-			"Stop the reminder on a send YOU made (comms_send msg_id): stops its reminder and marks it dismissed " +
-			"(comms_outbox reports ended/dismissed). The msg_id alone identifies the send — only sends you made can " +
-			"be dismissed. Use when the peer replied without reply_to_msg_id (you already have the answer), the peer " +
-			"is offline / no longer relevant, or you decided to solve the problem another way. A genuinely late " +
-			"reply still overwrites the result.",
-		parameters: Type.Object({
-			msg_id: Type.String({ description: "msg_id returned by comms_send." }),
+
+pi.registerTool({
+	name: "comms_remind",
+	label: "Comms Remind",
+	description:
+		"Set, adjust, or cancel a reminder for a message\n\n" +
+		"`remind_s > 0` (1–3600): Set or adjust the reminder interval for this message. While the reminder is active, a reminder turn is periodically injected to YOU. " +
+		"Use this to follow up on a message you received, or to (re)arm the wait for a reply to a message you sent. " +
+		"`remind_s = 0`: Cancel the reminder. This simply removes the reminder — or confirms none is armed — and " +
+		"does not modify the message itself. Use this when the peer has replied without a `reply_to_msg_id` and " +
+		"you already have your answer, when the peer is offline or no longer relevant, or when you decide to " +
+		"resolve the issue another way.\n\n" +
+		"Each message can have only one reminder; calling this tool again updates its interval. A reply to an " +
+		"outgoing message automatically cancels its reminder (an already-replied message is fine to re-arm). Reminders exist only for the " +
+		"current session and are not persisted.",
+	parameters: Type.Object({
+		msg_id: Type.String({ description: "The msg_id of the message to remind about — one you sent or received." }),
+		remind_s: Type.Number({
+			minimum: 0,
+			maximum: 3600,
+			description:
+				"Reminder interval in seconds. Use 1–3600 to set or adjust the reminder; use 0 to cancel it. " +
+				"For example, 300 = every 5 minutes.",
 		}),
+	}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
 			const msgId = (params as any).msg_id as string;
-			const outcome = messaging.dismissReply(msgId);
-			const text = outcome === "dismissed"
-				? `comms_dismiss: ${msgId} dismissed — reminder stopped (a late reply, if any, will still overwrite)`
-				: outcome === "already_answered"
-					? `comms_dismiss: ${msgId} already has a reply — nothing to dismiss (see comms_outbox)`
-					: `comms_dismiss: unknown msg_id — never sent, already dismissed, or FIFO-evicted`;
-			// Persist the ended marker so outbox still reports dismissed after a
-			// restart (best-effort — history must never fail the dismiss itself).
-			if (outcome === "dismissed") {
-				void history.markDismissed(identity, msgId)
-					.catch((err: any) => audit("history_write_failed", { direction: "dismiss", msg_id: msgId, reason: err?.message ?? String(err) }));
-			}
+			const remindS = Math.floor((params as any).remind_s as number);
+			const res = await messaging.remind(identity, msgId, remindS);
+			const outcome = res.outcome;
+			const text = outcome === "reminded"
+				? `${msgId} reminded every ${remindS} s`
+				: outcome === "stopped"
+					? res.wasArmed
+						? `${msgId} reminder stopped`
+						: `${msgId} reminder not armed — nothing to stop`
+					: `unknown msg_id — never sent/received here, or evicted from the history bucket`;
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { msg_id: msgId, outcome },
+				details: { msg_id: msgId, remind_s: remindS, outcome },
 			};
 		},
 		renderCall(args, theme) {
-			const msgId = (args as any).msg_id ?? "?";
-			return new Text(theme.fg("toolTitle", theme.bold("comms_dismiss ")) + theme.fg("accent", msgId), 0, 0);
+			const a = args as any;
+			const msgId = a.msg_id ?? "?";
+			const s = typeof a.remind_s === "number" && a.remind_s > 0 ? ` ×${a.remind_s}s` : " stop";
+			return new Text(theme.fg("toolTitle", theme.bold("comms_remind ")) + theme.fg("accent", msgId + s), 0, 0);
 		},
 		renderResult(result, options, theme) {
 			const d = result.details as any;
 			const status = d?.outcome ?? "?";
 			if (!options.expanded) {
-				if (status === "dismissed") return new Text(theme.fg("success", "✓ dismissed"), 0, 0);
+				// "reminded" only ever means remind_s > 0 — remind(…, 0) yields "stopped".
+				if (status === "reminded") return new Text(theme.fg("success", `✓ remind ${d.remind_s}s`), 0, 0);
+				if (status === "stopped") return new Text(theme.fg("success", "✓ stopped"), 0, 0);
 				return new Text(theme.fg("error", `✗ ${status}`), 0, 0);
 			}
 			// Expanded: the full content — what happened and why.

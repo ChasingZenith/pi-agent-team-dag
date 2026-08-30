@@ -338,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 				},
 			});
 			// Notify the dispatcher that work has begun — one line, no
-			// announcement boilerplate; fire-and-forget, best effort.
+			// announcement boilerplate; no reminder, best effort.
 			const dispatcher = target.dispatched_to.dispatched_by;
 			const lines = [`task_start: "${r.item.id}" → active (by ${r.item.updated_by})`];
 			if (sessionId) {

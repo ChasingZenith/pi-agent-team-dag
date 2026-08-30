@@ -245,7 +245,7 @@ export async function resolveName(subnet: string, name: string): Promise<string 
 /**
  * Current status of a peer name, derived from the cached profile's
  * last_seen_at (same logic as getPeers). Used by the sender side (comms_send
- * target_status, listPendingReplies target_status). When the profile is not
+ * target_status, listActiveReminders target_status). When the profile is not
  * cached yet but the caller already resolved the name (the name lease is a
  * TTL — an entry existing means the peer is heartbeating), the peer is
  * assumed online.

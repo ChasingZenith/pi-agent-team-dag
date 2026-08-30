@@ -21,10 +21,11 @@
  *     (user/caller stopped it — keep listening) → stay alive
  *
  * Internal defense: even with auto-exit enabled, the agent NEVER exits while
- * it has pending comms sends (listPendingReplies non-empty) — a send whose
- * reply has not arrived yet means the agent is mid-conversation, not done.
- * Auto-exit is only safe for spawner-declared simple one-shot tasks
- * (agent_spawn autoExit: true); this defense is the second layer.
+ * it has an active comms reminder (listActiveReminders non-empty) — a send
+ * awaiting its reply, or a received message being followed up, means the
+ * agent is mid-conversation, not done. Auto-exit is only safe for
+ * spawner-declared simple one-shot tasks (agent_spawn autoExit: true); this
+ * defense is the second layer.
  *
  * Usage:
  *   PI_AGENT_AUTO_EXIT=1 pi -e extensions/auto-exit.ts -e extensions/comms.ts ...
@@ -39,7 +40,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { listPendingReplies } from "./lib/comms/messaging";
+import { listActiveReminders } from "./lib/comms/messaging";
 
 // ---------------------------------------------------------------------------
 // Pure helpers — exported for testing
@@ -129,10 +130,12 @@ export default function (pi: ExtensionAPI) {
     if (!lastRunMessages) return;
     if (!shouldAutoExitOnAgentEnd(lastRunMessages)) return;
 
-    // Internal defense: pending comms sends mean the agent is waiting for
-    // external replies — mid-conversation, not done. Never exit while any
-    // pending send exists (listPendingReplies skips answered/dismissed ones).
-    if (listPendingReplies().length > 0) return;
+    // Internal defense: an active comms reminder means the agent is waiting
+    // for something external (a reply to a send, or a received message it
+    // chose to follow up) — mid-conversation, not done. Never exit while any
+    // active reminder exists (stopped / answered / expired reminders are
+    // already out of the list).
+    if (listActiveReminders().length > 0) return;
 
     // Record why we exit (visible in the session JSONL for later debugging).
     const error = findLatestAssistantError(lastRunMessages);

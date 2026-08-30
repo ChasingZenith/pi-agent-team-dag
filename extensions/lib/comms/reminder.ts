@@ -1,33 +1,29 @@
 /**
  * comms — shared reminder scheduler + FIFO cap helper.
  *
- * messaging.ts drives sender-side "still waiting for a reply" reminders
- * through ONE shared scheduler (a single unref'd setInterval, ~30s tick)
- * instead of one interval loop per awaited send. Each tick the scheduler
- * collects the current pending entries, computes which are due (remindS
- * configured, not expired, remindS seconds elapsed since the last reminder), and
- * when at least one is due calls onTick ONCE with the full pending list — a
- * single consolidated reminder turn, no per-message storm. Entries past
- * their TTL (expiresAt) are dropped from reminding and reported once via
- * onExpire.
+ * messaging.ts drives sender-side reminders through ONE shared scheduler (a
+ * single unref'd setInterval, ~30s tick) instead of one interval loop per
+ * awaited item. Each tick the scheduler collects the current entries,
+ * computes which are due (remindS configured, remindS seconds elapsed since
+ * the last reminder), and when at least one is due calls onTick ONCE with the
+ * full list — a single consolidated reminder turn, no per-message storm.
+ * Message TTL is presentation only: the caller surfaces it via
+ * expires_in_ms / comms_outbox; the scheduler never drops an entry for it —
+ * cancel/resend decisions stay with the agent, not with time.
  *
- * The scheduler is SHARED, so per-key lifecycle (reply arrived, dismissed,
- * FIFO-evicted) needs no per-key teardown: an entry stops being due the
- * moment collect() stops returning it (or returns remindS 0). Its only
- * per-key state is the last-injection clock and a one-shot onExpire marker.
+ * The scheduler is SHARED, so per-key lifecycle (reply arrived, reminder
+ * stopped, FIFO-evicted) needs no per-key teardown: an entry stops being due
+ * the moment collect() stops returning it (or returns remindS 0). Its only
+ * per-key state is the last-injection clock.
  */
 
-/** A pending send as the scheduler sees it (timing fields only). */
+/** A reminder item as the scheduler sees it (timing fields only). */
 export interface ReminderEntry {
 	msg_id: string;
-	/** ms epoch of the send (expiry = sentAt + TTL). */
-	sentAt: number;
 	/** Reminder cadence in seconds; <= 0 → never remind. */
 	remindS: number;
 	/** ms epoch of the last injected reminder (seed value; the scheduler updates it thereafter). */
 	lastRemindAt: number;
-	/** ms epoch after which the entry is expired (dropped from reminding), or null when no TTL. */
-	expiresAt: number | null;
 }
 
 export interface ReminderSchedulerHooks {
@@ -35,18 +31,16 @@ export interface ReminderSchedulerHooks {
 	tickMs?: number;
 	/** true → skip this tick (shutting down / injector not wired yet). */
 	isSuspended?: () => boolean;
-	/** Current pending entries with timing fields populated by the caller. */
+	/** Current entries with timing fields populated by the caller. */
 	collect: () => ReminderEntry[];
-	/** Called at most once per tick, with the FULL pending list, when >= 1 entry is due. */
+	/** Called at most once per tick, with the FULL list, when >= 1 entry is due. */
 	onTick: (pending: ReminderEntry[]) => void;
-	/** Called once per msg_id the first time it crosses its TTL. Optional. */
-	onExpire?: (msgId: string) => void;
 }
 
 export interface ReminderScheduler {
 	/** (Re-)arm a msg_id: resets its reminder clock to now. */
 	arm(msgId: string): void;
-	/** Drop a msg_id from the scheduler (reply arrived / dismissed / evicted). */
+	/** Drop a msg_id from the scheduler (reply arrived / reminder stopped / evicted). */
 	cancel(msgId: string): void;
 	/** Stop the shared interval. Returns how many msg_ids were armed. */
 	stopAll(): number;
@@ -56,8 +50,6 @@ export function createReminderScheduler(hooks: ReminderSchedulerHooks): Reminder
 	// Scheduler-side last-injection clock (seeded from the entry's
 	// lastRemindAt on first sight; refreshed on arm() and on each due tick).
 	const lastRemindAt = new Map<string, number>();
-	// One-shot onExpire markers (kept tiny; cleared on cancel).
-	const expiredReported = new Set<string>();
 
 	function tick(): void {
 		if (hooks.isSuspended?.()) return;
@@ -67,14 +59,6 @@ export function createReminderScheduler(hooks: ReminderSchedulerHooks): Reminder
 		const due: ReminderEntry[] = [];
 		for (const entry of pending) {
 			if (!(entry.remindS > 0)) continue; // no reminder configured
-			// Past TTL: dropped from reminding, reported once.
-			if (entry.expiresAt !== null && now >= entry.expiresAt) {
-				if (!expiredReported.has(entry.msg_id)) {
-					expiredReported.add(entry.msg_id);
-					hooks.onExpire?.(entry.msg_id);
-				}
-				continue;
-			}
 			const last = lastRemindAt.get(entry.msg_id) ?? entry.lastRemindAt;
 			if (now - last >= entry.remindS * 1_000) due.push(entry);
 		}
@@ -95,13 +79,11 @@ export function createReminderScheduler(hooks: ReminderSchedulerHooks): Reminder
 		},
 		cancel(msgId) {
 			lastRemindAt.delete(msgId);
-			expiredReported.delete(msgId);
 		},
 		stopAll() {
 			try { clearInterval(timer); } catch { /* ignore */ }
 			const n = lastRemindAt.size;
 			lastRemindAt.clear();
-			expiredReported.clear();
 			return n;
 		},
 	};

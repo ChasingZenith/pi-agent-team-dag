@@ -105,7 +105,7 @@ pi -e extensions/comms.ts -e extensions/task-graph.ts -e extensions/role-context
    --role coordinator --cname coordinator
 ```
 
-The coordinator asks the teammate-provider for specialists, which spawns them on demand in tmux panes (spawned agents load `task-graph.ts` automatically). The coordinator drives its task graph in `.pi/tasks/` — dispatching from the ready set and marking items done to unlock their dependents — and announces changes over comms (`comms_send`, fire-and-forget) — see [docs/6-task-graph.md](docs/6-task-graph.md).
+The coordinator asks the teammate-provider for specialists, which spawns them on demand in tmux panes (spawned agents load `task-graph.ts` automatically). The coordinator drives its task graph in `.pi/tasks/` — dispatching from the ready set and marking items done to unlock their dependents — and announces changes over comms (`comms_send`, no reminder) — see [docs/6-task-graph.md](docs/6-task-graph.md).
 
 ### Quick start — across machines (LAN)
 

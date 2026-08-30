@@ -83,7 +83,7 @@ Worker / Reviewer 执行
     ▼
     │ ⑤ Sync（同步）
     │    task_complete / task_block / task_cancel 自动通知等待方（unlocked 依赖项的已派发负责人）
-    │    仲裁 / 小调整后 comms_send 定向通知受影响方（fire-and-forget [Task Update] 公告）
+    │    仲裁 / 小调整后 comms_send 定向通知受影响方（无提醒 [Task Update] 公告）
     │    comms_list_peer 拿名单 → 按需全网公告（新子图发布 / 全局同步 / 里程碑）
     │    + comms_update_profile(current_task=…) 同步自身状态
     ▼
@@ -125,9 +125,9 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 | 工具 | 参数 | 封装的动作 |
 |------|------|-----------|
 | `task_dispatch` | `task_id, agent, message` | 发送委托消息（带提醒，含常量开工指令）+ `set_status(dispatched, dispatched_to=<agent>)` 一步完成；`dispatched_to` 记 **agent 名字**（comms 身份，跨重启稳定），派发者与委托消息 msg_id 记入 `dispatched_to`（`dispatched_by` / `dispatch_msg_id`） |
-| `task_start` | `id` | **worker 侧工具**：开工声明——把派发给自己的任务从 dispatched 转 active（校验 `dispatched_to.name` 为调用者）+ **把自己的 pi 执行会话写入节点**（`execution_session`：session id + JSONL 转录文件路径，后续据此回溯该任务实际如何完成）+ 自动通知派发者（fire-and-forget，告知已开工）+ 自动把任务标题写入 comms profile 的 `current_task`（与 `comms_update_profile` 同一实现，peers 实时可见） |
+| `task_start` | `id` | **worker 侧工具**：开工声明——把派发给自己的任务从 dispatched 转 active（校验 `dispatched_to.name` 为调用者）+ **把自己的 pi 执行会话写入节点**（`execution_session`：session id + JSONL 转录文件路径，后续据此回溯该任务实际如何完成）+ 自动通知派发者（无提醒，告知已开工）+ 自动把任务标题写入 comms profile 的 `current_task`（与 `comms_update_profile` 同一实现，peers 实时可见） |
 | `task_submit_report` | `id, report` | **worker 侧工具**：把完成情况写入节点 `completion_report`（校验 `dispatched_to.name` 为调用者）+ 自动**回复**委托消息——回复目标与 msg_id 单一定义在节点记录（`dispatched_by` / `dispatch_msg_id`），工具自动发 `comms_send(target=派发者, reply_to_msg_id=委托消息 msg_id)`，**调用者无须传 target / reply_to_msg_id**，这就是 worker 回应 dispatch 消息的方式（一行完成通知，停掉派发者的 reminder）+ 清空 comms profile 的 `current_task`（汇报完即可复用） |
-| `task_complete` | `id, change_summary?` | 标 done（store 校验 deps 满足，未满足报错列缺失）+ 自动通知解锁项的等待方（fire-and-forget） |
+| `task_complete` | `id, change_summary?` | 标 done（store 校验 deps 满足，未满足报错列缺失）+ 自动通知解锁项的等待方（无提醒） |
 | `task_block` | `id, change_summary?` | 标 blocked（现实受阻，受阻原因写入 change_summary）+ 自动通知依赖项的已派发负责人 |
 | `task_cancel` | `id, change_summary?` | 标 cancelled（移除作用域；对依赖方视为满足，取消原因写入 change_summary）+ 自动通知解锁等待方 |
 
@@ -139,7 +139,7 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 
 ### comms 通信工具
 
-通信工具来自 comms 扩展（参数与语义见 docs/1 §6）：`comms_send`（含 `remind_s=0` fire-and-forget 公告）、`comms_inbox` / `comms_outbox`（重读消息）、`comms_dismiss`（停止提醒）、`comms_list_peer`（查看 agent）、`comms_update_profile`（维护 `current_task`，让 TP 能实时匹配）。
+通信工具来自 comms 扩展（参数与语义见 docs/1 §6）：`comms_send`（含 `remind_s=0` 纯通知公告）、`comms_inbox` / `comms_outbox`（重读消息）、`comms_remind`（设置/调整/停止消息提醒）、`comms_list_peer`（查看 agent）、`comms_update_profile`（维护 `current_task`，让 TP 能实时匹配）。
 
 **找 agent = `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id>")`**——只描述工作、不指定角色，TP 从角色目录定角色（目录只注入 TP 的 prompt，见 docs/4 §7）；TP 回复的 agent 名自动作为 inbound 消息进入上下文，无需轮询；需要等待时可设 `remind_s`（如 300 = 每 5 分钟合并提醒一次）。
 
@@ -187,7 +187,7 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 - **子 Coordinator 拥有父级交给它的 task 节点及子图**，可在其下继续委托规划（planner）、继续 spawn 更深的子 Coordinator——深度不限
 - 委托方式与 specialist 相同：`comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id> — the node needs a sub-Coordinator to own it and drive its subgraph")` → TP 定角色（coordinator）→ `task_dispatch` 交付节点
 - 约束：子 Coordinator 服从父 Coordinator 的图（尊重 deps 与契约）、重要变更上报父 Coordinator、局部改动不得静默改变全局依赖
-- **协议各层一致**：遇阻上报（reality-beats-plan skill）、调整（task_update / task_block）、同步（comms fire-and-forget 公告）在每一层是同一套
+- **协议各层一致**：遇阻上报（reality-beats-plan skill)、调整（task_update / task_block）、同步（comms 无提醒公告）在每一层是同一套
 - **分层规划**：一层一次委托——每个 Coordinator 只委托一个 planner 编写本层骨架（子模块 / 子单元 / 审查节点 / 门）；子模块内部子图在其启动时由下一层规划，深度不限；未展开 = 正常待定，不是规划缺失
 - 反模式：不要为一次派发就能完成的工作建层；**优先最浅结构**，只有子目标真正需要独立循环时才加深
 

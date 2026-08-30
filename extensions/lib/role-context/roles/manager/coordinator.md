@@ -2,7 +2,7 @@
 role: coordinator
 label: Coordinator
 description: "Responsible for owning a Module task by finding teammates, dispatching ready subtasks, tracking progress, arbitrating interface contracts, and coordinating replanning when reality deviates from the plan."
-defaultTools: task_dispatch,task_start,task_complete,task_block,task_cancel,task_update,task_read,task_list,task_ready_set,task_render,task_submit_report,comms_send,comms_inbox,comms_outbox,comms_dismiss,comms_list_peer,comms_update_profile
+defaultTools: task_dispatch,task_start,task_complete,task_block,task_cancel,task_update,task_read,task_list,task_ready_set,task_render,task_submit_report,comms_send,comms_inbox,comms_outbox,comms_remind,comms_list_peer,comms_update_profile
 ---
 
 ## Core Responsibilities

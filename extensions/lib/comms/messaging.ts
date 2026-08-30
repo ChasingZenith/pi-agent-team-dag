@@ -32,16 +32,17 @@
  *    ordinary prompt but carries attempted_reply_to_msg_id. Replies are
  *    explicit — the responder must call comms_send(target=<sender>,
  *    reply_to_msg_id=…).
- *  - terminal states: a pending send ends when a reply arrives (ended/replied),
- *    its TTL passes (ended/expired), or the sender dismisses it via
- *    comms_dismiss (ended/dismissed — entry kept so a genuinely late reply
- *    still overwrites the result).
- *  - remind_s reminders: ONE shared scheduler (reminder.ts) ticks every ~30s
- *    and, when at least one send is due, calls the entry's injector ONCE with
- *    the full pending list (PendingInfo[]) — a single consolidated reminder
- *    turn instead of a per-msg storm. Entries expire at sentAt + stream TTL
- *    (setMessageTtlMs): expired sends stop being reminded and poll as
- *    "expired".
+ *  - reminders: a reminder is per-message, for ANY message — one you sent
+ *    (awaiting a reply) or one you received (follow-up you want to act on).
+ *    The item EXISTS only while its reminder is active; stopping the reminder
+ *    DELETES the item. Reminders are pure scheduling state — no terminal
+ *    status, no result, nothing persisted (a restart drops them; the message
+ *    itself lives on in comms_history). ONE shared scheduler (reminder.ts)
+ *    ticks every ~30s and, when at least one item is due, calls the entry's
+ *    injector ONCE with the full active list (ActiveReminder[]) — a single
+ *    consolidated reminder turn instead of a per-msg storm. Message TTL only
+ *    surfaces in the UI (expires_in_ms / comms_outbox "expired"); it never
+ *    suppresses a reminder — cancel/resend decisions stay with the agent.
  *  - publishes carry msgID = msg_id, so a retried publish is deduped by the
  *    stream's duplicate window; redelivered prompts are deduped client-side.
  */
@@ -54,7 +55,7 @@ import {
 	nanos,
 } from "nats";
 import * as batch from "./batch.ts";
-import type { DeliverAsValue, Identity, InboundContext, PendingReply, PromptPayload } from "./protocol.ts";
+import type { DeliverAsValue, Identity, InboundContext, PromptPayload } from "./protocol.ts";
 import {
 	ACK_WAIT_MS,
 	DEFAULT_SUBNET,
@@ -75,24 +76,45 @@ import * as history from "./history.ts";
 
 // ━━ Module state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const pendingReplies = new Map<string, PendingReply>();
+/**
+ * One active reminder item (pure scheduling state): present == a reminder is
+ * armed for this msg_id, removed == stopped. Holds the per-item facts the
+ * consolidated reminder turn shows (peer, direction, elapsed) plus a summary
+ * so the injector never needs to touch history.
+ */
+interface ReminderItem {
+	/** Which side of the conversation this message is on. */
+	dir: "out" | "in";
+	/** out: the peer we sent to; in: the peer we received from. */
+	peer: string;
+	/** ms epoch of the message (sent/received at) — out items expire at this + TTL. */
+	ts: number;
+	/** Reminder cadence in seconds; > 0 (items hold no 0: 0 == not in the map). */
+	remindS: number;
+	/** ms epoch when the reminder was last armed/retuned (drive the first fire). */
+	armedAt: number;
+	/** Single-line summary shown in the consolidated reminder. */
+	summary: string;
+}
+
+/** Active reminders, keyed by message msg_id — only items with remindS > 0. */
+const reminders = new Map<string, ReminderItem>();
 /** msg_ids already injected as prompts — dedupe redeliveries. */
 const processedIds = new Set<string>();
 const PROCESSED_CAP = 256;
-/** Cap on parked pending replies — resolved and dismissed entries stay parked
- *  so comms_outbox can re-read the terminal result, but FIFO-evicted beyond
- *  this so a long session of send+get polling cannot grow memory without
- *  bound. An evicted msg_id polls as "unknown" to the caller. */
+/** Cap on active reminder items — FIFO-evicted beyond this so a long session
+ *  cannot grow memory without bound. An evicted item just loses its reminder
+ *  (re-armable via remind(), which re-reads the message from history). */
 const PENDING_CAP = 256;
 
 let shuttingDown = false;
 /** Stream message TTL (entry wires it via setMessageTtlMs); 0 = not configured. */
 let messageTtlMs = 0;
 /** Subnet (communication domain) — wired via setSubnet (entry or
- *  startConsumers). Drives the no-identity lookups (listPendingReplies). */
+ *  startConsumers). Drives the no-identity lookups (listActiveReminders). */
 let subnet = DEFAULT_SUBNET;
 /** Entry-provided consolidated reminder injector (pi.sendMessage followUp, triggerTurn). */
-let remindInjector: ((pending: PendingInfo[]) => void) | null = null;
+let remindInjector: ((pending: ActiveReminder[]) => void) | null = null;
 
 /**
  * Shared reminder scheduler: one unref'd interval (~30s). Each tick it asks
@@ -106,21 +128,18 @@ const scheduler = createReminderScheduler({
 	isSuspended: () => shuttingDown || !remindInjector,
 	collect: () => {
 		const out: ReminderEntry[] = [];
-		for (const [msgId, p] of pendingReplies) {
-			if (p.result) continue; // answered / dismissed — nothing to remind
+		for (const [msgId, p] of reminders) {
 			out.push({
 				msg_id: msgId,
-				sentAt: p.sentAt,
 				remindS: p.remindS,
-				lastRemindAt: p.lastRemindAt,
-				expiresAt: messageTtlMs > 0 ? p.sentAt + messageTtlMs : null,
+				lastRemindAt: p.armedAt,
 			});
 		}
 		return out;
 	},
-	onTick: () => remindInjector?.(listPendingReplies()),
-	// onExpire deliberately omitted: expiry is visible via pollReply("expired")
-	// and listPendingReplies (expires_in_ms), no extra notification needed.
+	onTick: () => remindInjector?.(listActiveReminders()),
+	// Message TTL is not the scheduler's concern: expiry surfaces via
+	// expires_in_ms / comms_outbox, and the agent decides (cancel, resend).
 });
 
 export function setMessagingShuttingDown(v: boolean): void {
@@ -134,45 +153,38 @@ export function setMessageTtlMs(ms: number): void {
 
 /** Set the subnet (communication domain) for messaging — wired from the
  *  entry's config (and startConsumers). Used by no-identity lookups like
- *  listPendingReplies; sends use identity.subnet directly. */
+ *  listActiveReminders; sends use identity.subnet directly. */
 export function setSubnet(s: string): void {
 	subnet = s;
 }
 
-/** One parked, still-awaiting send with computed timing/status, for the
- *  consolidated reminder injector and the no-arg comms_outbox. */
-export interface PendingInfo {
+/** One active reminder with computed timing/status, for the consolidated
+ *  reminder injector, comms_outbox and the auto-exit guard. */
+export interface ActiveReminder {
 	msg_id: string;
-	/** Peer NAME the send went to. */
+	/** in = received, out = sent — "from x" vs "to x" in the reminder text. */
+	dir: "out" | "in";
+	/** Peer name (out: the target; in: the sender). */
 	target: string;
-	/** ms since the send was made. */
+	/** ms since the message was sent/received. */
 	elapsed_ms: number;
-	/** Peer status at read time ("unknown" when the target name is missing). */
+	/** Peer status at read time ("unknown" when the name is missing). */
 	target_status: "online" | "stale" | "offline" | "unknown";
-	/** ms remaining until sentAt + TTL; null when no TTL configured. */
+	/** ms remaining until sentAt + TTL (out only); null when no TTL configured. */
 	expires_in_ms: number | null;
-	/** Reminder cadence in seconds; 0 = reminder off. */
+	/** Reminder cadence in seconds. */
 	remind_s: number;
-}
-
-/** One ended (reminder stopped) send, for the no-arg comms_outbox. */
-export interface EndedInfo {
-	msg_id: string;
-	/** Peer NAME the send went to. */
-	target: string;
-	/** ms since the send was made. */
-	elapsed_ms: number;
-	/** Why the reminder stopped: replied / expired / dismissed / error. */
-	reason: "replied" | "expired" | "dismissed" | "error";
+	/** Single-line message summary. */
+	summary: string;
 }
 
 /**
  * Register the entry's consolidated reminder injector. Called once during
  * session_start; the scheduler is inert (no reminder injection) until then.
- * The injector receives the full pending list at most once per scheduler
- * tick, and only on ticks where at least one send is due.
+ * The injector receives the full active list at most once per scheduler
+ * tick, and only on ticks where at least one item is due.
  */
-export function setRemindInjector(injector: ((pending: PendingInfo[]) => void) | null): void {
+export function setRemindInjector(injector: ((pending: ActiveReminder[]) => void) | null): void {
 	remindInjector = injector;
 }
 
@@ -288,22 +300,21 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 		jsMsg: m,
 	};
 
-	// Reply resolution: a reply_to_msg_id matching one of OUR pending sends
-	// records the reply as that send's result and stops its reminder; the
-	// message still gets injected as a normal turn — the reply content is what
-	// the sender needs to see (batch.ts marks it as a reply). The match is on
-	// the sender NAME (the stable identity): a sender that crashed and
-	// restarted under the same name still resolves. Anything else — a stray or
-	// forged reply_to_msg_id, or a mix-up between parallel conversations —
-	// must NOT stop the reminder or overwrite the result; the message arrives
-	// as an ordinary prompt with attempted_reply_to_msg_id set instead.
+	// Reply resolution: a reply_to_msg_id matching one of OUR active out
+	// reminders stops that reminder; the reply is folded into the out history
+	// record below (outbox derives replied from it) and the message still gets
+	// injected as a normal turn — the reply content is what the sender needs
+	// to see (batch.ts marks it as a reply). The match is on the sender NAME
+	// (the stable identity): a sender that crashed and restarted under the
+	// same name still resolves. Anything else — a stray or forged
+	// reply_to_msg_id, or a mix-up between parallel conversations — must NOT
+	// stop the reminder; the message arrives as an ordinary prompt with
+	// attempted_reply_to_msg_id set instead.
 	if (payload.reply_to_msg_id) {
 		inbound.reply_to_msg_id = payload.reply_to_msg_id;
-		const pending = pendingReplies.get(payload.reply_to_msg_id);
-		if (pending && pending.target_name === payload.sender?.name) {
-			pending.result = { response: payload.message, error: null };
-			pending.remindS = 0; // answered — never remind again
-			pending.lastRemindAt = Date.now();
+		const item = reminders.get(payload.reply_to_msg_id);
+		if (item && item.dir === "out" && item.peer === payload.sender?.name) {
+			reminders.delete(payload.reply_to_msg_id);
 			scheduler.cancel(payload.reply_to_msg_id);
 			inbound.reply_to_pending = true;
 		} else {
@@ -360,13 +371,13 @@ export interface SendOptions {
 	replyToMsgId?: string;
 	/**
 	 * Reminder interval in SECONDS. Default 0 (and omitted behaves the same):
-	 * fire-and-forget — the publish and the comms_history record still
-	 * happen, but NO pending entry is parked: no reply resolution, no
-	 * reminder, no comms_outbox "waiting" entry, and the auto-exit guard is
-	 * not armed.
+	 * no reminder — the publish and the comms_history record still happen,
+	 * but NO reminder item is registered: no reminder, no comms_outbox
+	 * "waiting" entry, and the auto-exit guard is not armed.
+	 * (Later armable via remind(): the message is re-read from history.)
 	 * - > 0 (e.g. 300 = every 5 min): reminder armed — one consolidated
-	 *   reminder whenever due, until reply, dismiss, eviction, TTL expiry or
-	 *   shutdown.
+	 *   reminder whenever due, until a reply arrives, the user stops it via
+	 *   remind(..., 0), eviction, TTL expiry or shutdown.
 	 */
 	remindS?: number;
 	/**
@@ -430,33 +441,31 @@ export async function send(
 	const targetStatus = statusOfName(identity.subnet, target);
 
 	const now = Date.now();
-	// The reminder is armed only by an explicit remindS > 0 (seconds). Omitted
-	// and 0 are equivalent fire-and-forget: publish and persist to history
-	// but park nothing — one-way sends must not arm the auto-exit guard,
-	// show up as comms_outbox "waiting" entries, or take up pending table
-	// slots.
+	// A reminder is armed only by an explicit remindS > 0 (seconds). Omitted
+	// and 0 are equivalent no-reminder sends: publish and persist to history
+	// but register no reminder — one-way sends must not arm the auto-exit
+	// guard or take up reminder slots. (Later armable via remind(): the
+	// message is re-read from history.)
 	const remindS = opts?.remindS ?? 0;
-	const reminderArmed = remindS > 0;
 
-	if (reminderArmed) {
-		const pending: PendingReply = {
-			target_name: target,
-			sentAt: now,
+	if (remindS > 0) {
+		reminders.set(msgId, {
+			dir: "out",
+			peer: target,
+			ts: now,
 			remindS,
-			lastRemindAt: now,
-		};
+			armedAt: now,
+			summary: history.flatten(message, 48),
+		});
 
-		pendingReplies.set(msgId, pending);
-
-		// Reminder: arm through the shared scheduler (single interval for all
-		// sends); the first reminder fires after remindS has elapsed.
+		// Arm through the shared scheduler (single interval for all reminders);
+		// the first reminder fires after remindS has elapsed.
 		scheduler.arm(msgId);
 
-		// FIFO cap: evict the oldest parked entry. The scheduler is shared, so
-		// no per-key teardown is needed — an evicted entry just stops being
-		// collected. A late reply to an evicted msg_id surfaces as an
-		// orphan/unmatched reply; the caller polls it as unknown.
-		fifoEvict(pendingReplies, PENDING_CAP, (evictedId) => {
+		// FIFO cap: evict the oldest entry. The scheduler is shared, so no
+		// per-key teardown is needed — an evicted entry just stops being
+		// collected (re-armable later via remind()).
+		fifoEvict(reminders, PENDING_CAP, (evictedId) => {
 			audit("pending_evicted", { msg_id: evictedId });
 		});
 	}
@@ -467,101 +476,106 @@ export async function send(
 // (batch acking lives in batch.ts — every drained batch member is acked
 // there, so a crashed turn redelivers instead of being lost)
 
-// ━━ Reminders / poll / cancel / pending list ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━ Reminders ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Non-blocking status poll for comms_outbox. Three states:
- * - "waiting": still under reminder, no reply yet (remindS > 0 = reminder armed).
- * - "ended": reminder stopped — reason says why: "replied" (result in
- *   `result`), "expired" (sentAt + TTL passed, no reply), or "dismissed"
- *   (a late reply still overwrites `result`).
- * - "unknown": no parked entry (unknown msg_id, or FIFO-evicted).
+ * Set, retune, or stop the reminder on ANY message (comms_remind) — one we
+ * sent or one we received, at any stage of its life (including replied or
+ * past-TTL ones: arming a reminder means "remind me about this thread" — a
+ * reminder is cancelled automatically only when a reply ARRIVES). remindS > 0
+ * creates/retunes the item (same shape as the send-side registration in
+ * send()); remindS 0 deletes it (stop). Unknown msg_ids are resolved against
+ * comms_history (out first, then in), so a no-reminder send or a received
+ * message can be armed later, and a FIFO-evicted reminder re-armed.
+ * Stopping a message that has no armed reminder is an idempotent success:
+ * the target state ("no reminder") already holds, so it answers "stopped"
+ * with wasArmed=false. Only a msg_id absent from comms_history entirely
+ * answers "unknown" — message STATUS (replied / expired) is comms_outbox's
+ * job, not this tool's.
  */
-export function pollReply(msgId: string): {
-	state: "waiting" | "ended" | "unknown";
-	reason?: "replied" | "expired" | "dismissed" | "error";
-	remindS: number;
-	result?: { response?: any; error?: string | null };
-} {
-	const pending = pendingReplies.get(msgId);
-	if (!pending) return { state: "unknown", remindS: 0 };
-	if (pending.result) {
-		if (!pending.result.error) return { state: "ended", reason: "replied", remindS: 0, result: pending.result };
-		if (pending.result.error === "dismissed") return { state: "ended", reason: "dismissed", remindS: 0, result: pending.result };
-		return { state: "ended", reason: "error", remindS: 0, result: pending.result };
+export async function remind(
+	identity: Identity,
+	msgId: string,
+	seconds: number,
+): Promise<{ outcome: "reminded" | "stopped" | "unknown"; wasArmed: boolean }> {
+	const remindS = Math.max(0, Math.min(3600, Math.floor(seconds)));
+
+	const existing = reminders.get(msgId);
+	if (existing) {
+		if (remindS === 0) {
+			reminders.delete(msgId);
+			scheduler.cancel(msgId);
+			return { outcome: "stopped", wasArmed: true };
+		}
+		// Retune: keep the item, refresh the cadence and the reminder clock.
+		existing.remindS = remindS;
+		existing.armedAt = Date.now();
+		scheduler.arm(msgId);
+		return { outcome: "reminded", wasArmed: true };
 	}
-	if (messageTtlMs > 0 && Date.now() - pending.sentAt > messageTtlMs) return { state: "ended", reason: "expired", remindS: 0 };
-	return { state: "waiting", remindS: pending.remindS };
+
+	// Not active — resolve the message from history so any message can be
+	// reminded, whichever direction or stage of its life it is in. (No TTL
+	// check: even an expired message may be worth a "resend this" reminder —
+	// expiry only shows up as a status in comms_outbox.)
+	const out = await history.getOutbound(identity.subnet, identity.name, msgId);
+	let item: ReminderItem | null = null;
+	if (out) {
+		if (remindS === 0) return { outcome: "stopped", wasArmed: false }; // nothing armed — idle stop
+		item = { dir: "out", peer: out.target, ts: out.ts, remindS, armedAt: Date.now(), summary: history.flatten(out.message, 48) };
+	} else {
+		const inp = await history.getInbound(identity.subnet, identity.name, msgId);
+		if (!inp) return { outcome: "unknown", wasArmed: false };
+		if (remindS === 0) return { outcome: "stopped", wasArmed: false }; // nothing armed — idle stop
+		item = { dir: "in", peer: inp.sender, ts: inp.ts, remindS, armedAt: Date.now(), summary: history.flatten(inp.message, 48) };
+	}
+	reminders.set(msgId, item);
+
+	// Arm through the shared scheduler; the first reminder fires after remindS.
+	scheduler.arm(msgId);
+	// FIFO cap (re-armable via a later remind() — this one is fresh).
+	fifoEvict(reminders, PENDING_CAP, (evictedId) => {
+		audit("pending_evicted", { msg_id: evictedId });
+	});
+	return { outcome: "reminded", wasArmed: false };
 }
 
 /**
- * All parked sends still under reminder, with computed elapsed/status/expiry,
- * oldest first (used by the no-arg comms_outbox and the consolidated
- * reminder injector). Dismissed/replied/expired entries are excluded — they
- * are reported via listEndedReplies.
+ * All active reminders, oldest first (used by the consolidated reminder
+ * injector, the auto-exit guard and comms_outbox list mode). Only items with
+ * remindS > 0 live in the map, so this IS the active set — including past-TTL
+ * out items, which carry expires_in_ms = 0 so the injector can mark them
+ * expired (the agent decides, not the scheduler).
  */
-export function listPendingReplies(): PendingInfo[] {
+export function listActiveReminders(): ActiveReminder[] {
 	const now = Date.now();
-	const out: PendingInfo[] = [];
-	for (const [msgId, p] of pendingReplies) {
-		if (p.result) continue;
-		if (messageTtlMs > 0 && now - p.sentAt > messageTtlMs) continue; // expired → ended
+	const out: ActiveReminder[] = [];
+	for (const [msgId, p] of reminders) {
 		out.push({
 			msg_id: msgId,
-			target: p.target_name,
-			elapsed_ms: now - p.sentAt,
-			target_status: p.target_name ? statusOfName(subnet, p.target_name) : "unknown",
-			expires_in_ms: messageTtlMs > 0 ? Math.max(0, p.sentAt + messageTtlMs - now) : null,
+			dir: p.dir,
+			target: p.peer,
+			elapsed_ms: now - p.ts,
+			target_status: p.peer ? statusOfName(subnet, p.peer) : "unknown",
+			expires_in_ms: p.dir === "out" && messageTtlMs > 0 ? Math.max(0, p.ts + messageTtlMs - now) : null,
 			remind_s: p.remindS,
+			summary: p.summary,
 		});
 	}
 	out.sort((a, b) => a.elapsed_ms - b.elapsed_ms);
 	return out;
 }
 
-/**
- * All parked, ended sends (replied / expired / dismissed / error), oldest
- * first — the no-arg comms_outbox shows them in a separate section so the
- * pending list stays a pure to-do list.
- */
-export function listEndedReplies(): EndedInfo[] {
-	const now = Date.now();
-	const out: EndedInfo[] = [];
-	for (const [msgId, p] of pendingReplies) {
-		let reason: EndedInfo["reason"];
-		if (p.result) {
-			reason = !p.result.error ? "replied" : p.result.error === "dismissed" ? "dismissed" : "error";
-		} else if (messageTtlMs > 0 && now - p.sentAt > messageTtlMs) {
-			reason = "expired";
-		} else {
-			continue; // still waiting — not ended
-		}
-		out.push({ msg_id: msgId, target: p.target_name, elapsed_ms: now - p.sentAt, reason });
-	}
-	out.sort((a, b) => a.elapsed_ms - b.elapsed_ms);
-	return out;
+/** Remind cadence (s) for one msg_id, or null when no active reminder — used
+ *  by comms_outbox detail mode to overlay the "remind N" marker on top of the
+ *  history-derived status. */
+export function getActiveRemindS(msgId: string): number | null {
+	const p = reminders.get(msgId);
+	if (!p) return null;
+	return p.remindS;
 }
 
-/**
- * Stop reminding on a parked msg_id (comms_dismiss): stops its reminder and
- * records it as ended/dismissed. Direction is implied by the msg_id: only
- * sends we made ourselves are parked here. The entry is KEPT parked with
- * result { error: "dismissed" }, so a genuinely late reply still overwrites
- * it with the real result.
- * Returns: "unknown" (no parked entry), "already_answered" (a real reply was
- * already recorded), or "dismissed".
- */
-export function dismissReply(msgId: string): "dismissed" | "already_answered" | "unknown" {
-	const pending = pendingReplies.get(msgId);
-	if (!pending) return "unknown";
-	if (pending.result && !pending.result.error) return "already_answered";
-	scheduler.cancel(msgId);
-	pending.result = { error: "dismissed" };
-	pending.remindS = 0;
-	return "dismissed";
-}
-
-/** Stop the shared reminder scheduler (shutdown). Returns how many sends were armed. */
+/** Stop the shared reminder scheduler (shutdown). Returns how many items were armed. */
 export function clearAllReminders(): number {
 	return scheduler.stopAll();
 }

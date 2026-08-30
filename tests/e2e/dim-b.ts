@@ -80,16 +80,16 @@ async function dumpKv(): Promise<Record<string, unknown>> {
   };
 }
 
-// ━━ B-6: remind scheduler (consolidated injection, dismiss stops it) ━━━━━━━━
+// ━━ B-6: remind scheduler (consolidated injection, stop stops it) ━━━━━━━━━━
 async function runB6(harnessId: any): Promise<void> {
   const captured: { t: number; pending: any[] }[] = [];
-  messaging.setRemindInjector((pending: messaging.PendingInfo[]) => {
+  messaging.setRemindInjector((pending: messaging.ActiveReminder[]) => {
     captured.push({ t: Date.now(), pending: pending as any });
-    log(`B-6 injector fired: ${pending.length} pending — ${pending.map((p) => p.msg_id).join(",")}`);
+    log(`B-6 injector fired: ${pending.length} active — ${pending.map((p) => p.msg_id).join(",")}`);
   });
 
   const t0 = Date.now();
-  const r1 = await messaging.send(harnessId, "b-noreply", "hi", { remindMs: 1000 });
+  const r1 = await messaging.send(harnessId, "b-noreply", "hi", { remindS: 1 });
   check("B-6a", typeof r1.msg_id === "string" && r1.msg_id.length > 0, `send#1 ok msg_id=${r1.msg_id}`);
 
   // ≤40s: first consolidated injection containing msg_id
@@ -101,10 +101,10 @@ async function runB6(harnessId: any): Promise<void> {
     check("B-6b", true, `first injection at +${Date.now() - t0}ms, pending count ${first.pending.length}`);
   }
 
-  // second pending send → next tick must still be exactly ONE injection, merged
+  // second active send → next tick must still be exactly ONE injection, merged
   const before = captured.length;
   const lastT = before > 0 ? captured[before - 1].t : 0; // strictly AFTER the first injection
-  const r2 = await messaging.send(harnessId, "b-noreply", "hi again", { remindMs: 1000 });
+  const r2 = await messaging.send(harnessId, "b-noreply", "hi again", { remindS: 1 });
   await waitFor(
     () => (captured.length > before ? captured[captured.length - 1] : null),
     { timeoutMs: 40_000, stepMs: 500, label: "B-6 second injection" },
@@ -115,18 +115,18 @@ async function runB6(harnessId: any): Promise<void> {
   check(
     "B-6d",
     !!last && last.pending.some((p) => p.msg_id === r1.msg_id) && last.pending.some((p) => p.msg_id === r2.msg_id),
-    `injection covers BOTH pending sends (merged; got ${last ? last.pending.length : 0} entries)`,
+    `injection covers BOTH active sends (merged; got ${last ? last.pending.length : 0} entries)`,
   );
 
-  // dismiss both → no further injections within one full tick (~35s)
-  const d1 = messaging.dismissReply(r1.msg_id);
-  const d2 = messaging.dismissReply(r2.msg_id);
-  check("B-6e", d1 === "dismissed", `dismiss r1 → ${d1}`);
-  check("B-6f", d2 === "dismissed", `dismiss r2 → ${d2}`);
+  // stop both → no further injections within one full tick (~35s)
+  const d1 = await messaging.remind(harnessId, r1.msg_id, 0);
+  const d2 = await messaging.remind(harnessId, r2.msg_id, 0);
+  check("B-6e", d1.outcome === "stopped" && d1.wasArmed, `stop r1 → ${d1.outcome}`);
+  check("B-6f", d2.outcome === "stopped" && d2.wasArmed, `stop r2 → ${d2.outcome}`);
   const base = captured.length;
   await sleep(35_000);
   const extra = captured.slice(base);
-  check("B-6g", extra.length === 0, `no injections in 35s after dismiss (got ${extra.length})`);
+  check("B-6g", extra.length === 0, `no injections in 35s after stop (got ${extra.length})`);
 }
 
 // ━━ B-9: subnet isolation negative test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
