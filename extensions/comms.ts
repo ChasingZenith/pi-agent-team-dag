@@ -572,9 +572,10 @@ export default function (pi: ExtensionAPI) {
 						(rm ? ` · remind ${fmtMs(rm.remind_s * 1000)}` : "");
 					lines.push(`  ${rec.msg_id} to ${rec.target} — ${status} — "${history.flatten(rec.message)}"`);
 				}
-				// Active reminders with no history record yet (sent before this
-				// session's first successful write) — show with a placeholder.
+				// Active reminders on our sends with no history record yet (sent
+				// before this session's first successful write) — placeholder row.
 				for (const [id, li] of live) {
+					if (li.dir !== "out") continue;
 					if (records.some((r) => r.msg_id === id)) continue;
 					lines.push(`  ${id} to ${li.target} — ${li.summary} — "(content not recorded)"`);
 				}
@@ -624,7 +625,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"List or re-read messages you RECEIVED from other peers.\n\n" +
 			"With no msg_id: list your recent received messages, newest first (sender and content summary; default limit: 10 — " +
-			"if the total exceeds the limit, the header says so and shows only the latest ones).\n" +
+			"if the total exceeds the limit, the header says so and shows only the latest ones; active reminders " +
+			"are marked \"· remind N\", like the outbox).\n" +
 			"With msg_id: retrieve the full details of that specific message, including the sender, timestamp, reply linkage, and full content.\n\n" +
 			"Normally, inbound messages are automatically delivered to you as inbound turns or injections. You do NOT need to poll this inbox to check for new messages; they are automatically disclosed in your LLM context when delivered.\n\n" +
 			"This tool is primarily for recovering or re-reading past communication when the current context is no longer sufficient — for example, after context compaction or a restart, when communication with peers appears inconsistent, or when you need to recover a previous message or its msg_id. Received-message history is kept separately in persistent message history for up to 24 hours.\n\n" +
@@ -644,7 +646,9 @@ export default function (pi: ExtensionAPI) {
 			const msgId = typeof p.msg_id === "string" && p.msg_id.length > 0 ? p.msg_id : undefined;
 			const limit = typeof p.limit === "number" && p.limit > 0 ? Math.min(p.limit, 100) : 10;
 
-			// List mode: recent received messages, newest first.
+			// List mode: recent received messages, newest first. Reminder markers
+			// overlay the live table exactly like outbox — reminders can be armed
+			// on received messages too.
 			if (!msgId) {
 				const { records, total } = await history.listInbound(self.subnet, self.name, limit);
 				if (records.length === 0) {
@@ -652,10 +656,31 @@ export default function (pi: ExtensionAPI) {
 						content: [{ type: "text" as const, text: "comms_inbox: no received messages recorded" }],
 					};
 				}
-				const lines = records.map((r) =>
-					`  ${r.msg_id} from ${r.sender}` +
-					(r.reply_to_msg_id ? ` (reply to ${r.reply_to_msg_id})` : "") +
-					` — "${history.flatten(r.message)}"`);
+				const live = new Map<string, ActiveReminder>();
+				for (const x of messaging.listActiveReminders()) live.set(x.msg_id, x);
+
+				const lines: string[] = [];
+				for (const rec of records) {
+					const rm = live.get(rec.msg_id);
+					lines.push(
+						`  ${rec.msg_id} from ${rec.sender}` +
+						(rec.reply_to_msg_id ? ` (reply to ${rec.reply_to_msg_id})` : "") +
+						(rm ? ` · remind ${fmtMs(rm.remind_s * 1000)}` : "") +
+						` — "${history.flatten(rec.message)}"`);
+				}
+				// Active reminders on received messages with no history record yet
+				// (before this session's first successful write) — placeholder row,
+				// same as outbox.
+				for (const [id, li] of live) {
+					if (li.dir !== "in") continue;
+					if (records.some((r) => r.msg_id === id)) continue;
+					lines.push(`  ${id} from ${li.target} — ${li.summary} — "(content not recorded)"`);
+				}
+				if (lines.length === 0) {
+					return {
+						content: [{ type: "text" as const, text: "comms_inbox: no received messages recorded" }],
+					};
+				}
 				const header = total > records.length
 					? `comms_inbox: ${total} message(s) — showing latest ${records.length}`
 					: `comms_inbox: ${total} message(s)`;
@@ -675,6 +700,8 @@ export default function (pi: ExtensionAPI) {
 				const answered = await history.getOutbound(self.subnet, self.name, rec.reply_to_msg_id);
 				text += ` (reply to ${rec.reply_to_msg_id}${answered ? ", your send" : ""})`;
 			}
+			const remindS = messaging.getActiveRemindS(msgId) ?? 0;
+			if (remindS > 0) text += ` · remind ${fmtMs(remindS * 1000)}`;
 			text += `\nreceived at ${new Date(rec.ts).toISOString()}`;
 			text += `\nmessage: ${rec.message}`;
 			return { content: [{ type: "text" as const, text }] };

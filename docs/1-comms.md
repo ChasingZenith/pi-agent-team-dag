@@ -238,7 +238,7 @@ session_shutdown / SIGINT / SIGTERM
 
 ### 6.4 `comms_inbox` — 重读收到的消息
 - 数据源:同一持久化消息历史 — compact 或重启后重读收到的内容、找回丢失的 msg_id
-- `msg_id`(可选):单条详情 — 发送方、时间戳、reply 关联、全文;省略时列出最近收到的消息(新→旧,发送方 + 内容摘要,`limit` 默认 10,最大 100);总数超过 `limit` 时标题标注总数并只列最新 `limit` 条
+- `msg_id`(可选):单条详情 — 发送方、时间戳、reply 关联、全文;若该消息的提醒激活中,额外标注 `· remind N`(会话内存,重启后消失)。省略时列出最近收到的消息(新→旧,发送方 + 内容摘要,`limit` 默认 10,最大 100);总数超过 `limit` 时标题标注总数并只列最新 `limit` 条;活跃提醒同样叠加 `· remind N` 标注(与 outbox 一致)
 - 回复也会落在这里(标注 `reply to <msg_id>`);回复的**完整内容只在 inbox**(outbox 侧只记 msg_id,见 §6.3)
 
 ### 6.5 `comms_remind` — 设置 / 调整 / 取消提醒
