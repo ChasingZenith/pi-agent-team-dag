@@ -44,7 +44,7 @@
 
 每个 agent 一个 NATS 连接,持有一个 durable consumer:
 
-- **`p_<name>`** — prompt consumer,过滤 `<subnet>.msg.<name>.>`(名字经 sanitize 后作段),显式 ack,ack_wait = 5 分钟重投窗口(远小于消息 TTL,max_deliver 重投才有机会发生),max_deliver 3。回复也走同一 subject,靠 payload 的 `reply_to_msg_id` 标记区分。consumer 以**名字**命名并**跨重启保留**(干净关闭不删除,见 §3):同名重启复用同一 consumer — 未 ack 的 prompt 重投,已 ack 的不重放,离线期间积累的消息在重启后续投。`deliver_policy: All` 只在 consumer **首次创建**时生效(拿回创建前就排队的消息),之后投递由游标 + ack 决定。
+- **`p_<name>`** — prompt consumer,过滤 `<subnet>.msg.<name>.>`(名字经 sanitize 后作段),显式 ack,ack_wait = 5 分钟重投窗口(远小于消息 TTL,max_deliver 重投才有机会发生),max_deliver 3。回复也走同一 subject,靠 payload 的 `reply_to_msg_id` 标记区分。consumer 以**名字**命名并**跨重启保留**(干净关闭不删除,见 §3):同名重启复用同一 consumer — 未 ack 的 prompt 重投,已 ack 的不重放,离线期间积累的消息在重启后续投。`deliver_policy: All` 只在 consumer **首次创建**时生效(拿回创建前就排队的消息),之后投递由游标 + ack 决定。consumer 带 `inactive_threshold` = 1h(远大于消息 TTL):nats-server ≥ 2.10 对连续 1h 无拉取活动的 durable 自动回收 — 短离线(≤1h)重启仍复用同一 consumer 续游标;超过 1h(或名字已废弃)则 consumer 被回收,同名重建时 `deliver_policy: All` 只重放 stream 中未过期(≤30min TTL)的消息 —— 已 ack 的旧消息都已过 TTL,不会重复投递。
 
 ### 2.1.1 身份模型:名字即身份
 
@@ -166,7 +166,8 @@ session_shutdown / SIGINT / SIGTERM
           ├── 清空提醒定时器
           ├── 删除自己的资料 + 名字索引(key)
           ├── 保留 prompt durable consumer(跨重启复用:
-          │       未 ack 重投、已 ack 不重放、离线消息续投)
+          │       未 ack 重投、已 ack 不重放、离线消息续投;
+          │       连续 1h 无拉取后由 server 自动回收)
           ├── 移除 status
           └── 审计 shutdown
 ```
@@ -285,7 +286,7 @@ status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers
 | 网络抖动 / 服务器短暂不可达 | NATS 客户端自动重连;durable consumer 从 ack 位置继续;未 ack 的 prompt 重投(去重后不重复触发,见 §2.2) |
 | agent 崩溃(SIGKILL) | **名字索引(comms_names)TTL 30s 后过期释放**;资料(comms_profiles)**永久保留**,状态由 last_seen_at 推导为 offline;已投递未 ack 的 prompt 重投见下行;发起方的合并提醒继续(见 §2.4) |
 | nats-server 重启 | stream/KV 落盘恢复,消息不丢;客户端自动重连 |
-| 目标离线 | 消息在 stream 中排队(30min TTL);目标重连后由复用同一 consumer 送达(游标续投);TTL 过期未投的消息由 stream 清理;提醒与 expired 语义见 §2.4 |
+| 目标离线 | 消息在 stream 中排队(30min TTL);目标重连后送达(离线 ≤1h 复用同一 consumer 续投游标;更久则 consumer 已被 server 回收,重建后重放 TTL 窗口内的消息);TTL 过期未投的消息由 stream 清理;提醒与 expired 语义见 §2.4 |
 | 并发入站 | 每条消息到达即注入(目标忙碌时由 pi 的 steer / followUp 队列排队),注入成功即 ack,失败按 ack_wait 重投;无批次等待 |
 | 回复忘记 reply_to_msg_id | 对方回复走普通消息注入,发起方提醒不会自动停止 — 发起方看到内容后自行 `comms_remind(msg_id, 0)` 取消 |
 | 接收方崩溃(未 ack 的消息) | 未 ack 的消息在 5 分钟(ack_wait)后重投,重投后重新注入;注入成功后已 ack 的消息不重投 — 注入后、回合完成前崩溃的部分由发送方 remind 兜底 |

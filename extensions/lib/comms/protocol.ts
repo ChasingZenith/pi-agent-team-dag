@@ -87,6 +87,17 @@ export const MAX_ACK_PENDING = 50;
  * expiry and the 3rd can never occur.
  */
 export const ACK_WAIT_MS = 5 * 60_000;
+/**
+ * Consumer inactivity threshold (nats-server 2.10+): a consumer with no pull
+ * request for this long is auto-deleted by the server. Kept well above the
+ * message TTL: an offline period within an hour leaves the durable consumer in
+ * place, so a restart resumes the same cursor. Beyond it the consumer is
+ * reaped — the recreated one starts with deliver_policy: All over the stream
+ * window, which is safe because every acked message is already past the TTL
+ * (> 30 min ago), so only messages that arrived while the agent was gone are
+ * replayed. This is the reaper for abandoned/renamed agent names.
+ */
+export const CONSUMER_INACTIVE_THRESHOLD_MS = 60 * 60_000;
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
