@@ -77,8 +77,8 @@ function commsRuntime(): CommsRuntime {
 // Constants
 // =============================================================================
 
-/** Reminder interval for tracked sends (delegations). */
-const REMIND_MS = 300_000;
+/** Reminder interval in seconds for tracked sends (delegations): every 5 min. */
+const REMIND_S = 300;
 
 // =============================================================================
 // Extension
@@ -141,11 +141,11 @@ export default function (pi: ExtensionAPI) {
 	async function sendMessage(
 		target: string,
 		body: string,
-		remindMs: number,
+		remindS: number,
 		replyToMsgId?: string,
 	): Promise<Awaited<ReturnType<CommsRuntime["messaging"]["send"]>>> {
 		return commsRuntime().messaging.send(commsIdentity(), target, body, {
-			remindMs,
+			remindS,
 			...(replyToMsgId ? { replyToMsgId } : {}),
 		});
 	}
@@ -226,7 +226,7 @@ export default function (pi: ExtensionAPI) {
 				`Each dispatch is one task; complete every task you receive.` +
 				(extra ? `\n\n${extra}` : "") +
 				`\n\nWhen you finish (or when reality stops part of the work), reply with task_submit_report(id="${p.task_id}", report=...) — it writes the completion record on the node and automatically replies to this dispatch message.`;
-			const sendResult = await sendMessage(p.agent, body, REMIND_MS);
+			const sendResult = await sendMessage(p.agent, body, REMIND_S);
 			// dispatched_to records the agent NAME — the comms identity, which is
 			// exactly what the send just addressed (stable across restarts).
 			const r = store.setTaskStatus(cwd, p.task_id, "dispatched", {
@@ -250,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 						text:
 							`task_dispatch: "${r.item.id}" → ${p.agent} (msg ${sendResult.msg_id.slice(-8)}, target ${sendResult.target_status})\n` +
 							`  status: dispatched, dispatched_to: ${p.agent}\n` +
-							` reminders fire every 5 min.`,
+							` reminders fire every ${REMIND_S} s.`,
 					},
 				],
 				details: {

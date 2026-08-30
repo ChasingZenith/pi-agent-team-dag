@@ -1,6 +1,6 @@
 /**
  * comms — JetStream messaging: durable prompt consumer, send, explicit
- * replies (reply_to_msg_id), consolidated remind_ms reminders (one shared
+ * replies (reply_to_msg_id), consolidated remind_s reminders (one shared
  * scheduler), pending-reply resolution.
  *
  * Delivery model:
@@ -36,7 +36,7 @@
  *    its TTL passes (ended/expired), or the sender dismisses it via
  *    comms_dismiss (ended/dismissed — entry kept so a genuinely late reply
  *    still overwrites the result).
- *  - remind_ms reminders: ONE shared scheduler (reminder.ts) ticks every ~30s
+ *  - remind_s reminders: ONE shared scheduler (reminder.ts) ticks every ~30s
  *    and, when at least one send is due, calls the entry's injector ONCE with
  *    the full pending list (PendingInfo[]) — a single consolidated reminder
  *    turn instead of a per-msg storm. Entries expire at sentAt + stream TTL
@@ -111,7 +111,7 @@ const scheduler = createReminderScheduler({
 			out.push({
 				msg_id: msgId,
 				sentAt: p.sentAt,
-				remindMs: p.remindMs,
+				remindS: p.remindS,
 				lastRemindAt: p.lastRemindAt,
 				expiresAt: messageTtlMs > 0 ? p.sentAt + messageTtlMs : null,
 			});
@@ -151,8 +151,8 @@ export interface PendingInfo {
 	target_status: "online" | "stale" | "offline" | "unknown";
 	/** ms remaining until sentAt + TTL; null when no TTL configured. */
 	expires_in_ms: number | null;
-	/** Reminder cadence in ms; 0 = reminder off. */
-	remind_ms: number;
+	/** Reminder cadence in seconds; 0 = reminder off. */
+	remind_s: number;
 }
 
 /** One ended (no longer tracked) send, for the no-arg comms_outbox. */
@@ -302,7 +302,7 @@ function handlePrompt(m: JsMsg, onPrompt: (inbound: InboundContext) => void, ide
 		const pending = pendingReplies.get(payload.reply_to_msg_id);
 		if (pending && pending.target_name === payload.sender?.name) {
 			pending.result = { response: payload.message, error: null };
-			pending.remindMs = 0; // answered — never remind again
+			pending.remindS = 0; // answered — never remind again
 			pending.lastRemindAt = Date.now();
 			scheduler.cancel(payload.reply_to_msg_id);
 			inbound.reply_to_pending = true;
@@ -359,19 +359,16 @@ export interface SendOptions {
 	 */
 	replyToMsgId?: string;
 	/**
-	 * Reminder interval (ms). Three distinct semantics:
-	 * - omitted: tracked, no reminder — parked in the pending table (replies
-	 *   resolve, comms_outbox can poll, auto-exit waits), but no periodic
-	 *   reminder fires.
-	 * - > 0 (e.g. 300_000 = every 5 min): tracked + reminded — one
-	 *   consolidated reminder whenever due, until reply, dismiss, eviction,
-	 *   TTL expiry or shutdown.
-	 * - 0: fire-and-forget — the publish and the comms_history record still
-	 *   happen, but NO pending entry is parked: no reply resolution, no
-	 *   reminder, no comms_outbox "waiting" entry, and the auto-exit guard
-	 *   is not armed.
+	 * Reminder interval in SECONDS. Default 0 (and omitted behaves the same):
+	 * fire-and-forget — the publish and the comms_history record still
+	 * happen, but NO pending entry is parked: no reply resolution, no
+	 * reminder, no comms_outbox "waiting" entry, and the auto-exit guard is
+	 * not armed.
+	 * - > 0 (e.g. 300 = every 5 min): tracked + reminded — one consolidated
+	 *   reminder whenever due, until reply, dismiss, eviction, TTL expiry or
+	 *   shutdown.
 	 */
-	remindMs?: number;
+	remindS?: number;
 	/**
 	 * Delivery mode at the target (wire DeliverAsValue, see protocol.ts):
 	 * "steer" (default) — injected at the target's next LLM-call boundary /
@@ -433,27 +430,27 @@ export async function send(
 	const targetStatus = statusOfName(identity.subnet, target);
 
 	const now = Date.now();
-	// Explicit remindMs 0 = fire-and-forget: publish and persist to history
-	// but park nothing — one-way sends must not arm the auto-exit
-	// guard, show up as comms_outbox "waiting" entries, or take up pending
-	// table slots. Omitted (> 0 / undefined) keeps the tracked behavior.
-	const tracked = opts?.remindMs !== 0;
+	// Tracking is armed only by an explicit remindS > 0 (seconds). Omitted
+	// and 0 are equivalent fire-and-forget: publish and persist to history
+	// but park nothing — one-way sends must not arm the auto-exit guard,
+	// show up as comms_outbox "waiting" entries, or take up pending table
+	// slots.
+	const remindS = opts?.remindS ?? 0;
+	const tracked = remindS > 0;
 
 	if (tracked) {
 		const pending: PendingReply = {
 			target_name: target,
 			sentAt: now,
-			remindMs: opts?.remindMs && opts.remindMs > 0 ? opts.remindMs : 0,
+			remindS,
 			lastRemindAt: now,
 		};
 
 		pendingReplies.set(msgId, pending);
 
 		// Reminder: arm through the shared scheduler (single interval for all
-		// sends); the first reminder fires after remindMs has elapsed.
-		if (pending.remindMs > 0) {
-			scheduler.arm(msgId);
-		}
+		// sends); the first reminder fires after remindS has elapsed.
+		scheduler.arm(msgId);
 
 		// FIFO cap: evict the oldest parked entry. The scheduler is shared, so
 		// no per-key teardown is needed — an evicted entry just stops being
@@ -474,7 +471,7 @@ export async function send(
 
 /**
  * Non-blocking status poll for comms_outbox. Three states:
- * - "waiting": still tracked, no reply yet (remindMs > 0 = reminder armed).
+ * - "waiting": still tracked, no reply yet (remindS > 0 = reminder armed).
  * - "ended": no longer tracked — reason says why: "replied" (result in
  *   `result`), "expired" (sentAt + TTL passed, no reply), or "dismissed"
  *   (a late reply still overwrites `result`).
@@ -483,18 +480,18 @@ export async function send(
 export function pollReply(msgId: string): {
 	state: "waiting" | "ended" | "unknown";
 	reason?: "replied" | "expired" | "dismissed" | "error";
-	remindMs: number;
+	remindS: number;
 	result?: { response?: any; error?: string | null };
 } {
 	const pending = pendingReplies.get(msgId);
-	if (!pending) return { state: "unknown", remindMs: 0 };
+	if (!pending) return { state: "unknown", remindS: 0 };
 	if (pending.result) {
-		if (!pending.result.error) return { state: "ended", reason: "replied", remindMs: 0, result: pending.result };
-		if (pending.result.error === "dismissed") return { state: "ended", reason: "dismissed", remindMs: 0, result: pending.result };
-		return { state: "ended", reason: "error", remindMs: 0, result: pending.result };
+		if (!pending.result.error) return { state: "ended", reason: "replied", remindS: 0, result: pending.result };
+		if (pending.result.error === "dismissed") return { state: "ended", reason: "dismissed", remindS: 0, result: pending.result };
+		return { state: "ended", reason: "error", remindS: 0, result: pending.result };
 	}
-	if (messageTtlMs > 0 && Date.now() - pending.sentAt > messageTtlMs) return { state: "ended", reason: "expired", remindMs: 0 };
-	return { state: "waiting", remindMs: pending.remindMs };
+	if (messageTtlMs > 0 && Date.now() - pending.sentAt > messageTtlMs) return { state: "ended", reason: "expired", remindS: 0 };
+	return { state: "waiting", remindS: pending.remindS };
 }
 
 /**
@@ -515,7 +512,7 @@ export function listPendingReplies(): PendingInfo[] {
 			elapsed_ms: now - p.sentAt,
 			target_status: p.target_name ? statusOfName(subnet, p.target_name) : "unknown",
 			expires_in_ms: messageTtlMs > 0 ? Math.max(0, p.sentAt + messageTtlMs - now) : null,
-			remind_ms: p.remindMs,
+			remind_s: p.remindS,
 		});
 	}
 	out.sort((a, b) => a.elapsed_ms - b.elapsed_ms);
@@ -560,7 +557,7 @@ export function dismissReply(msgId: string): "dismissed" | "already_answered" | 
 	if (pending.result && !pending.result.error) return "already_answered";
 	scheduler.cancel(msgId);
 	pending.result = { error: "dismissed" };
-	pending.remindMs = 0;
+	pending.remindS = 0;
 	return "dismissed";
 }
 

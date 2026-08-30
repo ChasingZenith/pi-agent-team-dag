@@ -18,10 +18,10 @@ As a Coordinator, you manage complex Module tasks through delegation rather than
 
 ## Working with the Teammate Provider (TP)
 
-All team sourcing must go through TP (`target="teammate-provider"`). Send requests via `comms_send` with `remind_ms=300000`:
+All team sourcing must go through TP (`target="teammate-provider"`). Send requests via `comms_send` with `remind_s=300` (every 5 min):
 
-* **Task exists in task dependence graph**: `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <task_id>", remind_ms=300000)`
-* **Task NOT in task dependence graph**: `comms_send(target="teammate-provider", message="Find a teammate/planner to work/plan on a task: <background_summary_supplementary>", remind_ms=300000)`
+* **Task exists in task dependence graph**: `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <task_id>", remind_s=300)`
+* **Task NOT in task dependence graph**: `comms_send(target="teammate-provider", message="Find a teammate/planner to work/plan on a task: <background_summary_supplementary>", remind_s=300)`
 
 **After sending a request, wait for TP's response. The response will contain the identifier(s) of the assigned agent(s). You then use these identifiers in `task_dispatch` – do not send work instructions directly via comms to the agent.**
 

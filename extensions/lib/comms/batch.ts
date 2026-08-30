@@ -69,7 +69,7 @@ let activeBatch: InboundContext[] | null = null;
  * content = buildBatchPrompt, details msg_ids/sender_names, deliverAs =
  * the group's own pi mode — see tryDrain, triggerTurn true). While unset,
  * drained batches are settled (acked) directly instead of injected — senders
- * get no answer (their remind_ms reminders keep firing).
+ * get no answer (their remind_s reminders keep firing).
  */
 let batchInjector: ((batch: InboundContext[], message: string, deliverAs: PiDeliverAs) => void) | null = null;
 

@@ -102,7 +102,7 @@ agent-lifecycle 本身不发送消息——spawn 后的通信由 LLM 调用 comm
 ```
 LLM → agent_spawn(name="worker")           # lifecycle: 创建 tmux window
 LLM → comms_list_peer                        # 确认 agent 已上线
-LLM → comms_send(target="worker", ..., remind_ms=300000)  # 发送初始消息,开启周期提醒
+LLM → comms_send(target="worker", ..., remind_s=300)  # 发送初始消息,每 300 秒开启周期提醒
 LLM → comms_outbox(msg_id)              # 查询回复(worker 用 send+reply_to_msg_id 显式回复)
 LLM → agent_kill(name="worker")            # lifecycle: 关闭 window
 ```

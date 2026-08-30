@@ -254,7 +254,7 @@ export interface PromptPayload {
 	 * When this message is a REPLY to an earlier message, the msg_id of the
 	 * message it answers. The recipient resolves it against its own pending
 	 * sends: a match records the reply as the result (comms_outbox) and stops
-	 * the remind_ms reminder for that msg_id. Always set by comms_send when
+	 * the remind_s reminder for that msg_id. Always set by comms_send when
 	 * the caller passes reply_to_msg_id.
 	 */
 	reply_to_msg_id?: string;
@@ -293,7 +293,7 @@ export interface InboundContext {
  * Parked sender-side send. The timing fields drive the shared reminder
  * scheduler (reminder.ts) and the expiry/poll logic in messaging.ts:
  *   sentAt        — ms epoch of the send (expiry = sentAt + stream TTL).
- *   remindMs      — reminder cadence; 0 = no reminder configured.
+ *   remindS       — reminder cadence in seconds; 0 = no reminder configured.
  *   lastRemindAt  — ms epoch of the last injected reminder.
  */
 export interface PendingReply {
@@ -308,7 +308,7 @@ export interface PendingReply {
 	 *  resolves). */
 	target_name: string;
 	sentAt: number;
-	remindMs: number;
+	remindS: number;
 	lastRemindAt: number;
 }
 

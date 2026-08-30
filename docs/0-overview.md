@@ -72,7 +72,7 @@ flowchart LR
 - **task 是图上唯一的实体**（docs/6）——目标、子目标、执行单元都是它；计划=图。
 - **执行推进**：标记叶子 done → 系统解锁后继（unlocked）→ 从就绪集继续派发。
 - **管理节点建立在 task 之上**：维护图、从就绪集并行派发、验证后标记 done。
-- **变更通知**：comms 的 fire-and-forget 消息（`comms_send(..., remind_ms=0)`），公告体指向 `task_read`。
+- **变更通知**：comms 的 fire-and-forget 消息（`comms_send(..., remind_s=0)`），公告体指向 `task_read`。
 
 ---
 

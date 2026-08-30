@@ -4,8 +4,8 @@
  * messaging.ts drives sender-side "still waiting for a reply" reminders
  * through ONE shared scheduler (a single unref'd setInterval, ~30s tick)
  * instead of one interval loop per awaited send. Each tick the scheduler
- * collects the current pending entries, computes which are due (remindMs
- * configured, not expired, remindMs elapsed since the last reminder), and
+ * collects the current pending entries, computes which are due (remindS
+ * configured, not expired, remindS seconds elapsed since the last reminder), and
  * when at least one is due calls onTick ONCE with the full pending list — a
  * single consolidated reminder turn, no per-message storm. Entries past
  * their TTL (expiresAt) are dropped from reminding and reported once via
@@ -13,7 +13,7 @@
  *
  * The scheduler is SHARED, so per-key lifecycle (reply arrived, dismissed,
  * FIFO-evicted) needs no per-key teardown: an entry stops being due the
- * moment collect() stops returning it (or returns remindMs 0). Its only
+ * moment collect() stops returning it (or returns remindS 0). Its only
  * per-key state is the last-injection clock and a one-shot onExpire marker.
  */
 
@@ -22,8 +22,8 @@ export interface ReminderEntry {
 	msg_id: string;
 	/** ms epoch of the send (expiry = sentAt + TTL). */
 	sentAt: number;
-	/** Reminder cadence in ms; <= 0 → never remind. */
-	remindMs: number;
+	/** Reminder cadence in seconds; <= 0 → never remind. */
+	remindS: number;
 	/** ms epoch of the last injected reminder (seed value; the scheduler tracks updates). */
 	lastRemindAt: number;
 	/** ms epoch after which the entry is expired (dropped from reminding), or null when no TTL. */
@@ -66,7 +66,7 @@ export function createReminderScheduler(hooks: ReminderSchedulerHooks): Reminder
 		const now = Date.now();
 		const due: ReminderEntry[] = [];
 		for (const entry of pending) {
-			if (!(entry.remindMs > 0)) continue; // no reminder configured
+			if (!(entry.remindS > 0)) continue; // no reminder configured
 			// Past TTL: dropped from reminding, reported once.
 			if (entry.expiresAt !== null && now >= entry.expiresAt) {
 				if (!expiredReported.has(entry.msg_id)) {
@@ -76,7 +76,7 @@ export function createReminderScheduler(hooks: ReminderSchedulerHooks): Reminder
 				continue;
 			}
 			const last = lastRemindAt.get(entry.msg_id) ?? entry.lastRemindAt;
-			if (now - last >= entry.remindMs) due.push(entry);
+			if (now - last >= entry.remindS * 1_000) due.push(entry);
 		}
 		if (due.length === 0) return;
 		// Update the reminder clocks FIRST so a re-entrant injector (which may

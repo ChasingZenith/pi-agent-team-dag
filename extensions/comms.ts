@@ -13,7 +13,7 @@
  * its task assignments. There is deliberately no per-process session id.
  *
  * Messaging model:
- *   - send: comms_send(target|targets, message, [remind_ms], [reply_to_msg_id], [deliver_as]) — a
+ *   - send: comms_send(target|targets, message, [remind_s], [reply_to_msg_id], [deliver_as]) — a
  *     REPLY is a send carrying reply_to_msg_id=<the msg_id you received>; the
  *     sender resolves it and stops the reminder.
  *   - delivery: replies arrive automatically as an inbound turn; there is no
@@ -24,10 +24,11 @@
  *     "next turn" bypasses the batch: it is routed straight to pi's
  *     next-turn queue (injected at the target's next turn; it never
  *     triggers a turn).
- *   - remind: send(remind_ms=<ms>) arms a consolidated reminder — while any
- *     send is unanswered, ONE reminder turn is injected per interval covering
- *     all pending sends (with target status + TTL countdown); entries expire
- *     at the stream TTL. Stop tracking with comms_dismiss(msg_id).
+ *   - remind: send(remind_s=<seconds>) arms a consolidated reminder — while any
+ *     tracked send is unanswered, ONE reminder turn is injected per interval
+ *     covering all pending sends (with target status + TTL countdown);
+ *     entries expire at the stream TTL. Default 0 = fire-and-forget (no
+ *     tracking, no reminder). Stop tracking with comms_dismiss(msg_id).
  *   - history: every outbound and inbound message content is persisted to the
  *     comms_history KV bucket (TTL default 24h) — comms_outbox / comms_inbox
  *     re-read content after a compact or restart, when the in-memory pending
@@ -455,12 +456,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Send a message to one or more peers on the comms hub.\n\n" +
 			"Calling this function sends the message to the specified peer(s). Each receiver automatically receives the message as an inbound turn or injection — the receiver does NOT need to poll or check an inbox. The exact time and way the message is injected depends on `deliver_as`.\n\n" +
-			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_ms` to remind yourself if a reply has not arrived.\n\n" +
-			"REMINDERS AND REPLY TRACKING (`remind_ms`)\n" +
-			"By default, a sent message is tracked as awaiting a possible reply. If you set `remind_ms > 0`, the system periodically reminds YOU, the sender, while one or more tracked messages remain unanswered. The reminder is not sent to the receiver and does not retry delivery. Its purpose is to help you notice that the peer may still be working, may have missed the message, or may need additional information or assistance. When reminded, you can decide whether to send a follow-up, clarify or synchronize information, help unblock the peer, or revise your plan.\n\n" +
-			"- Omit `remind_ms`: track the send, but do not schedule reminders.\n" +
-			"- `remind_ms > 0`: track the send and remind the sender while replies are pending. One consolidated reminder covers all pending sends.\n" +
-			"- `remind_ms = 0`: fire-and-forget. The message is not tracked as awaiting a reply and generates no reminder. Use this only for one-way announcements that do not need a response.\n\n" +
+			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_s` to remind yourself if a reply has not arrived.\n\n" +
+			"REMINDERS AND REPLY TRACKING (`remind_s`, seconds; defaults to 0)\n" +
+			"`remind_s = 0` (the default): fire-and-forget — the message is not tracked as awaiting a reply and generates no reminder. `remind_s > 0` (1-3600): the send is TRACKED and the system periodically reminds YOU, the sender, while one or more tracked messages remain unanswered. The reminder is not sent to the receiver and does not retry delivery. One consolidated reminder covers all pending sends. Its purpose is to help you notice that the peer may still be working, may have missed the message, or may need additional information or assistance. When reminded, you can decide whether to send a follow-up, clarify or synchronize information, help unblock the peer, or revise your plan. `remind_s = 300` = remind every 5 min.\n\n" +
 			"You may also use this function to reply to a message received from another peer. Set `reply_to_msg_id` to the `msg_id` of the inbound message you are answering. This explicitly identifies which message your response is replying to. When the original sender receives the reply, their pending reminder/tracking for that message is automatically resolved, so they no longer receive reminders for it.\n\n" +
 			"DELIVERY MODE (`deliver_as`)\n" +
 			"`deliver_as` controls when the receiver gets the message relative to its current turn. See the `deliver_as` parameter for the behavior of `\"steer\"` (default), `\"follow-up\"`, and `\"next turn\"`.",
@@ -469,10 +467,10 @@ export default function (pi: ExtensionAPI) {
 			target: Type.Optional(Type.String({ description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
 			targets: Type.Optional(Type.Array(Type.String(), { description: "Group send: multiple peer names (CASE-SENSITIVE). Set either target or targets; one msg_id is returned per recipient." })),
 			message: Type.String({ description: "The message to send (or your reply content when reply_to_msg_id is set)." }),
-			remind_ms: Type.Optional(Type.Number({
+			remind_s: Type.Optional(Type.Number({
 				minimum: 0,
-				maximum: 3_600_000,
-				description: "Reminder interval in ms. Omitted: tracked but no reminder (replies still resolve — they arrive as inbound turns). >0 (1000-3600000): while any send is unanswered, one consolidated reminder is injected every remind_ms. 0: fire-and-forget announcement — sent WITHOUT tracking: no reminder, no reply resolution, no comms_outbox \"waiting\" entry (still recorded in comms_history). Use 0 only for one-way announcements nobody needs to reply to.",
+				maximum: 3600,
+				description: "Reminder interval in SECONDS, default 0. 0: fire-and-forget — the message is NOT tracked as awaiting a reply: no reminder, no comms_outbox \"waiting\" entry, auto-exit is not blocked (still recorded in comms_history). >0 (1-3600): track the send and inject one consolidated reminder every remind_s seconds while any tracked send is unanswered. 300 = every 5 min.",
 			})),
 			reply_to_msg_id: Type.Optional(Type.String({
 				description: "Reply mode: the msg_id of the message you are answering (an inbound msg_id you received). Marks this send as a reply; the sender stops its reminder and records your message as the reply.",
@@ -494,9 +492,8 @@ export default function (pi: ExtensionAPI) {
 			if (targets.length === 0) throw new Error("comms_send: provide either target or targets");
 
 			const replyToMsgId = typeof p.reply_to_msg_id === "string" && p.reply_to_msg_id.length > 0 ? p.reply_to_msg_id : undefined;
-			// 0 is significant: explicit remind_ms 0 = fire-and-forget (send
-			// without tracking). Omitted/undefined keeps tracked-no-reminder.
-			const remindMs = typeof p.remind_ms === "number" ? p.remind_ms : undefined;
+			// Default 0 = fire-and-forget; only remind_s > 0 arms tracking + reminders.
+			const remindS = typeof p.remind_s === "number" ? p.remind_s : 0;
 			// Delivery mode at the target (schema-enforced union; omitted → target default "steer").
 			const deliverAs = typeof p.deliver_as === "string" ? p.deliver_as as DeliverAsValue : undefined;
 
@@ -504,7 +501,7 @@ export default function (pi: ExtensionAPI) {
 			const errors: Array<{ target: string; error: string }> = [];
 			for (const t of targets) {
 				try {
-					const res = await messaging.send(identity, t, p.message, { replyToMsgId, remindMs, deliverAs });
+					const res = await messaging.send(identity, t, p.message, { replyToMsgId, remindS, deliverAs });
 					results.push({ target: t, msg_id: res.msg_id, target_status: res.target_status });
 				} catch (err: any) {
 					errors.push({ target: t, error: err?.message ?? String(err) });
@@ -514,7 +511,7 @@ export default function (pi: ExtensionAPI) {
 
 			const notes: string[] = [];
 			if (p.reply_to_msg_id) notes.push(`reply to ${p.reply_to_msg_id}`);
-			if (p.remind_ms) notes.push(`remind every ${p.remind_ms} ms`);
+			if (p.remind_s) notes.push(`remind every ${p.remind_s} s`);
 			if (p.deliver_as) notes.push(`deliver as ${p.deliver_as}`);
 			const lines = results.map((r) => `comms_send to ${r.target} (${r.target_status})\nmsg_id ${r.msg_id}`);
 			const errLines = errors.map((e) => `comms_send to ${e.target}: FAILED — ${e.error}`);
@@ -522,7 +519,7 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { results, errors, reply_to_msg_id: p.reply_to_msg_id ?? null, remind_ms: p.remind_ms ?? null, deliver_as: p.deliver_as ?? null },
+				details: { results, errors, reply_to_msg_id: p.reply_to_msg_id ?? null, remind_s: p.remind_s ?? null, deliver_as: p.deliver_as ?? null },
 			};
 		},
 		renderCall(args, theme, context) {
@@ -540,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Expanded: full message and every option.
 			const opts: string[] = [];
-			if (typeof a.remind_ms === "number") opts.push(`remind_ms ${a.remind_ms}`);
+			if (typeof a.remind_s === "number") opts.push(`remind_s ${a.remind_s}`);
 			if (a.reply_to_msg_id) opts.push(`reply_to_msg_id ${a.reply_to_msg_id}`);
 			if (a.deliver_as) opts.push(`deliver_as ${a.deliver_as}`);
 			const full = text + (msg ? `\nmessage: ${msg}` : "") + (opts.length ? "\n" + opts.join(" · ") : "");
@@ -572,7 +569,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const notes: string[] = [];
 			if (d.reply_to_msg_id) notes.push(`reply to ${d.reply_to_msg_id}`);
-			if (d.remind_ms) notes.push(`remind every ${d.remind_ms} ms`);
+			if (d.remind_s) notes.push(`remind every ${d.remind_s} s`);
 			if (d.deliver_as) notes.push(`deliver as ${d.deliver_as}`);
 			if (notes.length) lines.push(theme.fg("dim", notes.join(" · ")));
 			return new Text(lines.join("\n"), 0, 0);
@@ -642,12 +639,12 @@ export default function (pi: ExtensionAPI) {
 			const poll = messaging.pollReply(msgId);
 			let state: string;
 			let reason: string | null = null;
-			let remindMs = 0;
+			let remindS = 0;
 			let response: any = null;
 			if (poll.state !== "unknown") {
 				state = poll.state;
 				reason = poll.reason ?? null;
-				remindMs = poll.remindMs;
+				remindS = poll.remindS;
 				if (state === "ended" && reason === "replied") response = poll.result?.response ?? null;
 			} else if (rec) {
 				const s = history.deriveOutStatus(rec);
@@ -663,7 +660,7 @@ export default function (pi: ExtensionAPI) {
 			let text = `comms_outbox: ${msgId}${rec ? ` to ${rec.target}` : ""} — ${statusLabel}`;
 			if (rec) text += `\nsent at ${new Date(rec.ts).toISOString()}`;
 			if (state === "waiting") {
-				text += `\nno reply yet${remindMs > 0 ? ` · remind ${fmtMs(remindMs)}` : ""}`;
+				text += `\nno reply yet${remindS > 0 ? ` · remind ${fmtMs(remindS * 1000)}` : ""}`;
 			} else if (reason === "expired") {
 				text += "\nthe message TTL passed with no reply — the target likely never received it. Resend, dismiss, or solve it another way.";
 			} else if (reason === "dismissed") {

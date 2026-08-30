@@ -139,9 +139,9 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 
 ### comms 通信工具
 
-通信工具来自 comms 扩展（参数与语义见 docs/1 §6）：`comms_send`（含 `remind_ms=0` fire-and-forget 公告）、`comms_inbox` / `comms_outbox`（重读消息）、`comms_dismiss`（停止跟踪）、`comms_list_peer`（查看 agent）、`comms_update_profile`（维护 `current_task`，让 TP 能实时匹配）。
+通信工具来自 comms 扩展（参数与语义见 docs/1 §6）：`comms_send`（含 `remind_s=0` fire-and-forget 公告）、`comms_inbox` / `comms_outbox`（重读消息）、`comms_dismiss`（停止跟踪）、`comms_list_peer`（查看 agent）、`comms_update_profile`（维护 `current_task`，让 TP 能实时匹配）。
 
-**找 agent = `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id>")`**——只描述工作、不指定角色，TP 从角色目录定角色（目录只注入 TP 的 prompt，见 docs/4 §7）；TP 回复的 agent 名自动作为 inbound 消息进入上下文，无需轮询；需要等待时可设 `remind_ms`（如 300000 = 每 5 分钟合并提醒一次）。
+**找 agent = `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id>")`**——只描述工作、不指定角色，TP 从角色目录定角色（目录只注入 TP 的 prompt，见 docs/4 §7）；TP 回复的 agent 名自动作为 inbound 消息进入上下文，无需轮询；需要等待时可设 `remind_s`（如 300 = 每 5 分钟合并提醒一次）。
 
 ---
 
