@@ -114,6 +114,11 @@ export function buildLaunchScript(params: LaunchScriptParams): string {
     "-e", join(PROJECT_ROOT, "extensions", "task-comms-ops.ts"),
     "-e", join(PROJECT_ROOT, "extensions", "role-context.ts"),
     "-e", join(PROJECT_ROOT, "extensions", "auto-exit.ts"),
+    // Skills are project-level (.pi/skills/) and the spawned pi resolves
+    // them against its own cwd (the spawner's) — same absolute-path fix as
+    // the -e flags above, so skill docs like task-lifecycle-reporting stay
+    // available no matter where the spawner was started.
+    "--skill", join(PROJECT_ROOT, ".pi", "skills"),
     "--cname", sq(params.agentName),
     ...(params.subnet ? ["--subnet", sq(params.subnet)] : []),
     ...(params.systemPrompt ? ["--system-prompt", sq(params.systemPrompt)] : []),

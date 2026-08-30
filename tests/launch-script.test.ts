@@ -41,6 +41,15 @@ function extensionFlags(script: string): string[] {
   return flags;
 }
 
+/** Extract the value of the `--skill <path>` flag from the exec line. */
+function skillFlag(script: string): string | undefined {
+  const tokens = script.trim().split(" ");
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "--skill") return tokens[i + 1];
+  }
+  return undefined;
+}
+
 describe("buildLaunchScript", () => {
   it("cds to the spawner's working directory", () => {
     const script = build();
@@ -68,6 +77,14 @@ describe("buildLaunchScript", () => {
       "role-context.ts",
       "auto-exit.ts",
     ]);
+  });
+
+  it("passes --skill as an absolute path inside the repo", () => {
+    const flag = skillFlag(build());
+    expect(flag).toBeDefined();
+    expect(flag!.startsWith("/")).toBe(true);
+    expect(flag!.startsWith(REPO_ROOT)).toBe(true);
+    expect(existsSync(flag!)).toBe(true);
   });
 
   it("still passes identity/session/model flags", () => {
