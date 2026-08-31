@@ -31,23 +31,44 @@ function build(overrides: Record<string, unknown> = {}) {
   } as never);
 }
 
+/** Strip one layer of single quotes (sq()-generated values). */
+function unquote(t: string): string {
+  return t.startsWith("'") && t.endsWith("'") && t.length >= 2 ? t.slice(1, -1) : t;
+}
+
 /** Extract the values of every `-e <path>` flag from the exec line. */
 function extensionFlags(script: string): string[] {
   const tokens = script.trim().split(" ");
   const flags: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i] === "-e") flags.push(tokens[i + 1]);
+    if (tokens[i] === "-e") flags.push(unquote(tokens[i + 1]));
   }
   return flags;
 }
 
-/** Extract the value of the `--skill <path>` flag from the exec line. */
+/** Extract the value of the FIRST `--skill <path>` flag from the exec line. */
 function skillFlag(script: string): string | undefined {
+  return skillFlags(script)[0];
+}
+
+/** Extract the values of every `--skill <path>` flag, in order. */
+function skillFlags(script: string): string[] {
   const tokens = script.trim().split(" ");
+  const flags: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i] === "--skill") return tokens[i + 1];
+    if (tokens[i] === "--skill") flags.push(unquote(tokens[i + 1]));
   }
-  return undefined;
+  return flags;
+}
+
+/** Extract the values of every `--role-dir <path>` flag, in order. */
+function roleDirFlags(script: string): string[] {
+  const tokens = script.trim().split(" ");
+  const flags: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "--role-dir") flags.push(unquote(tokens[i + 1]));
+  }
+  return flags;
 }
 
 describe("buildLaunchScript", () => {
@@ -102,5 +123,45 @@ describe("buildLaunchScript", () => {
     expect(script).toContain("--role 'worker'");
     expect(script).toContain("PI_AGENT_AUTO_EXIT=1");
     expect(script).toContain("PI_AGENT_NAME='worker-1'");
+  });
+
+  it("appends role-declared skills after the project --skill, in order", () => {
+    const script = build({ skills: ["/abs/s1", "/abs/s2"] });
+    const flags = skillFlags(script);
+    expect(flags).toEqual([join(REPO_ROOT, ".pi", "skills"), "/abs/s1", "/abs/s2"]);
+    for (const flag of flags) expect(flag.startsWith("/")).toBe(true);
+  });
+
+  it("omits role skills when none are declared", () => {
+    expect(skillFlags(build())).toEqual([join(REPO_ROOT, ".pi", "skills")]);
+  });
+
+  it("dedupes a role skill that resolves to the project skills dir", () => {
+    const projectSkills = join(REPO_ROOT, ".pi", "skills");
+    expect(skillFlags(build({ skills: [projectSkills] })).length).toBe(1);
+  });
+
+  it("appends role-declared extensions after the plugin chain", () => {
+    const script = build({ extensions: ["/abs/ext.ts", "/abs/ext-2.ts"] });
+    const flags = extensionFlags(script);
+    expect(flags.length).toBe(7);
+    expect(flags.slice(-2)).toEqual(["/abs/ext.ts", "/abs/ext-2.ts"]);
+    for (const flag of flags) expect(flag.startsWith("/")).toBe(true);
+  });
+
+  it("keeps exactly the 5 plugin -e flags when no role extensions are declared", () => {
+    expect(extensionFlags(build()).length).toBe(5);
+  });
+
+  it("passes --role-dir flags verbatim after --subnet", () => {
+    const script = build({ roleDirs: ["/abs/roles-a", "/abs/roles-b"] });
+    expect(roleDirFlags(script)).toEqual(["/abs/roles-a", "/abs/roles-b"]);
+    for (const flag of roleDirFlags(script)) expect(flag.startsWith("/")).toBe(true);
+    // Order: --subnet (absent here) block precedes the role-dir group.
+    expect(script.indexOf("--role-dir")).toBeGreaterThan(script.indexOf("--cname"));
+  });
+
+  it("omits --role-dir flags when absent", () => {
+    expect(roleDirFlags(build())).toEqual([]);
   });
 });

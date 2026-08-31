@@ -5,7 +5,9 @@
  * - LLMContext: self-contained initial context for spawned agents
  * - llmContextFromRole: build LLMContext from a role template
  * - Scan agent definition files (.pi/agents/*.md, agents/*.md, .claude/agents/*.md)
- * - Load role templates (lib/role-context/roles/ tree: manager/ + specialist/)
+ * - Load role templates (built-in lib/role-context/roles/ tree, plus external
+ *   dirs: --role-dir flags, <cwd>/.pi/roles, <home>/.pi/agent/roles — highest
+ *   priority first; same-named roles are replaced by the first hit)
  * - Build system prompts from templates
  *
  * Used by: agent-lifecycle, teammate-provider, coordinator
@@ -17,6 +19,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, type Dirent } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -35,12 +38,24 @@ export interface AgentDef {
   file: string;
 }
 
-/** A loaded role template (from lib/role-context/roles/*.md). */
+/** A loaded role template (from a role template directory). */
 export interface RoleTemplate {
   role: string;
   label: string;
   description: string;
   defaultTools: string;
+  /**
+   * Absolute skill paths resolved from the frontmatter `skills:` field
+   * (skill directory or <name>.md). Empty when nothing was declared.
+   */
+  skillPaths: string[];
+  /**
+   * Absolute extension paths resolved from the frontmatter `extensions:`
+   * field. Empty when nothing was declared.
+   */
+  extensionPaths: string[];
+  /** Warnings collected while resolving capabilities (unresolved references). */
+  capabilityWarnings: string[];
   /** Build a full system prompt for a new agent of this role. */
   buildSystemPrompt: (name: string, tools: string) => string;
 }
@@ -79,6 +94,13 @@ export interface LLMContext {
    *   background, not the delegation dialogue. `messages` is ignored.
    */
   context?: "fresh" | "fork";
+  /**
+   * Absolute skill paths (skill directory or <name>.md) passed to the spawned
+   * pi via `--skill` (repeatable). Set from a role template's `skills:` field.
+   */
+  skills?: string[];
+  /** Absolute extension paths passed via `-e` (repeatable). Set from a role template's `extensions:` field. */
+  extensions?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -197,63 +219,172 @@ function expandIncludes(template: string, dir: string, seen = new Set<string>())
   });
 }
 
-let _roleTemplates: RoleTemplate[] | null = null;
+// ---------------------------------------------------------------------------
+// Role directory resolution
+// ---------------------------------------------------------------------------
+
+/** Options controlling where role templates are loaded from. */
+export interface RoleDirOptions {
+  /** Anchor for `<cwd>/.pi/roles` and relative path resolution. Defaults to process.cwd(). */
+  cwd?: string;
+  /** `--role-dir` values (in order). Defaults to roleDirsFromArgv(process.argv). */
+  roleDirs?: string[];
+  /** Anchor for `<home>/.pi/agent/roles`. Defaults to os.homedir(); tests inject. */
+  home?: string;
+}
 
 /**
- * Load all role templates from the lib/role-context/roles/ tree
- * (manager/ + specialist/). Files without a `role` frontmatter field are
- * include fragments, not roles — skipped here, available to {{include:...}}.
+ * Collect every `--role-dir <v>` / `--role-dir=<v>` from argv, in order.
+ * Repeatable; values may be relative. Skips a value that starts with "-"
+ * (it is a flag, not this flag's value).
  */
-export function loadRoleTemplates(): RoleTemplate[] {
-  if (_roleTemplates) return _roleTemplates;
-
-  const dir = rolesDir();
-  const templates: RoleTemplate[] = [];
-
-  for (const file of walkMdFiles(dir)) {
-    try {
-      const raw = readFileSync(file, "utf-8");
-      const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-      if (!match) continue;
-
-      const fm: Record<string, string> = {};
-      for (const line of match[1].split("\n")) {
-        const idx = line.indexOf(":");
-        if (idx > 0) fm[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+export function roleDirsFromArgv(argv: string[]): string[] {
+  const dirs: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--role-dir") {
+      const value = argv[i + 1];
+      if (value && !value.startsWith("-")) {
+        dirs.push(value);
+        i++;
       }
+    } else if (arg.startsWith("--role-dir=")) {
+      dirs.push(arg.slice("--role-dir=".length));
+    }
+  }
+  return dirs;
+}
 
-      const role = fm.role;
-      if (!role) continue;
+/**
+ * Ordered role template directories, highest priority first:
+ *   --role-dir values → <cwd>/.pi/roles → <home>/.pi/agent/roles → built-in
+ *   lib/role-context/roles/
+ *
+ * All paths are absolutized against cwd and deduped. Non-existent dirs are
+ * skipped; a missing `--role-dir` target warns once (a typo must not silently
+ * fall back to the built-ins, while an absent project/user level is normal).
+ */
+export function resolveRoleDirs(opts?: RoleDirOptions): string[] {
+  const cwd = opts?.cwd ?? process.cwd();
+  const home = opts?.home ?? homedir();
 
-      // Expand includes from the referencing file's directory BEFORE
-      // interpolation, so fragment placeholders resolve in the same pass.
-      const promptTemplate = expandIncludes(match[2].trim(), dirname(file));
+  const dirs: string[] = [];
+  const pushIfExists = (dir: string, warnOnMissing: boolean) => {
+    if (!existsSync(dir)) {
+      if (warnOnMissing) roleWarn(`--role-dir "${dir}" does not exist (skipped)`);
+      return;
+    }
+    if (!dirs.includes(dir)) dirs.push(dir);
+  };
 
-      const label = fm.label || role;
-      const description = fm.description || "";
-      const defaultTools = fm.defaultTools || "read,grep,find,ls";
+  for (const d of opts?.roleDirs ?? roleDirsFromArgv(process.argv)) {
+    pushIfExists(resolve(cwd, d), true);
+  }
+  pushIfExists(join(cwd, ".pi", "roles"), false); // project level
+  pushIfExists(join(home, ".pi", "agent", "roles"), false); // user level
+  dirs.push(rolesDir()); // built-in fallback — always exists, always last
 
-      templates.push({
-        role,
-        label,
-        description,
-        defaultTools,
-        buildSystemPrompt(name, toolsOverride) {
-          const tools = toolsOverride || defaultTools;
-          const roleCatalog = buildRoleCatalog();
-          return interpolate(promptTemplate, {
-            displayName: displayName(name),
-            name,
-            tools,
-            tp_name: "teammate-provider",
-            role_catalog: roleCatalog,
-          });
-        },
-      });
-    } catch { /* skip */ }
+  return dirs;
+}
+
+// ---------------------------------------------------------------------------
+// Warnings (capability resolution + role dir quirks)
+// ---------------------------------------------------------------------------
+
+let _roleWarn: (msg: string) => void = (msg) => console.warn(`[role-context] ${msg}`);
+
+/** Install a warning writer (default console.warn). Extensions wire audit entries here. */
+export function setRoleWarn(fn: (msg: string) => void): void {
+  _roleWarn = fn;
+}
+
+/** Emit a best-effort warning — never throws. */
+export function roleWarn(msg: string): void {
+  try {
+    _roleWarn(msg);
+  } catch { /* audit must never break loading */ }
+}
+
+// ---------------------------------------------------------------------------
+// Role template loading
+// ---------------------------------------------------------------------------
+
+const _roleTemplatesCache = new Map<string, RoleTemplate[]>();
+
+/**
+ * Load all role templates from the resolved role directory list. Files
+ * without a `role` frontmatter field are include fragments, not roles —
+ * skipped here, available to {{include:...}}.
+ *
+ * Default resolution (no opts) uses process.cwd() / process.argv /
+ * os.homedir() and is cached per directory set for the process lifetime —
+ * adding role files mid-session does not hot-reload. Tests inject opts for
+ * an isolated key.
+ */
+export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
+  const cwd = opts?.cwd ?? process.cwd();
+  const home = opts?.home ?? homedir();
+  const dirs = resolveRoleDirs({ cwd, roleDirs: opts?.roleDirs, home });
+  const key = dirs.join("\0");
+  const hit = _roleTemplatesCache.get(key);
+  if (hit) return hit;
+
+  const templates: RoleTemplate[] = [];
+  const seen = new Set<string>(); // first-wins per role name
+
+  for (const dir of dirs) {
+    for (const file of walkMdFiles(dir)) {
+      try {
+        const raw = readFileSync(file, "utf-8");
+        const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+        if (!match) continue;
+
+        const fm: Record<string, string> = {};
+        for (const line of match[1].split("\n")) {
+          const idx = line.indexOf(":");
+          if (idx > 0) fm[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+        }
+
+        const role = fm.role;
+        if (!role) continue;
+        if (seen.has(role)) continue; // higher-priority dir already defined it
+        seen.add(role);
+
+        // Expand includes from the referencing file's directory BEFORE
+        // interpolation, so fragment placeholders resolve in the same pass.
+        const promptTemplate = expandIncludes(match[2].trim(), dirname(file));
+
+        const label = fm.label || role;
+        const description = fm.description || "";
+        const defaultTools = fm.defaultTools || "read,grep,find,ls";
+        const { skillPaths, extensionPaths, capabilityWarnings } =
+          resolveCapabilities(fm, { cwd, home });
+
+        templates.push({
+          role,
+          label,
+          description,
+          defaultTools,
+          skillPaths,
+          extensionPaths,
+          capabilityWarnings,
+          buildSystemPrompt(name, toolsOverride) {
+            const tools = toolsOverride || defaultTools;
+            const roleCatalog = buildRoleCatalog();
+            return interpolate(promptTemplate, {
+              displayName: displayName(name),
+              name,
+              tools,
+              tp_name: "teammate-provider",
+              role_catalog: roleCatalog,
+            });
+          },
+        });
+      } catch { /* skip */ }
+    }
   }
 
-  _roleTemplates = templates;
+  _roleTemplatesCache.set(key, templates);
   return templates;
 }
 
@@ -295,6 +426,93 @@ export function buildAgentPrompt(
   if (!template) return null;
   const tools = toolsOverride || template.defaultTools;
   return template.buildSystemPrompt(name, tools);
+}
+
+// ---------------------------------------------------------------------------
+// Capability references (skills: / extensions: frontmatter fields)
+// ---------------------------------------------------------------------------
+
+/** Split a frontmatter list value on commas, trim, drop empties. */
+function parseList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Resolve a `skills:` reference to an absolute path.
+ *
+ * Literal paths (`/`, `~` prefixes) are used as-is after an existence check.
+ * Bare names search the standard skill locations in order (project first):
+ *   <cwd>/.pi/skills/<name> (SKILL.md dir, then <name>.md),
+ *   <cwd>/.agents/skills/, <home>/.pi/agent/skills/, <home>/.agents/skills/.
+ * Returns null when nothing matched.
+ */
+export function resolveSkillPath(
+  ref: string,
+  opts: { cwd: string; home?: string },
+): string | null {
+  const home = opts.home ?? homedir();
+  if (ref.startsWith("/")) return existsSync(ref) ? ref : null;
+  if (ref.startsWith("~")) {
+    const abs = join(home, ref.slice(1));
+    return existsSync(abs) ? abs : null;
+  }
+  const bases = [
+    join(opts.cwd, ".pi", "skills"),
+    join(opts.cwd, ".agents", "skills"),
+    join(home, ".pi", "agent", "skills"),
+    join(home, ".agents", "skills"),
+  ];
+  for (const base of bases) {
+    const dir = join(base, ref);
+    if (existsSync(join(dir, "SKILL.md"))) return dir; // <name>/SKILL.md dir wins
+    const file = join(base, `${ref}.md`);
+    if (existsSync(file)) return file; // <name>.md fallback
+  }
+  return null;
+}
+
+/**
+ * Resolve an `extensions:` reference to an absolute path. Relative paths are
+ * anchored at cwd (the spawner's working directory); `~` expands to homedir.
+ * Returns null when the file/dir does not exist.
+ */
+export function resolveExtensionPath(ref: string, cwd: string): string | null {
+  const abs = ref.startsWith("~") ? join(homedir(), ref.slice(1)) : resolve(cwd, ref);
+  return existsSync(abs) ? abs : null;
+}
+
+/**
+ * Parse the `skills:` / `extensions:` frontmatter lists into absolute paths.
+ * Each unresolved reference is collected as a warning (skipped, spawn proceeds
+ * with the rest of the capabilities).
+ */
+function resolveCapabilities(
+  fm: Record<string, string>,
+  opts: { cwd: string; home: string },
+): { skillPaths: string[]; extensionPaths: string[]; capabilityWarnings: string[] } {
+  const capabilityWarnings: string[] = [];
+  const skillPaths: string[] = [];
+  for (const ref of parseList(fm.skills)) {
+    const abs = resolveSkillPath(ref, opts);
+    if (abs) skillPaths.push(abs);
+    else {
+      capabilityWarnings.push(`skill "${ref}" not found (project/user skill dirs searched); skipped`);
+      roleWarn(`role "${fm.role}": skill "${ref}" not found; skipped`);
+    }
+  }
+  const extensionPaths: string[] = [];
+  for (const ref of parseList(fm.extensions)) {
+    const abs = resolveExtensionPath(ref, opts.cwd);
+    if (abs) extensionPaths.push(abs);
+    else {
+      capabilityWarnings.push(`extension "${ref}" not found; skipped`);
+      roleWarn(`role "${fm.role}": extension "${ref}" not found; skipped`);
+    }
+  }
+  return { skillPaths, extensionPaths, capabilityWarnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +562,8 @@ export function llmContextFromRole(
   return {
     systemPrompt: systemPrompt ?? undefined,
     role,
+    ...(template.skillPaths.length ? { skills: template.skillPaths } : {}),
+    ...(template.extensionPaths.length ? { extensions: template.extensionPaths } : {}),
   };
 }
 

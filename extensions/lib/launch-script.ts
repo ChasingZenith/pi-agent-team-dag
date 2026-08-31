@@ -54,6 +54,19 @@ export interface LaunchScriptParams {
   role?: string;
   /** Coms-net subnet the spawned agent joins. Passed as --subnet to pi. */
   subnet?: string;
+  /**
+   * Absolute skill paths (role-declared) passed as --skill, appended after
+   * the project .pi/skills flag. Deduped against it.
+   */
+  skills?: string[];
+  /** Absolute extension paths (role-declared) passed as -e, appended after the plugin chain. */
+  extensions?: string[];
+  /**
+   * External role template dirs (inherited from the spawner's --role-dir,
+   * already absolutized). Passed verbatim so the spawned agent resolves the
+   * SAME role catalog as the spawner.
+   */
+  roleDirs?: string[];
 }
 
 /** Single-quote escape for bash strings. */
@@ -114,13 +127,23 @@ export function buildLaunchScript(params: LaunchScriptParams): string {
     "-e", join(PROJECT_ROOT, "extensions", "task-comms-ops.ts"),
     "-e", join(PROJECT_ROOT, "extensions", "role-context.ts"),
     "-e", join(PROJECT_ROOT, "extensions", "auto-exit.ts"),
+    // Role-declared extensions (--extensions frontmatter) append after the
+    // plugin chain. Their tool names must appear in the role's defaultTools
+    // or role-context's setActiveTools whitelist removes them.
+    ...(params.extensions ?? []).flatMap((e) => ["-e", sq(e)]),
     // Skills are project-level (.pi/skills/) and the spawned pi resolves
     // them against its own cwd (the spawner's) — same absolute-path fix as
     // the -e flags above, so skill docs like task-lifecycle-reporting stay
     // available no matter where the spawner was started.
     "--skill", join(PROJECT_ROOT, ".pi", "skills"),
+    // Role-declared skills append after the project dir; dedupe exact
+    // duplicates of it (resolved) so the dir is not loaded twice.
+    ...(params.skills ?? [])
+      .filter((s) => resolve(s) !== join(PROJECT_ROOT, ".pi", "skills"))
+      .flatMap((s) => ["--skill", sq(s)]),
     "--cname", sq(params.agentName),
     ...(params.subnet ? ["--subnet", sq(params.subnet)] : []),
+    ...(params.roleDirs ?? []).flatMap((d) => ["--role-dir", sq(d)]),
     ...(params.systemPrompt ? ["--system-prompt", sq(params.systemPrompt)] : []),
     ...(params.role ? ["--role", sq(params.role)] : []),
     ...(params.model ? ["--model", sq(params.model)] : []),

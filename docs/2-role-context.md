@@ -10,6 +10,8 @@
 
 - `--role` flag + `before_agent_start` 角色模板注入（交互式启动路径；spawn 路径由 launch script 传 `--system-prompt` 承担）
 - 声明式角色模板：YAML frontmatter + Markdown，`{{}}` 插值与 `{{include:...}}` 内联协议
+- **外部角色目录**：模板不限于插件内置 `roles/`，可按优先级从 `--role-dir`、`.pi/roles/`、`~/.pi/agent/roles/` 加载（§2.1）
+- **能力声明**：角色 frontmatter 声明 `skills:` / `extensions:`，spawn 时经 launch script 自动传出（§2.2）
 - `llmContextFromRole()` 从角色模板构建 LLMContext——agent-lifecycle 的 role-aware spawn 使用
 - session 创建/fork 全部委托 pi 官方 `SessionManager`（fork.ts），不手写 JSONL
 - **零依赖**：不依赖 comms / tasks，可被任何扩展独立导入
@@ -57,6 +59,46 @@ You are {{displayName}}, a Scout agent...
 
 三个占位符在 spawn 时替换：`{{displayName}}`（格式化名）、`{{name}}`（原始名）、`{{tools}}`（工具列表）。
 
+### 2.1 模板加载优先级
+
+内置 `roles/` 是默认 catalog；外部目录中的同名 role 完全替换内置版本（首个命中者胜，不做字段级合并），新增角色并入 catalog（`listRoleNames` / `buildRoleCatalog`，供 Teammate Provider 选择 spawn）：
+
+```
+--role-dir <path>（可重复，按出现顺序，最高）
+<cwd>/.pi/roles              项目级（可 git 提交、团队共享）
+~/.pi/agent/roles           用户级（跨项目共用）
+内置 extensions/lib/role-context/roles/   （fallback，恒在最后）
+```
+
+- 相对 `--role-dir` 以进程 cwd 为基准；spawn 的 agent 经 launch script 继承绝对化的 `--role-dir`，与 spawner 解析同一 catalog（工具白名单一致）
+- 不存在的 `--role-dir` 目录会被跳过并警告（防拼写错误静默回落到内置）；项目/用户级目录缺失是常态，不警告
+- 模板加载为进程级缓存：会话中途新增角色文件不会热更新（重启/重载生效）
+- `{{include:...}}` 片段只从引用文件所在目录解析——外部角色若需片段，请把片段放在同一目录
+
+### 2.2 能力声明（skills / extensions）
+
+角色 frontmatter 可声明 spawn 时自动传递的外部能力：
+
+```markdown
+---
+role: web-searcher
+defaultTools: read,web_search,web_fetch,comms_send,bash
+skills: playwright-cli,bx,/abs/path-to-skill,~/mine
+extensions: /abs/path/to/ext.ts,./rel-to-cwd/ext.ts
+---
+```
+
+- **`skills:`** 裸名按 pi 的 skill 位置顺序查找并绝对化（`<cwd>/.pi/skills/<name>`、
+  `<cwd>/.agents/skills/<name>`、`~/.pi/agent/skills/<name>`、`~/.agents/skills/<name>`；同名位置
+  优先 `<name>/SKILL.md` 目录、其次 `<name>.md`）；`/`、`~` 开头的字面量路径原样使用
+- **`extensions:`** 相对路径以 spawner cwd 为基准，`~` 前缀展开为 home；缺失的文件/目录被跳过
+- **解析不到的引用警告并跳过**（spawn 继续）：警告进入角色模板的 `capabilityWarnings`（spawn 结果
+  details 可见）并写 `role-context` 审计条目（`capability_skip`），提醒角色作者修正
+- 声明 `extensions:` 时，该扩展注册的工具名**必须出现在同一角色的 `defaultTools` 中**——否则
+  role-context 的工具白名单（替换语义）会将其移除，扩展能力不可用
+- 简化 frontmatter 解析器的限制：`skills:`/`extensions:` 必须是单行逗号分隔列表（无引号包裹、
+  无换行续行、值内不得含逗号）
+
 ---
 
 ## 3. 能力函数（lib/role-context/template.ts）
@@ -71,21 +113,33 @@ You are {{displayName}}, a Scout agent...
 | `SESSION_PATH` | 模板常量：`"{{sessionDir}}/{{agentName}}.json"` |
 | `parseAgentFile(path)` | 解析单个 agent .md 文件 |
 | `scanAgentDirs(cwd)` | 扫描 `.pi/agents/`、`agents/`、`.claude/agents/` |
-| `loadRoleTemplates()` | 递归加载 `lib/role-context/roles/` 树（manager/ + specialist/）中的角色模板，展开 `{{include:...}}` 共享协议片段 |
+| `roleDirsFromArgv(argv)` | 收集 argv 中全部 `--role-dir`（可重复，两种写法均可） |
+| `resolveRoleDirs(opts?)` | 按优先级合并角色目录（`--role-dir` → `.pi/roles` → `~/.pi/agent/roles` → 内置），绝对化、去重、剔除缺失目录 |
+| `loadRoleTemplates(opts?)` | 递归加载全部角色目录中的模板（内置 + 外部，同名首胜），展开 `{{include:...}}` 共享协议片段并按 frontmatter 解析能力声明 |
+| `resolveSkillPath(ref, opts)` | skill 名/字面量 → 绝对路径（§2.2 查找顺序），无命中返回 null |
+| `resolveExtensionPath(ref, cwd)` | 扩展引用 → 绝对路径（相对路径以 cwd 为基准），不存在返回 null |
+| `setRoleWarn(fn)` / `roleWarn(msg)` | 能力/目录解析警告 writer（默认 console.warn；扩展入口安装为审计条目 `capability_skip`） |
 | `getRoleTemplate(role)` | 按名查找角色模板 |
 | `listRoleNames()` | 返回有序的角色名列表 |
 | `buildRoleCatalog()` | 生成可嵌入 system prompt 的角色目录 |
 | `buildAgentPrompt(role, name, tools?)` | 从角色模板构建完整的 agent system prompt |
-| `llmContextFromRole(role, name, tools?)` | 从角色模板构建 LLMContext |
+| `llmContextFromRole(role, name, tools?)` | 从角色模板构建 LLMContext（含 skills/extensions 能力字段） |
 
 **类型：**
 
 ```typescript
 interface AgentDef { name, description, tools, systemPrompt, role?, file }
-interface RoleTemplate { role, label, description, defaultTools, buildSystemPrompt() }
+interface RoleTemplate {
+  role, label, description, defaultTools, buildSystemPrompt(),
+  skillPaths: string[],          // skills: 声明解析出的绝对路径
+  extensionPaths: string[],      // extensions: 声明解析出的绝对路径
+  capabilityWarnings: string[],  // 解析失败的能力引用（跳过并警告）
+}
 interface LLMContext {
   systemPrompt?, messages?({ role, content }[]), role?,
-  context?: "fresh" | "fork"   // 默认 "fresh"；"fork" 继承 spawner 会话并裁剪委派尾巴
+  context?: "fresh" | "fork",    // 默认 "fresh"；"fork" 继承 spawner 会话并裁剪委派尾巴
+  skills?: string[],             // 绝对路径，spawn 时作为 --skill（可重复）
+  extensions?: string[],         // 绝对路径，spawn 时作为 -e（可重复）
 }
 ```
 
@@ -113,11 +167,12 @@ interface LLMContext {
 
 ## 5. `--role` 注入入口（role-context.ts）
 
-扩展入口：注册 `--role` flag，`before_agent_start` 时把角色模板**链式追加**到现有 system prompt（交互式启动路径；spawn 路径由 launch script 传 `--system-prompt` 承担）。规则：
+扩展入口：注册 `--role` 与 `--role-dir` flag，`before_agent_start` 时把角色模板**链式追加**到现有 system prompt（交互式启动路径；spawn 路径由 launch script 传 `--system-prompt` 承担）。规则：
 
 - 显式 `--system-prompt`（含 spawn 路径传入的插值模板）优先，不会被模板覆盖
 - 未知名 role 不注入 prompt（boot 不报错）；注入/跳过均有 `role-context` 审计条目可查
 - `--role` 不写入注册资料——comms 纯通信，peer 列表不显示角色标签
+- `--role-dir` 为外部角色目录（§2.1），从 argv 直接读取（与 `--subnet` 同模式，不依赖 `pi.getFlag`）
 
 ---
 

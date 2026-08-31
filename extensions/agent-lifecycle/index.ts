@@ -39,14 +39,16 @@ import {
   writeFileSync,
   renameSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   displayName,
   getRoleTemplate,
   interpolate,
   listRoleNames,
   llmContextFromRole,
+  roleDirsFromArgv,
   SESSION_PATH,
+  setRoleWarn,
   type LLMContext,
 } from "../lib/role-context/template";
 import { checkTmux, tmuxNewWindow, tmuxKillWindow } from "../lib/tmux";
@@ -166,6 +168,13 @@ export async function executeAgentSpawn(
   // our own command line (--subnet flag); undefined keeps comms's default.
   const subnet = subnetFromArgv(process.argv);
 
+  // Role dirs: inherit the spawner's --role-dir flags so the spawned agent's
+  // role-context extension resolves the SAME external templates (its
+  // setActiveTools whitelist must match the spawner's view). Absolutized
+  // against cwd — the launch script cd's there, and relative flags never
+  // survive across processes.
+  const roleDirs = roleDirsFromArgv(process.argv).map((d) => resolve(cwd, d));
+
   const parentPane = checkTmux();
 
   // Session file. agentFileStem sanitizes the name (same charset as comms's
@@ -256,6 +265,9 @@ export async function executeAgentSpawn(
       autoExit: params.autoExit === true,
       role: llmCtx.role,
       subnet,
+      skills: llmCtx.skills,
+      extensions: llmCtx.extensions,
+      roleDirs: roleDirs.length ? roleDirs : undefined,
     });
 
     // Track state — only on full success
@@ -430,6 +442,11 @@ export async function executeAgentSpawnByRole(
       windowId,
       sessionFile: spawnDetails.sessionFile,
       status: spawnDetails.status,
+      ...(template.skillPaths.length ? { skills: template.skillPaths } : {}),
+      ...(template.extensionPaths.length ? { extensions: template.extensionPaths } : {}),
+      ...(template.capabilityWarnings.length
+        ? { capabilityWarnings: template.capabilityWarnings }
+        : {}),
     },
   };
 }
@@ -497,6 +514,24 @@ export default function (pi: ExtensionAPI) {
   // ---- State ----
   let cwd = process.cwd();
 
+  // ---- Flags ----
+  // --role-dir registers extra role template directories (repeatable, highest
+  // priority). Read directly from argv by roleDirsFromArgv — pi.getFlag only
+  // surfaces the LAST value of a repeated flag. Registration is for --help
+  // visibility; unknown --flags are tolerated by pi anyway.
+  pi.registerFlag("role-dir", {
+    description: "Additional role template directory (repeatable, highest priority)",
+    type: "string",
+  });
+
+  // Route capability-resolution warnings (unresolved skills/extensions in
+  // role frontmatter) into the audit log. roleWarn swallows writer errors.
+  setRoleWarn((msg) => {
+    try {
+      pi.appendEntry("role-context", { event: "capability_skip", message: msg });
+    } catch { /* not active yet — keep the console fallback silent */ }
+  });
+
   // ---- Tools ----
 
   // --- agent_spawn ---
@@ -529,14 +564,26 @@ export default function (pi: ExtensionAPI) {
         }), {
           description: "Initial conversation messages. Ignored when context is \"fork\". Preloaded messages do NOT start the agent's first turn at boot — the first turn is triggered by the first comms message that arrives.",
         })),
-        context: Type.Optional(Type.Enum({ fresh: "fresh", fork: "fork" }), {
+        context: Type.Optional(Type.Enum({ fresh: "fresh", fork: "fork" }, {
           description:
             "Context source (default \"fresh\"): \"fresh\" starts a clean " +
             "session (empty, or preloaded from messages); \"fork\" inherits " +
             "THIS process's session, trimmed to before the last comms-inbound " +
             "(delegation) message — the child sees the task background, not " +
             "the delegation dialogue.",
-        }),
+        })),
+        skills: Type.Optional(Type.Array(Type.String(), {
+          description:
+            "Absolute skill paths passed to the spawned pi via --skill " +
+            "(repeatable). Set automatically when spawning from a role " +
+            "template that declares skills: in its frontmatter.",
+        })),
+        extensions: Type.Optional(Type.Array(Type.String(), {
+          description:
+            "Absolute extension paths passed to the spawned pi via -e " +
+            "(repeatable). Set automatically when spawning from a role " +
+            "template that declares extensions: in its frontmatter.",
+        })),
       }, {
         description:
           "Self-contained LLM context: { systemPrompt: \"...\" }, optionally " +
