@@ -54,7 +54,7 @@ All team sourcing must go through TP (`target="teammate-provider"`). Send reques
 
 ## Background
 
-Know about the background of task dependence graph through skill `task-graph-background`, working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`.
+Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`.
 
 ## Report Review & Discrepancy Handling
 

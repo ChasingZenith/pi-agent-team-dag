@@ -14,7 +14,6 @@ Workflows are modeled as a Directed Acyclic Graph (DAG) consisting of two distin
 - **Module**: A higher-level objective that encompasses sub-goals or multiple execution phases.
   - *Constraint*: Modules act as containers/interfaces. They do not specify atomic inner details up front; their subgraphs are decomposed layer-by-layer as execution progresses. Modules **can** carry `deps` and `subgraph_deps`.
 
----
 
 ## 2. Dependency Edge Types
 
@@ -28,14 +27,10 @@ Workflows are modeled as a Directed Acyclic Graph (DAG) consisting of two distin
 - **Dynamic Expansion**: Gates are stored once on the parent module and expanded automatically at read time. Any child/grandchild node added under module B later automatically inherits the gate without manual enumeration into every sub-node's `deps`.
 - **Validation Constraint**: A gate cannot reference a node that resides inside the gated module's own subgraph.
 
----
-
 ## 3. Graph Integrity Rules
 
 1. **Strict Acyclicity**: The underlying store validates every write against the live graph. Any `task_create` or `task_update` operation that would form a cycle (evaluating expanded gates alongside standard `deps`) is rejected with a cycle path trace in the error.
 2. **Bottom-Up Creation**: Dependencies and gates must exist in the system *before* referencing them (`deps` and `subgraph_deps` targets must be created first).
-
----
 
 ## 4. Graph Operations & Tools
 

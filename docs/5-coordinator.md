@@ -199,7 +199,7 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 
 入口角色（`roles/specialist/requirements-clarifier.md`），把用户三言两语的需求转成具体需求：
 
-1. **提问澄清**：objective（用户真正要什么）/ acceptance criteria（成功如何验证）/ non-goals（明确不做）/ constraints（期限、技术、资源）/ risks（已知风险）
+1. **提问澄清**：先钉 objective（用户真正要什么——destination 先定，范围随之），再宽度扇出：objective / acceptance criteria（成功如何验证）/ non-goals（明确不做）/ constraints（期限、技术、资源）/ risks（已知风险）
 2. **落地到项目**：读当前项目现状（read/grep/find/ls），让需求反映现实而非想象
 3. **确认**：把写好的需求交回用户确认，迭代直到一致
 4. **交接并退出**：`task_create` 建 module（需求全文入 description）→ 经 TP spawn Coordinator（`role=coordinator`）→ `task_dispatch` 派发（Coordinator 以 `task_start` 接管节点）→ 派发确认后退出
@@ -217,6 +217,8 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 - 顶层 coordinator → 用户：目标假设失效
 
 协议与格式各层一致：停止受阻部分 → 完成不受影响的 → 前提安全的局部调整 → 立即按标准格式上报（failed assumptions / blocked links / adjustments / decisions needed）。
+
+**新披露的边缘**（上报揭示的、图未覆盖的决策）也按这个闭环归类，判据：能否**精确陈述**问题（而非能否立即回答）——能精确陈述 → 建议建节点（即使受阻）；不能 → 记入模块 description 的 `## Not yet specified`（迷雾区，不预切片）；超出目的地 → 取消并记入 `## Out of scope`（出界永不毕业，仅当目的地重画时以新 effort 回归）。
 
 **与图衔接**：Coordinator 收到上报后 `task_block(id, change_summary=...)` 标记受阻项（原因写入 change_summary）——blocked 项不再进入就绪集、依赖方保持锁定（见 docs/6 §2.4）；解除阻塞后按现实调整图（task_update 改 deps / description）并把节点恢复 pending（重新进入就绪集）/ dispatched（直接重新派发）/ active。
 
@@ -246,7 +248,7 @@ extensions/lib/role-context/roles/
     ├── planner.md                      ← 图的作者（task_create + task_update：子图生成 + 嵌入 + 子图门；一层一次委托）
     └── worker / scout / web-searcher / experts-reviewer / consultor
 
-.pi/skills/reality-beats-plan.md        ← 遇阻上报统一协议
+.pi/skills/reality-beats-plan.md        ← 遇阻上报统一协议（含新披露边缘三分类）
 ```
 
 > 角色模板目录（`lib/role-context/roles/`）与 tasks / role-context 的完整文件清单见 docs/2 §1 与 docs/6 §7；task-comms-ops 的组件定位见 docs/0-overview §1。

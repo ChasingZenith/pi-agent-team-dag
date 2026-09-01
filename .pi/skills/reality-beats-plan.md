@@ -20,16 +20,12 @@ When execution strays from the plan, categorize your findings into one of the fo
 4. **Granularity Miss**: The task is too coarse-grained or complex to execute as a single unit and requires decomposition into sub-tasks or sub-modules.
 5. **Assumption Failure**: Core premises (A1, A2, etc.) fail in reality—a required resource is unavailable, the technical approach is fundamentally infeasible, or the codebase directly contradicts the specification.
 
----
-
 ## What to Do
 
 1. **Stop the Blocked Part**: Immediately halt work on the impacted sub-path. Do not force an invalid approach through or simulate missing outputs.
 2. **Finish Safe Work**: Complete any sub-tasks, validations, or deliverables within your scope that do not depend on the failed premise.
 3. **Apply Premise-Safe Adjustments**: Make small, local technical adjustments within your assigned item that do not violate its core interfaces or affect external tasks.
 4. **Report Immediately**: Submit your report right away via `task_submit_report`. Do not wait or hold off for full completion when blocked.
-
----
 
 ## How to Report
 
