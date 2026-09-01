@@ -131,7 +131,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     const name = argValue(process.argv, "cname") || "agent";
-    const rolePrompt = template.buildSystemPrompt(name, template.defaultTools);
+    const rolePrompt = template.buildSystemPrompt(name);
     pi.appendEntry("role-context", {
       event: "role_injected",
       role,

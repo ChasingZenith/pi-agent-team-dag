@@ -331,8 +331,6 @@ export interface SpawnByRoleParams {
   role: string;
   /** Optional custom name. Defaults to a unique variant of the role name. */
   name?: string;
-  /** Optional tool override. Defaults to the role's standard tools. */
-  tools?: string;
   /** Auto-exit after the first finished turn (default false) — see executeAgentSpawn. */
   autoExit?: boolean;
   /**
@@ -365,7 +363,7 @@ function uniqueName(role: string): string {
  * whole "role → agent" transformation is owned here so consumers
  * (teammate-provider) build on agent-lifecycle instead of lib/role-context.
  *
- * @param params - { role, name?, tools?, autoExit? }
+ * @param params - { role, name?, autoExit? }
  * @param cwd    - Working directory
  * @param ctx    - ExtensionContext (for model info etc.)
  * @returns SpawnResult with details { agentName, role, tools, windowId,
@@ -377,7 +375,7 @@ export async function executeAgentSpawnByRole(
   cwd: string,
   ctx: ExtensionContext,
 ): Promise<SpawnResult> {
-  const { role, tools, name } = params;
+  const { role, name } = params;
 
   // Validate the role against the template catalog
   const template = getRoleTemplate(role);
@@ -396,7 +394,7 @@ export async function executeAgentSpawnByRole(
   const agentName = name || uniqueName(role);
 
   // Build the self-contained context from the role template
-  const llmCtx = llmContextFromRole(role, agentName, tools);
+  const llmCtx = llmContextFromRole(role, agentName);
   if (!llmCtx) {
     return {
       content: [
@@ -421,7 +419,6 @@ export async function executeAgentSpawnByRole(
 
   const spawnDetails = (spawnResult?.details ?? {}) as Record<string, unknown>;
   const windowId = (spawnDetails.windowId as string) || null;
-  const toolsUsed = tools || template.defaultTools;
 
   return {
     content: [
@@ -430,7 +427,7 @@ export async function executeAgentSpawnByRole(
         text:
           `✅ Spawned "${displayName(agentName)}" (${template.label})\n` +
           `- Role: ${role}\n` +
-          `- Tools: ${toolsUsed}\n` +
+          `- Tools: ${template.defaultTools}\n` +
           `- Window: ${windowId || "unknown"}\n\n` +
           `Give this agent name to the caller.`,
       },
@@ -438,7 +435,7 @@ export async function executeAgentSpawnByRole(
     details: {
       agentName,
       role,
-      tools: toolsUsed,
+      tools: template.defaultTools,
       windowId,
       sessionFile: spawnDetails.sessionFile,
       status: spawnDetails.status,

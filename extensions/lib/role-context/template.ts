@@ -57,7 +57,7 @@ export interface RoleTemplate {
   /** Warnings collected while resolving capabilities (unresolved references). */
   capabilityWarnings: string[];
   /** Build a full system prompt for a new agent of this role. */
-  buildSystemPrompt: (name: string, tools: string) => string;
+  buildSystemPrompt: (name: string) => string;
 }
 
 /**
@@ -368,13 +368,11 @@ export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
           skillPaths,
           extensionPaths,
           capabilityWarnings,
-          buildSystemPrompt(name, toolsOverride) {
-            const tools = toolsOverride || defaultTools;
+          buildSystemPrompt(name) {
             const roleCatalog = buildRoleCatalog();
             return interpolate(promptTemplate, {
               displayName: displayName(name),
               name,
-              tools,
               tp_name: "teammate-provider",
               role_catalog: roleCatalog,
             });
@@ -417,15 +415,10 @@ export function buildRoleCatalog(): string {
 }
 
 /** Build a system prompt for a new agent from a role template. */
-export function buildAgentPrompt(
-  role: string,
-  name: string,
-  toolsOverride?: string,
-): string | null {
+export function buildAgentPrompt(role: string, name: string): string | null {
   const template = getRoleTemplate(role);
   if (!template) return null;
-  const tools = toolsOverride || template.defaultTools;
-  return template.buildSystemPrompt(name, tools);
+  return template.buildSystemPrompt(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -549,15 +542,11 @@ export function interpolate(template: string, vars: Record<string, string>): str
  *
  * Used by: Teammate Provider when spawning new agents.
  */
-export function llmContextFromRole(
-  role: string,
-  name: string,
-  tools?: string,
-): LLMContext | null {
+export function llmContextFromRole(role: string, name: string): LLMContext | null {
   const template = getRoleTemplate(role);
   if (!template) return null;
 
-  const systemPrompt = buildAgentPrompt(role, name, tools);
+  const systemPrompt = buildAgentPrompt(role, name);
 
   return {
     systemPrompt: systemPrompt ?? undefined,

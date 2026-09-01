@@ -58,11 +58,6 @@ export default function (pi: ExtensionAPI) {
       role: Type.String({
         description: "Role: " + listRoleNames().join(", "),
       }),
-      tools: Type.Optional(
-        Type.String({
-          description: "Optional tool override. Defaults to the role's standard tools.",
-        }),
-      ),
       name: Type.Optional(
         Type.String({
           description: "Optional custom name. Defaults to the role name.",
@@ -70,9 +65,8 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const { role, tools, name } = params as {
+      const { role, name } = params as {
         role: string;
-        tools?: string;
         name?: string;
       };
 
@@ -80,7 +74,7 @@ export default function (pi: ExtensionAPI) {
         // Role validation, unique naming, context build and spawn are all
         // owned by agent-lifecycle's role-aware spawn.
         return await executeAgentSpawnByRole(
-          { role, tools, name },
+          { role, name },
           process.cwd(),
           ctx as any,
         );
@@ -105,7 +99,7 @@ export default function (pi: ExtensionAPI) {
         theme.fg("toolTitle", theme.bold("tp_spawn ")) +
         theme.fg("accent", `[${role}]`);
       if (!context.expanded) return new Text(text, 0, 0);
-      // Expanded: the full call args (role/tools/name), as the LLM saw them.
+      // Expanded: the full call args (role/name), as the LLM saw them.
       return new Text(text + "\n" + fmtArgs(a), 0, 0);
     },
   });
@@ -140,12 +134,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (_event, _ctx) => {
     // Load the TP's system prompt from the role template
     // (roles/manager/teammate-provider.md) — the same role-context machinery
-    // every other role uses; buildSystemPrompt injects {{role_catalog}} and
-    // {{tools}} from the template.
+    // every other role uses; buildSystemPrompt injects {{role_catalog}} from
+    // the template.
     const template = getRoleTemplate("teammate-provider");
     if (!template) return;
     return {
-      systemPrompt: template.buildSystemPrompt("teammate-provider", template.defaultTools),
+      systemPrompt: template.buildSystemPrompt("teammate-provider"),
     };
   });
 }

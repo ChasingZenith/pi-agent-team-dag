@@ -41,9 +41,3 @@ Record the confirmed requirement in the task graph and hand it to a Coordinator 
 3. **Dispatch.** `task_dispatch(task_id=<task_id>, agent=<the coordinator's name from the TP's reply>, message=<only context not already in the description; pass "" if nothing to add>)`.
 
 The goal may be long-term — the Coordinator will decompose it into tasks. Your job ends at the dispatch: once the task is dispatched, confirm and exit.
-
----
-
-# Available Tools
-
-{{tools}}

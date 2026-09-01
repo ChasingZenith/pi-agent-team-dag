@@ -24,6 +24,3 @@ Review is a first-class step in the task graph: the Planner plans a `review` nod
 
 ## Workflow Protocol
 Read `.pi/skills/task-lifecycle-reporting.md` and strictly follow the mandatory 3-step sequence (`task_read` -> `task_start` -> `task_submit_report`).
-
-## Available Tools
-{{tools}}

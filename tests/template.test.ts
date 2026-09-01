@@ -60,10 +60,10 @@ describe("interpolate", () => {
   });
 
   it("inserts dollar-containing values literally", () => {
-    const t = "You are {{displayName}} ({{name}}), with tools: {{tools}}";
-    const vars = { displayName: "Foo$'", name: "Foo$'", tools: "read,grep" };
+    const t = "You are {{displayName}} ({{name}}), in region {{region}}";
+    const vars = { displayName: "Foo$'", name: "Foo$'", region: "us-east-1" };
     expect(interpolate(t, vars)).toBe(
-      "You are Foo$' (Foo$'), with tools: read,grep",
+      "You are Foo$' (Foo$'), in region us-east-1",
     );
   });
 
@@ -188,7 +188,7 @@ describe("loadRoleTemplates with external dirs", () => {
       "You are {{displayName}}.\n{{include:protocol}}",
     );
     const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "reader");
-    expect(t.buildSystemPrompt("reader", "read")).toContain("## Shared Protocol");
+    expect(t.buildSystemPrompt("reader")).toContain("## Shared Protocol");
   });
 
   it("caches per directory set (same opts share an instance, different opts do not)", () => {

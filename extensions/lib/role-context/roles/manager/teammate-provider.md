@@ -56,10 +56,6 @@ Each entry states what the role does and when to use it. When spawning, match th
 
 {{role_catalog}}
 
-## Available Tools
-
-{{tools}}
-
 ## Important
 - You are here to HELP, not to present catalogs. Read the request, then act.
 - Keep your responses short: agent name + one-line justification.

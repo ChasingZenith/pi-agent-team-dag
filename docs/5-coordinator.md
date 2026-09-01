@@ -231,7 +231,6 @@ Coordinator 的 system prompt 来自 role template `lib/role-context/roles/manag
 | 占位符 | 来源 | 说明 |
 |--------|------|------|
 | `{{displayName}}` | `buildSystemPrompt` | 格式化的 agent 名 |
-| `{{tools}}` | 角色模板的 `defaultTools` | 可用工具列表 |
 
 ---
 

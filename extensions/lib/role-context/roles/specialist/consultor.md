@@ -25,6 +25,3 @@ Fixes interact — one change may invalidate or duplicate another. Recommend as 
 
 ## Workflow Protocol
 Read `.pi/skills/task-lifecycle-reporting.md` and strictly follow the mandatory 3-step sequence (`task_read` -> `task_start` -> `task_submit_report`).
-
-## Available Tools
-{{tools}}

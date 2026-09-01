@@ -81,9 +81,8 @@ TP 提供 **1 个工具**供自身的 LLM 使用。查看在线 agent 直接调 
 - **用途**：从角色模板创建并 spawn 新 agent。
 - **参数**：
   - `role`（string）：角色名（coordinator / scout / web-searcher / planner / experts-reviewer / consultor / worker）
-  - `tools`（可选）：工具覆盖，默认使用角色模板的 `defaultTools`
   - `name`（可选）：自定义名称，默认从 role 去重生成
-- **实现**：**单步调用** `executeAgentSpawnByRole({ role, tools, name }, cwd, ctx)`（docs/3 §8.2——模块函数导入，非工具调用）
+- **实现**：**单步调用** `executeAgentSpawnByRole({ role, name }, cwd, ctx)`（docs/3 §8.2——模块函数导入，非工具调用）
 - **上下文**：spawn 出的 agent 获得干净的模板上下文，不继承 TP 的对话历史（见 §3 上下文隔离）。
 - **返回值**：agent 名称、role、window ID、tools 等。任务不在 spawn 时传入——由调用方在收到 TP 回复后自行交付（`task_dispatch`）。
 
@@ -115,7 +114,7 @@ pi -e extensions/teammate-provider \
 
 ## 6. 角色模板
 
-TP spawn 使用 role-context 的角色模板——`lib/role-context/roles/` 下按语义分类（`manager/` 管理节点、`specialist/` 领域专家）存放的 `<role>.md`（YAML frontmatter + Markdown，含 `{{displayName}}` / `{{name}}` / `{{tools}}` 占位符与 `{{include:...}}` 内联协议）。格式与加载细节见 docs/2 §2。
+TP spawn 使用 role-context 的角色模板——`lib/role-context/roles/` 下按语义分类（`manager/` 管理节点、`specialist/` 领域专家）存放的 `<role>.md`（YAML frontmatter + Markdown，含 `{{displayName}}` / `{{name}}` 占位符与 `{{include:...}}` 内联协议）。格式与加载细节见 docs/2 §2。
 
 ---
 

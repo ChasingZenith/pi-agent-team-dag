@@ -52,12 +52,9 @@ description: Fast, read-only local codebase exploration...
 defaultTools: read,grep,find,ls
 ---
 You are {{displayName}}, a Scout agent...
-
-## Available Tools
-{{tools}}
 ```
 
-三个占位符在 spawn 时替换：`{{displayName}}`（格式化名）、`{{name}}`（原始名）、`{{tools}}`（工具列表）。
+占位符在 spawn 时替换：`{{displayName}}`（格式化名）、`{{name}}`（原始名）。工具白名单由 `defaultTools` 经 role-context 的 `setActiveTools` 强制执行，工具描述由 pi 自身的工具注入机制提供——模板不再重复罗列工具清单。
 
 ### 2.1 模板加载优先级
 
@@ -122,8 +119,8 @@ extensions: /abs/path/to/ext.ts,./rel-to-cwd/ext.ts
 | `getRoleTemplate(role)` | 按名查找角色模板 |
 | `listRoleNames()` | 返回有序的角色名列表 |
 | `buildRoleCatalog()` | 生成可嵌入 system prompt 的角色目录 |
-| `buildAgentPrompt(role, name, tools?)` | 从角色模板构建完整的 agent system prompt |
-| `llmContextFromRole(role, name, tools?)` | 从角色模板构建 LLMContext（含 skills/extensions 能力字段） |
+| `buildAgentPrompt(role, name)` | 从角色模板构建完整的 agent system prompt |
+| `llmContextFromRole(role, name)` | 从角色模板构建 LLMContext（含 skills/extensions 能力字段） |
 
 **类型：**
 

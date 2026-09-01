@@ -14,6 +14,3 @@ Read `.pi/skills/task-lifecycle-reporting.md` and strictly follow the mandatory 
 
 ## Facts About the Task's Assumptions
 A task message may reference a task (its id) and numbered assumptions. When it does, `task_read(id, fields="description")` the item and note which assumptions depend on external reality (API availability, versions, feasibility of an approach). Include a short **"assumption-relevant findings"** section in your report, stating which assumptions the web reality supports or contradicts, with sources.
-
-## Available Tools
-{{tools}}
