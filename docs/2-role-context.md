@@ -118,7 +118,7 @@ extensions: /abs/path/to/ext.ts,./rel-to-cwd/ext.ts
 | `setRoleWarn(fn)` / `roleWarn(msg)` | 能力/目录解析警告 writer（默认 console.warn；扩展入口安装为审计条目 `capability_skip`） |
 | `getRoleTemplate(role)` | 按名查找角色模板 |
 | `listRoleNames()` | 返回有序的角色名列表 |
-| `buildRoleCatalog()` | 生成可嵌入 system prompt 的角色目录 |
+| `buildRoleCatalog()` | 生成可嵌入 system prompt 的角色目录——每项含角色功能、`Default tools`，以及模板声明的 `Declared skills:` / `Declared extensions:`（经 `skillRefs`/`extensionRefs` 输出原始声明），供 spawner（TP）决定 add/exclude |
 | `buildAgentPrompt(role, name)` | 从角色模板构建完整的 agent system prompt |
 | `llmContextFromRole(role, name)` | 从角色模板构建 LLMContext（含 skills/extensions 能力字段） |
 
@@ -130,6 +130,8 @@ interface RoleTemplate {
   role, label, description, defaultTools, buildSystemPrompt(),
   skillPaths: string[],          // skills: 声明解析出的绝对路径
   extensionPaths: string[],      // extensions: 声明解析出的绝对路径
+  skillRefs: string[],           // skills: 原始声明（frontmatter 里的裸名/路径），供角色目录展示
+  extensionRefs: string[],       // extensions: 原始声明，供角色目录展示
   capabilityWarnings: string[],  // 解析失败的能力引用（跳过并警告）
 }
 interface LLMContext {

@@ -54,6 +54,17 @@ export interface RoleTemplate {
    * field. Empty when nothing was declared.
    */
   extensionPaths: string[];
+  /**
+   * Raw `skills:` references as written in the frontmatter (bare names or
+   * paths). Empty when nothing was declared. Surfaced in the role catalog so
+   * spawners can see what a role already declares before adding/excluding.
+   */
+  skillRefs: string[];
+  /**
+   * Raw `extensions:` references as written in the frontmatter. Empty when
+   * nothing was declared. Surfaced in the role catalog (see skillRefs).
+   */
+  extensionRefs: string[];
   /** Warnings collected while resolving capabilities (unresolved references). */
   capabilityWarnings: string[];
   /** Build a full system prompt for a new agent of this role. */
@@ -364,7 +375,7 @@ export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
         const label = fm.label || role;
         const description = fm.description || "";
         const defaultTools = fm.defaultTools || "read,grep,find,ls";
-        const { skillPaths, extensionPaths, capabilityWarnings } =
+        const { skillPaths, extensionPaths, capabilityWarnings, skillRefs, extensionRefs } =
           resolveCapabilities(fm, { cwd, home });
 
         templates.push({
@@ -374,6 +385,8 @@ export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
           defaultTools,
           skillPaths,
           extensionPaths,
+          skillRefs,
+          extensionRefs,
           capabilityWarnings,
           buildSystemPrompt(name) {
             const roleCatalog = buildRoleCatalog();
@@ -413,10 +426,19 @@ export function buildRoleCatalog(): string {
     // appear in the catalog the TP uses to pick spawn roles (it must never
     // spawn a second TP).
     .filter((t) => t.role !== "teammate-provider")
-    .map(
-      (t) =>
-        `- **${t.label}** (\`${t.role}\`): ${t.description}\n  Default tools: ${t.defaultTools}`,
-    )
+    .map((t) => {
+      const lines = [
+        `- **${t.label}** (\`${t.role}\`): ${t.description}`,
+        `  Default tools: ${t.defaultTools}`,
+      ];
+      if (t.skillRefs.length) {
+        lines.push(`  Declared skills: ${t.skillRefs.join(", ")}`);
+      }
+      if (t.extensionRefs.length) {
+        lines.push(`  Declared extensions: ${t.extensionRefs.join(", ")}`);
+      }
+      return lines.join("\n");
+    })
     .join("\n");
 }
 
@@ -491,10 +513,17 @@ export function resolveExtensionPath(ref: string, cwd: string): string | null {
 function resolveCapabilities(
   fm: Record<string, string>,
   opts: { cwd: string; home: string },
-): { skillPaths: string[]; extensionPaths: string[]; capabilityWarnings: string[] } {
+): {
+  skillPaths: string[];
+  extensionPaths: string[];
+  capabilityWarnings: string[];
+  skillRefs: string[];
+  extensionRefs: string[];
+} {
   const capabilityWarnings: string[] = [];
+  const skillRefs = parseList(fm.skills);
   const skillPaths: string[] = [];
-  for (const ref of parseList(fm.skills)) {
+  for (const ref of skillRefs) {
     const abs = resolveSkillPath(ref, opts);
     if (abs) skillPaths.push(abs);
     else {
@@ -502,8 +531,9 @@ function resolveCapabilities(
       roleWarn(`role "${fm.role}": skill "${ref}" not found; skipped`);
     }
   }
+  const extensionRefs = parseList(fm.extensions);
   const extensionPaths: string[] = [];
-  for (const ref of parseList(fm.extensions)) {
+  for (const ref of extensionRefs) {
     const abs = resolveExtensionPath(ref, opts.cwd);
     if (abs) extensionPaths.push(abs);
     else {
@@ -511,7 +541,7 @@ function resolveCapabilities(
       roleWarn(`role "${fm.role}": extension "${ref}" not found; skipped`);
     }
   }
-  return { skillPaths, extensionPaths, capabilityWarnings };
+  return { skillPaths, extensionPaths, capabilityWarnings, skillRefs, extensionRefs };
 }
 
 // ---------------------------------------------------------------------------

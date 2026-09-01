@@ -16,6 +16,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildRoleCatalog,
   interpolate,
   listRoleNames,
   loadRoleTemplates,
@@ -276,6 +277,8 @@ describe("role template capability fields", () => {
     const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "sweeper");
     expect(t.skillPaths).toEqual([join(cwd, ".pi", "skills", "playwright")]);
     expect(t.extensionPaths).toEqual([join(cwd, "ext.ts")]);
+    expect(t.skillRefs).toEqual(["playwright", "absent-skill"]);
+    expect(t.extensionRefs).toEqual(["./ext.ts", "/absent"]);
     expect(t.capabilityWarnings.length).toBe(2);
     expect(t.capabilityWarnings[0]).toContain("absent-skill");
     expect(t.capabilityWarnings[1]).toContain("/absent");
@@ -289,6 +292,45 @@ describe("role template capability fields", () => {
     const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "plain");
     expect(t.skillPaths).toEqual([]);
     expect(t.extensionPaths).toEqual([]);
+    expect(t.skillRefs).toEqual([]);
+    expect(t.extensionRefs).toEqual([]);
     expect(t.capabilityWarnings).toEqual([]);
+  });
+
+  it("role catalog surfaces each role's declared skills and extensions", () => {
+    const cwd = tmpDir("rc-cwd-");
+    const home = tmpDir("rc-home-");
+    mkdirSync(join(cwd, ".pi", "skills", "playwright"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "skills", "playwright", "SKILL.md"), "pw");
+    writeFileSync(join(cwd, "ext.ts"), "export default () => {}");
+    mkdirSync(join(cwd, ".pi", "roles"), { recursive: true });
+    writeRole(join(cwd, ".pi", "roles"), "sweeper.md", {
+      role: "sweeper",
+      label: "Sweeper",
+      description: "cleans up",
+      defaultTools: "read,bash",
+      skills: "playwright",
+      extensions: "./ext.ts",
+    });
+    // A role with no declared capabilities to prove the lines are optional.
+    writeRole(join(cwd, ".pi", "roles"), "plain.md", {
+      role: "plain",
+      label: "Plain",
+      description: "nothing extra",
+      defaultTools: "read",
+    });
+    // buildRoleCatalog resolves role dirs against process.cwd(); chdir into
+    // the fixture so the catalog picks up the declared-capability roles.
+    const prev = process.cwd();
+    process.chdir(cwd);
+    try {
+      const catalog = buildRoleCatalog();
+      expect(catalog).toContain("Declared skills: playwright");
+      expect(catalog).toContain("Declared extensions: ./ext.ts");
+      // The plain role shows only its default tools, no capability lines.
+      expect(catalog).toContain("Default tools: read");
+    } finally {
+      process.chdir(prev);
+    }
   });
 });

@@ -126,7 +126,7 @@ TP spawn 使用 role-context 的角色模板——`lib/role-context/roles/` 下�
 
 ## 7. System Prompt
 
-TP 的 system prompt 是角色模板 `lib/role-context/roles/manager/teammate-provider.md`（frontmatter `defaultTools` 即其工具白名单：`tp_spawn_agent` + `comms_*`，不含 `task_*`），使用 `{{role_catalog}}` 占位符在加载时注入角色目录。主要内容：
+TP 的 system prompt 是角色模板 `lib/role-context/roles/manager/teammate-provider.md`（frontmatter `defaultTools` 即其工具白名单：`tp_spawn_agent` + `comms_*`，不含 `task_*`），使用 `{{role_catalog}}` 占位符在加载时注入角色目录。**角色目录逐项列出每个角色的 `Default tools`，以及模板声明的 `Declared skills:` / `Declared extensions:`**（`buildRoleCatalog` 经 `skillRefs`/`extensionRefs` 输出原始声明，docs/2 §3）——TP 据此知道每个角色默认有哪些工具/能力，从而在 spawn 时决定 `exclude_*`（去掉默认的）或 `add_*`（补模板没有的）。主要内容：
 
 - 你是唯一的 TP，所有人来找你
 - 收到请求 → 调 `comms_list_peer` 扫描在线 agent → 你（LLM）自己判断
