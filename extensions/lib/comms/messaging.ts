@@ -12,7 +12,11 @@
  *    return. deliver_policy All (see ensureConsumer) only takes effect when the
  *    consumer is first created — it is the offline queue for messages that
  *    predate the consumer (explicit ack, ack_wait 5-min redelivery window
- *    (ACK_WAIT_MS), max_deliver 3).
+ *    (ACK_WAIT_MS), max_deliver 3). inactive_threshold (1h, well above the
+ *    message TTL) lets nats-server 2.10+ reap a durable whose name stops
+ *    pulling for an hour — the offline-window restart still resumes the same
+ *    cursor, and a recreated consumer only replays messages still in the TTL
+ *    window (acked ones are already past it).
  *  - inject-then-ack: every prompt is injected into pi as it arrives and
  *    acked the moment injection succeeds — at-most-once delivery at the NATS
  *    layer; nothing is held ack-pending for a settle phase. A prompt whose
@@ -54,6 +58,7 @@ import {
 import type { DeliverAsValue, Identity, InboundContext, PromptPayload } from "./protocol.ts";
 import {
 	ACK_WAIT_MS,
+	CONSUMER_INACTIVE_THRESHOLD_MS,
 	DEFAULT_SUBNET,
 	MAX_ACK_PENDING,
 	MAX_DELIVER,
@@ -199,6 +204,14 @@ async function ensureConsumer(stream: string, durable: string, filterSubject: st
 			ack_wait: nanos(ACK_WAIT_MS),
 			max_deliver: MAX_DELIVER,
 			max_ack_pending: MAX_ACK_PENDING,
+			// Reap consumers of abandoned/renamed names (nats-server 2.10+): an
+			// agent offline under a name for an hour stops having pull requests,
+			// so the server deletes the durable. Well above the message TTL, so
+			// normal offline windows keep the consumer and the restart resumes
+			// the same cursor; a recreated consumer's deliver_policy: All only
+			// replays messages still inside the TTL window — every acked one is
+			// already past it.
+			inactive_threshold: nanos(CONSUMER_INACTIVE_THRESHOLD_MS),
 		});
 	} catch (err: any) {
 		const code = err?.isJetStreamError?.() ? err.jsError()?.code : undefined;
