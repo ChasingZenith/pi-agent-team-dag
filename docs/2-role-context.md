@@ -51,10 +51,10 @@ label: Scout
 description: Fast, read-only local codebase exploration...
 defaultTools: read,grep,find,ls
 ---
-You are {{displayName}}, a Scout agent...
+You are {{cname}}...
 ```
 
-占位符在 spawn 时替换：`{{displayName}}`（格式化名）、`{{name}}`（原始名）。工具白名单由 `defaultTools` 经 role-context 的 `setActiveTools` 强制执行，工具描述由 pi 自身的工具注入机制提供——模板不再重复罗列工具清单。
+占位符在 spawn 时替换：`{{cname}}`（agent 的 comms 名，即 `--cname`）。工具白名单由 `defaultTools` 经 role-context 的 `setActiveTools` 强制执行，工具描述由 pi 自身的工具注入机制提供——模板不再重复罗列工具清单。
 
 ### 2.1 模板加载优先级
 

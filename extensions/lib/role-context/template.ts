@@ -371,8 +371,7 @@ export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
           buildSystemPrompt(name) {
             const roleCatalog = buildRoleCatalog();
             return interpolate(promptTemplate, {
-              displayName: displayName(name),
-              name,
+              cname: name,
               tp_name: "teammate-provider",
               role_catalog: roleCatalog,
             });

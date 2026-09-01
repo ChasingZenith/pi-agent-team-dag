@@ -45,7 +45,7 @@ afterEach(() => {
 });
 
 /** Write a role template file with the given frontmatter fields. */
-function writeRole(dir: string, file: string, fm: Record<string, string>, body = "You are {{displayName}}.") {
+function writeRole(dir: string, file: string, fm: Record<string, string>, body = "You are {{cname}}.") {
   const lines = Object.entries(fm).map(([k, v]) => `${k}: ${v}`);
   writeFileSync(join(dir, file), `---\n${lines.join("\n")}\n---\n${body}\n`);
 }
@@ -60,8 +60,8 @@ describe("interpolate", () => {
   });
 
   it("inserts dollar-containing values literally", () => {
-    const t = "You are {{displayName}} ({{name}}), in region {{region}}";
-    const vars = { displayName: "Foo$'", name: "Foo$'", region: "us-east-1" };
+    const t = "You are {{cname}} ({{role}}), in region {{region}}";
+    const vars = { cname: "Foo$'", role: "Foo$'", region: "us-east-1" };
     expect(interpolate(t, vars)).toBe(
       "You are Foo$' (Foo$'), in region us-east-1",
     );
@@ -185,7 +185,7 @@ describe("loadRoleTemplates with external dirs", () => {
       join(cwd, ".pi", "roles"),
       "reader.md",
       { role: "reader", defaultTools: "read" },
-      "You are {{displayName}}.\n{{include:protocol}}",
+      "You are {{cname}}.\n{{include:protocol}}",
     );
     const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "reader");
     expect(t.buildSystemPrompt("reader")).toContain("## Shared Protocol");

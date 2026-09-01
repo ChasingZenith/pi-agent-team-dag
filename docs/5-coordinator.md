@@ -230,7 +230,7 @@ Coordinator 的 system prompt 来自 role template `lib/role-context/roles/manag
 
 | 占位符 | 来源 | 说明 |
 |--------|------|------|
-| `{{displayName}}` | `buildSystemPrompt` | 格式化的 agent 名 |
+| `{{cname}}` | `buildSystemPrompt` | agent 的 comms 名（`--cname`） |
 
 ---
 

@@ -114,7 +114,7 @@ pi -e extensions/teammate-provider \
 
 ## 6. 角色模板
 
-TP spawn 使用 role-context 的角色模板——`lib/role-context/roles/` 下按语义分类（`manager/` 管理节点、`specialist/` 领域专家）存放的 `<role>.md`（YAML frontmatter + Markdown，含 `{{displayName}}` / `{{name}}` 占位符与 `{{include:...}}` 内联协议）。格式与加载细节见 docs/2 §2。
+TP spawn 使用 role-context 的角色模板——`lib/role-context/roles/` 下按语义分类（`manager/` 管理节点、`specialist/` 领域专家）存放的 `<role>.md`（YAML frontmatter + Markdown，含 `{{cname}}` 占位符与 `{{include:...}}` 内联协议）。格式与加载细节见 docs/2 §2。
 
 ---
 
