@@ -15,7 +15,7 @@
  * inside the gated module's own subgraph (that would be a cycle), and the
  * expanded graph stays DAG-checked.
  *
- * Storage: <cwd>/.pi/tasks/<id>.json — one JSON file per item. All spawned
+ * Storage: <cwd>/.pi/tasks/<id>.toml — one TOML file per item. All spawned
  * agents share the spawner's cwd, so the whole network reads and writes the
  * same directory. PI_TASKS_DIR overrides the whole directory for tests and
  * redirection (same pattern as PI_COMMS_DIR).
@@ -42,7 +42,7 @@
  * old version's trace entry (summaries only, single-lined) is pushed into
  * history (cap HISTORY_CAP), and the file is rewritten atomically
  * (.tmp + rename). Before the main file is rewritten, the REPLACED version's
- * full content is archived atomically to history/<id>.v<N>.json (N = the
+ * full content is archived atomically to history/<id>.v<N>.toml (N = the
  * replaced version; no cap — full retention), so any past version stays
  * retrievable (see readTaskVersion).
  *
@@ -62,6 +62,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DepGraphCycleError } from "dependency-graph";
+import { parse } from "smol-toml";
 import { ulid } from "../comms/protocol";
 import { buildGraph, dependencyClosure, effectiveDeps, unlockedBy } from "./graph";
 
@@ -88,7 +89,7 @@ export type TaskKind = "module" | "unit";
 const KINDS: readonly TaskKind[] = ["module", "unit"];
 
 /** One version's trace entry — summaries only; full content lives in the
- *  history/<id>.v<N>.json snapshots (see readTaskVersion). */
+ *  history/<id>.v<N>.toml snapshots (see readTaskVersion). */
 export interface TaskHistoryEntry {
 	/** The version that was replaced by this write. */
 	version: number;
@@ -192,8 +193,8 @@ export function tasksDir(cwd: string): string {
 	return process.env.PI_TASKS_DIR ?? join(cwd, ".pi", "tasks");
 }
 
-function taskJsonPath(cwd: string, id: string): string {
-	return join(tasksDir(cwd), `${id}.json`);
+function taskTomlPath(cwd: string, id: string): string {
+	return join(tasksDir(cwd), `${id}.toml`);
 }
 
 /**
@@ -238,12 +239,104 @@ function resolveTaskId(cwd: string, rawId: string | undefined): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Serialize a task to its file form: pretty-printed JSON + trailing
- * newline. All fields are mechanical — free-form text lives in description,
- * so no markup parsing is needed on read.
+ * Escape a string for a TOML basic ("...") string: backslash and the
+ * double-quote delimiter plus control characters. Used only for the rare
+ * single-line strings that contain a single quote (which rules out the
+ * literal '...' form) and for the `'''`-in-content multi-line fallback.
+ */
+function tomlEscapeBasic(s: string): string {
+	let out = "";
+	for (const ch of s) {
+		if (ch === "\"") out += '\\"';
+		else if (ch === "\\") out += "\\\\";
+		else if (ch === "\b") out += "\\b";
+		else if (ch === "\t") out += "\\t";
+		else if (ch === "\n") out += "\\n";
+		else if (ch === "\f") out += "\\f";
+		else if (ch === "\r") out += "\\r";
+		else if (ch.charCodeAt(0) < 0x20) out += `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
+		else out += ch;
+	}
+	return `"${out}"`;
+}
+
+/**
+ * Emit one string as a TOML value, staying as close to the original text as
+ * possible so agents don't have to escape quotes / backslashes:
+ * - multi-line text → literal triple-quoted `'''...'''` (no escaping at all,
+ *   the whole block is written verbatim with one leading newline that TOML
+ *   trims); falls back to a basic `"""..."""` block only when the content
+ *   itself contains `'''`;
+ * - single-line text → literal `'...'` when it contains no single quote,
+ *   otherwise a basic `"..."` string (escaped).
+ */
+function tomlString(s: string): string {
+	if (s.includes("\n") || s.includes("\r")) {
+		if (s.includes("'''")) {
+			const body = s.replace(/\\/g, "\\\\").replace(/"""/g, '""\\"');
+			return `"""\n${body}"""`;
+		}
+		return `'''\n${s}'''`;
+	}
+	if (!s.includes("'")) return `'${s}'`;
+	return tomlEscapeBasic(s);
+}
+
+/** Inline TOML array of simple strings (deps, subgraph_deps ids). */
+function tomlArray(ids: string[]): string {
+	return ids.length ? `[ ${ids.map(tomlString).join(", ")} ]` : "[]";
+}
+
+/**
+ * Serialize a task to its file form: TOML + trailing newline. Free-form text
+ * (description, completion_report) is written as literal triple-quoted blocks
+ * so the stored file reads verbatim — no JSON-style `\n` / `\"` / `\\`
+ * escapes. All root scalar keys are emitted before any table header ([...] /
+ * [[...]]), which TOML requires (a header makes every following key a member
+ * of that table). Nullable fields (dispatched_to, execution_session,
+ * completion_report) are omitted when null.
  */
 export function serializeTask(item: Task): string {
-	return JSON.stringify(item, null, 2) + "\n";
+	const L: string[] = [];
+	const S = (k: string, v: string) => L.push(`${k} = ${tomlString(v)}`);
+
+	S("id", item.id);
+	S("title", item.title);
+	S("description", item.description);
+	L.push(`deps = ${tomlArray(item.deps)}`);
+	L.push(`subgraph_deps = ${tomlArray(item.subgraph_deps)}`);
+	S("status", item.status);
+	S("kind", item.kind);
+	L.push(`version = ${item.version}`);
+	S("created_at", item.created_at);
+	S("updated_at", item.updated_at);
+	S("updated_by", item.updated_by);
+	if (item.completion_report !== null) S("completion_report", item.completion_report);
+
+	if (item.dispatched_to) {
+		L.push("");
+		L.push("[dispatched_to]");
+		S("name", item.dispatched_to.name);
+		S("dispatched_by", item.dispatched_to.dispatched_by);
+		S("dispatch_msg_id", item.dispatched_to.dispatch_msg_id);
+	}
+	if (item.execution_session) {
+		L.push("");
+		L.push("[execution_session]");
+		S("session_id", item.execution_session.session_id);
+		S("session_file", item.execution_session.session_file);
+	}
+	if (item.history.length) {
+		L.push("");
+		for (const h of item.history) {
+			L.push("[[history]]");
+			L.push(`version = ${h.version}`);
+			S("updated_at", h.updated_at);
+			S("updated_by", h.updated_by);
+			S("change_summary", h.change_summary);
+		}
+	}
+	return L.join("\n") + "\n";
 }
 
 /** Lenient dispatch parse: a well-shaped {name} object, else null.
@@ -275,7 +368,7 @@ function parseExecutionSession(raw: unknown): TaskExecutionSession | null {
 }
 
 /**
- * Parse the JSON file form. Returns null when the structure is unusable:
+ * Parse the TOML file form. Returns null when the structure is unusable:
  * not an object, missing/empty id or title, unknown status, missing/invalid
  * kind, non-array deps, non-integer version. Description, timestamps and
  * history are lenient (defaults); history entries that fail the shape check
@@ -285,7 +378,7 @@ function parseExecutionSession(raw: unknown): TaskExecutionSession | null {
 export function parseTask(raw: string): Task | null {
 	let data: unknown;
 	try {
-		data = JSON.parse(raw);
+		data = parse(raw);
 	} catch {
 		return null;
 	}
@@ -346,9 +439,9 @@ export function parseTask(raw: string): Task | null {
  * readTask stays strict so the tool surfaces corruption.
  */
 function tryReadTaskFile(cwd: string, id: string): Task | null {
-	const jsonPath = taskJsonPath(cwd, id);
-	if (!existsSync(jsonPath)) return null;
-	return parseTask(readFileSync(jsonPath, "utf-8"));
+	const tomlPath = taskTomlPath(cwd, id);
+	if (!existsSync(tomlPath)) return null;
+	return parseTask(readFileSync(tomlPath, "utf-8"));
 }
 
 /**
@@ -357,13 +450,13 @@ function tryReadTaskFile(cwd: string, id: string): Task | null {
  */
 export function readTask(cwd: string, id: string): Task | null {
 	const clean = sanitizeTaskId(id);
-	const jsonPath = taskJsonPath(cwd, clean);
-	if (!existsSync(jsonPath)) return null;
-	const item = parseTask(readFileSync(jsonPath, "utf-8"));
+	const tomlPath = taskTomlPath(cwd, clean);
+	if (!existsSync(tomlPath)) return null;
+	const item = parseTask(readFileSync(tomlPath, "utf-8"));
 	if (!item) {
 		const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
 		throw new Error(
-			`tasks: task "${clean}" is corrupted (malformed JSON or missing fields) — available tasks: ${available}`,
+			`tasks: task "${clean}" is corrupted (malformed TOML or missing fields) — available tasks: ${available}`,
 		);
 	}
 	return item;
@@ -371,7 +464,7 @@ export function readTask(cwd: string, id: string): Task | null {
 
 /**
  * Read the archived full-content snapshot of a past version from
- * history/<id>.v<N>.json. Returns null when the TASK does not exist (same
+ * history/<id>.v<N>.toml. Returns null when the TASK does not exist (same
  * contract as readTask, so callers reuse their found/not-found paths).
  * Throws for: non-positive-integer version; version >= current (read the
  * live record instead); no snapshot for the version (the item was created
@@ -392,7 +485,7 @@ export function readTaskVersion(cwd: string, id: string, version: number): Task 
 				(archived.length > 0 ? ` — archived versions: ${archived.join(", ")}` : ""),
 		);
 	}
-	const p = taskVersionJsonPath(cwd, clean, version);
+	const p = taskVersionTomlPath(cwd, clean, version);
 	if (!existsSync(p)) {
 		const archived = archivedVersions(cwd, clean);
 		throw new Error(
@@ -403,32 +496,32 @@ export function readTaskVersion(cwd: string, id: string, version: number): Task 
 	const item = parseTask(readFileSync(p, "utf-8"));
 	if (!item) {
 		throw new Error(
-			`tasks: snapshot for "${clean}" v${version} is corrupted (malformed JSON or missing fields) — archived versions: ${archivedVersions(cwd, clean).join(", ") || "(none)"}`,
+			`tasks: snapshot for "${clean}" v${version} is corrupted (malformed TOML or missing fields) — archived versions: ${archivedVersions(cwd, clean).join(", ") || "(none)"}`,
 		);
 	}
 	return item;
 }
 
-/** Atomically write the .json file (tmp + rename). */
+/** Atomically write the .toml file (tmp + rename). */
 function atomicWriteTask(cwd: string, id: string, item: Task): void {
-	const jsonPath = taskJsonPath(cwd, id);
-	const tmp = `${jsonPath}.tmp`;
+	const tomlPath = taskTomlPath(cwd, id);
+	const tmp = `${tomlPath}.tmp`;
 	writeFileSync(tmp, serializeTask(item), "utf-8");
-	renameSync(tmp, jsonPath);
+	renameSync(tmp, tomlPath);
 }
 
 // ---------------------------------------------------------------------------
 // Version snapshots (history/)
 // ---------------------------------------------------------------------------
 
-/** Directory holding archived full-content snapshots (history/<id>.v<N>.json). */
+/** Directory holding archived full-content snapshots (history/<id>.v<N>.toml). */
 function taskHistoryDir(cwd: string): string {
 	return join(tasksDir(cwd), "history");
 }
 
 /** Path of the archived snapshot for one version of one item. */
-function taskVersionJsonPath(cwd: string, id: string, version: number): string {
-	return join(taskHistoryDir(cwd), `${id}.v${version}.json`);
+function taskVersionTomlPath(cwd: string, id: string, version: number): string {
+	return join(taskHistoryDir(cwd), `${id}.v${version}.toml`);
 }
 
 /**
@@ -439,7 +532,7 @@ function taskVersionJsonPath(cwd: string, id: string, version: number): string {
  * be durable before the new one becomes visible.
  */
 function writeTaskSnapshot(cwd: string, existing: Task): void {
-	const p = taskVersionJsonPath(cwd, existing.id, existing.version);
+	const p = taskVersionTomlPath(cwd, existing.id, existing.version);
 	const tmp = `${p}.tmp`;
 	mkdirSync(taskHistoryDir(cwd), { recursive: true });
 	writeFileSync(tmp, serializeTask(existing), "utf-8");
@@ -451,15 +544,15 @@ function archivedVersions(cwd: string, id: string): number[] {
 	const dir = taskHistoryDir(cwd);
 	if (!existsSync(dir)) return [];
 	return readdirSync(dir)
-		.filter((f) => f.startsWith(`${id}.v`) && f.endsWith(".json"))
-		.map((f) => Number(f.slice(`${id}.v`.length, -".json".length)))
+		.filter((f) => f.startsWith(`${id}.v`) && f.endsWith(".toml"))
+		.map((f) => Number(f.slice(`${id}.v`.length, -".toml".length)))
 		.filter((n) => Number.isInteger(n) && n >= 1)
 		.sort((a, b) => a - b);
 }
 
 /**
  * Build the next version of a task: the replaced version's FULL content is
- * first archived to history/<id>.v<N>.json (see writeTaskSnapshot), then
+ * first archived to history/<id>.v<N>.toml (see writeTaskSnapshot), then
  * version+1 with the old version's trace entry (summaries only, single-lined)
  * pushed into history (cap HISTORY_CAP), timestamps and author updated.
  * Shared by updateTask, setTaskStatus and setCompletionReport — all three
@@ -980,7 +1073,7 @@ export function listTasks(cwd: string): TaskSummary[] {
 	if (!existsSync(dir)) return [];
 	const out: TaskSummary[] = [];
 	for (const file of readdirSync(dir)) {
-		if (!file.endsWith(".json")) continue;
+		if (!file.endsWith(".toml")) continue;
 		try {
 			const item = parseTask(readFileSync(join(dir, file), "utf-8"));
 			if (!item) continue;

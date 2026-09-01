@@ -23,6 +23,7 @@ import {
   defaultTaskId,
   HISTORY_CAP,
   listTasks,
+  parseTask,
   readTask,
   readTaskVersion,
   sanitizeTaskId,
@@ -30,6 +31,10 @@ import {
   setTaskStatus,
   updateTask,
 } from "../extensions/lib/tasks/store.ts";
+
+/** A minimal valid task TOML (same shape serializeTask emits), with optional extra lines appended. */
+const taskToml = (id: string, extra = "") =>
+  `id = '${id}'\ntitle = '${id}'\ndescription = ''\ndeps = []\nsubgraph_deps = []\nstatus = 'pending'\nkind = 'unit'\nversion = 1\ncreated_at = 't'\nupdated_at = 't'\nupdated_by = 'unknown'\n${extra}`;
 
 // ━━ helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -91,16 +96,18 @@ describe("createTask", () => {
     expect(item.created_at).toBe(item.updated_at);
   });
 
-  it("writes PI_TASKS_DIR/<id>.json that JSON.parse round-trips", () => {
+  it("writes PI_TASKS_DIR/<id>.toml that round-trips through parseTask", () => {
     const item = createTask(CWD, {
       id: "task-auth",
       title: "Auth",
       description: "A1: …\nA2: …",
       updated_by: "coordinator-main",
     });
-    expect(existsSync(join(tmp, "task-auth.json"))).toBe(true);
-    const parsed = JSON.parse(readFileSync(join(tmp, "task-auth.json"), "utf-8"));
+    expect(existsSync(join(tmp, "task-auth.toml"))).toBe(true);
+    const parsed = parseTask(readFileSync(join(tmp, "task-auth.toml"), "utf-8"));
     expect(parsed).toEqual(item);
+    // multi-line description is stored verbatim (literal block, no \n escapes)
+    expect(readFileSync(join(tmp, "task-auth.toml"), "utf-8")).toContain("A1: …\nA2: …");
   });
 
   it("normalizes deps: dedupe + sort before storing", () => {
@@ -198,11 +205,11 @@ describe("kind", () => {
     expect(listTasks(CWD)[0].kind).toBe("unit");
   });
 
-  it("persists an explicit module kind (JSON round-trip)", () => {
+  it("persists an explicit module kind (TOML round-trip)", () => {
     const item = createTask(CWD, { id: "task-mod", title: "Mod", kind: "module" });
     expect(item.kind).toBe("module");
-    const parsed = JSON.parse(readFileSync(join(tmp, "task-mod.json"), "utf-8"));
-    expect(parsed.kind).toBe("module");
+    const parsed = parseTask(readFileSync(join(tmp, "task-mod.toml"), "utf-8"));
+    expect(parsed!.kind).toBe("module");
     expect(readTask(CWD, "task-mod")!.kind).toBe("module");
     expect(listTasks(CWD)[0].kind).toBe("module");
   });
@@ -211,20 +218,17 @@ describe("kind", () => {
     // kind is always written by create/update — a file without it is not a
     // valid task record: strict read, skipped by list, repaired by create.
     writeFileSync(
-      join(tmp, "task-nokind.json"),
-      JSON.stringify({
-        id: "task-nokind",
-        title: "No Kind",
-        description: "",
-        deps: [],
-        status: "pending",
-        version: 1,
-        created_at: "t",
-        updated_at: "t",
-        updated_by: "unknown",
-        dispatched_to: null,
-        history: [],
-      }),
+      join(tmp, "task-nokind.toml"),
+      "id = 'task-nokind'\n" +
+        "title = 'No Kind'\n" +
+        "description = ''\n" +
+        "deps = []\n" +
+        "subgraph_deps = []\n" +
+        "status = 'pending'\n" +
+        "version = 1\n" +
+        "created_at = 't'\n" +
+        "updated_at = 't'\n" +
+        "updated_by = 'unknown'\n",
       "utf-8",
     );
     expect(() => readTask(CWD, "task-nokind")).toThrow(/corrupted/);
@@ -465,19 +469,15 @@ describe("setTaskStatus", () => {
 
   it("parses a malformed execution_session leniently as null", () => {
     createTask(CWD, { id: "task-x", title: "X" });
-    const file = join(tmp, "task-x.json");
-    const data = JSON.parse(readFileSync(file, "utf-8"));
+    const file = join(tmp, "task-x.toml");
 
-    data.execution_session = { session_id: 42 }; // wrong shape
-    writeFileSync(file, JSON.stringify(data), "utf-8");
+    writeFileSync(file, taskToml("task-x", "\n[execution_session]\nsession_id = 42\n"), "utf-8"); // wrong shape
     expect(readTask(CWD, "task-x")!.execution_session).toBeNull();
 
-    data.execution_session = "worker-1"; // wrong type
-    writeFileSync(file, JSON.stringify(data), "utf-8");
+    writeFileSync(file, taskToml("task-x", "\nexecution_session = 'worker-1'\n"), "utf-8"); // wrong type
     expect(readTask(CWD, "task-x")!.execution_session).toBeNull();
 
-    delete data.execution_session; // absent on pre-existing files
-    writeFileSync(file, JSON.stringify(data), "utf-8");
+    writeFileSync(file, taskToml("task-x"), "utf-8"); // absent on pre-existing files
     expect(readTask(CWD, "task-x")!.execution_session).toBeNull();
   });
 
@@ -496,15 +496,12 @@ describe("setTaskStatus", () => {
 
   it("parses a malformed dispatched_to leniently as null", () => {
     createTask(CWD, { id: "task-x", title: "X" });
-    const file = join(tmp, "task-x.json");
-    const data = JSON.parse(readFileSync(file, "utf-8"));
+    const file = join(tmp, "task-x.toml");
 
-    data.dispatched_to = { name: 42 }; // wrong shape
-    writeFileSync(file, JSON.stringify(data), "utf-8");
+    writeFileSync(file, taskToml("task-x", "\n[dispatched_to]\nname = 42\n"), "utf-8"); // wrong shape
     expect(readTask(CWD, "task-x")!.dispatched_to).toBeNull();
 
-    data.dispatched_to = "worker-1"; // wrong type
-    writeFileSync(file, JSON.stringify(data), "utf-8");
+    writeFileSync(file, taskToml("task-x", "\ndispatched_to = 'worker-1'\n"), "utf-8"); // wrong type
     expect(readTask(CWD, "task-x")!.dispatched_to).toBeNull();
   });
 
@@ -556,37 +553,37 @@ describe("atomic writes", () => {
 describe("corrupted files", () => {
   it("readTask throws with the available ids for a corrupted file", () => {
     createTask(CWD, { id: "task-ok", title: "Ok" });
-    writeFileSync(join(tmp, "task-broken.json"), "not json at all", "utf-8");
+    writeFileSync(join(tmp, "task-broken.toml"), "not toml at all", "utf-8");
     expect(() => readTask(CWD, "task-broken")).toThrow(/corrupted/);
     expect(() => readTask(CWD, "task-broken")).toThrow(/task-ok/); // available ids listed
   });
 
   it("listTasks skips corrupted files", () => {
     createTask(CWD, { id: "task-ok", title: "Ok" });
-    writeFileSync(join(tmp, "task-broken.json"), "not json at all", "utf-8");
+    writeFileSync(join(tmp, "task-broken.toml"), "not toml at all", "utf-8");
     expect(listTasks(CWD).map((w) => w.id)).toEqual(["task-ok"]);
   });
 
   it("createTask overwrites a corrupted file (last-writer-wins as repair)", () => {
-    writeFileSync(join(tmp, "task-broken.json"), "not json at all", "utf-8");
+    writeFileSync(join(tmp, "task-broken.toml"), "not toml at all", "utf-8");
     const item = createTask(CWD, { id: "task-broken", title: "Fresh" });
     expect(item.version).toBe(1);
     expect(readTask(CWD, "task-broken")!.title).toBe("Fresh");
   });
 
-  it("a structurally-invalid JSON file counts as corrupted", () => {
-    writeFileSync(join(tmp, "task-empty.json"), "{\"id\":\"task-empty\"}", "utf-8"); // no title
+  it("a structurally-invalid TOML file counts as corrupted", () => {
+    writeFileSync(join(tmp, "task-empty.toml"), "id = 'task-empty'", "utf-8"); // no title
     expect(() => readTask(CWD, "task-empty")).toThrow(/corrupted/);
   });
 });
 
-// ━━ version snapshots — history/<id>.v<N>.json ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━ version snapshots — history/<id>.v<N>.toml ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 describe("version snapshots (history/)", () => {
   const HISTORY_DIR = () => join(tmp, "history");
   /** Parse a snapshot file; asserts it exists. */
   const readSnapshot = (id: string, version: number) =>
-    JSON.parse(readFileSync(join(HISTORY_DIR(), `${id}.v${version}.json`), "utf-8"));
+    parseTask(readFileSync(join(HISTORY_DIR(), `${id}.v${version}.toml`), "utf-8"));
 
   it("updateTask archives the full old version before replacing it", () => {
     const v1 = createTask(CWD, {
@@ -630,13 +627,13 @@ describe("version snapshots (history/)", () => {
     const files = readdirSync(HISTORY_DIR())
       .filter((f) => f.startsWith("task-snap."))
       .sort((a, b) => {
-        const na = Number(a.slice("task-snap.v".length, -".json".length));
-        const nb = Number(b.slice("task-snap.v".length, -".json".length));
+        const na = Number(a.slice("task-snap.v".length, -".toml".length));
+        const nb = Number(b.slice("task-snap.v".length, -".toml".length));
         return na - nb;
       });
     expect(files).toHaveLength(12);
-    expect(files[0]).toBe("task-snap.v1.json");
-    expect(files[11]).toBe("task-snap.v12.json");
+    expect(files[0]).toBe("task-snap.v1.toml");
+    expect(files[11]).toBe("task-snap.v12.toml");
     expect(readTask(CWD, "task-snap")!.history).toHaveLength(HISTORY_CAP); // summaries still capped
   });
 
@@ -690,29 +687,25 @@ describe("version snapshots (history/)", () => {
   it("readTaskVersion throws when no snapshot exists for the version", () => {
     // a valid item created before snapshotting shipped: live file, no history dir
     writeFileSync(
-      join(tmp, "task-legacy.json"),
-      JSON.stringify({
-        id: "task-legacy",
-        title: "Legacy",
-        description: "",
-        deps: [],
-        status: "pending",
-        kind: "unit",
-        version: 7,
-        created_at: "2026-01-01T00:00:00.000Z",
-        updated_at: "2026-01-01T00:00:00.000Z",
-        updated_by: "unknown",
-        dispatched_to: null,
-        completion_report: null,
-        history: [],
-      }),
+      join(tmp, "task-legacy.toml"),
+      "id = 'task-legacy'\n" +
+        "title = 'Legacy'\n" +
+        "description = ''\n" +
+        "deps = []\n" +
+        "subgraph_deps = []\n" +
+        "status = 'pending'\n" +
+        "kind = 'unit'\n" +
+        "version = 7\n" +
+        "created_at = '2026-01-01T00:00:00.000Z'\n" +
+        "updated_at = '2026-01-01T00:00:00.000Z'\n" +
+        "updated_by = 'unknown'\n",
       "utf-8",
     );
     expect(() => readTaskVersion(CWD, "task-legacy", 3)).toThrow(/no snapshot/);
     // a deleted snapshot is the same error
     createTask(CWD, { id: "task-gone", title: "Gone" });
     updateTask(CWD, "task-gone", { title: "Gone2" });
-    rmSync(join(HISTORY_DIR(), "task-gone.v1.json"));
+    rmSync(join(HISTORY_DIR(), "task-gone.v1.toml"));
     expect(() => readTaskVersion(CWD, "task-gone", 1)).toThrow(/no snapshot/);
   });
 
@@ -726,7 +719,7 @@ describe("version snapshots (history/)", () => {
   });
 
   it("createTask repairing a corrupted file writes no snapshot", () => {
-    writeFileSync(join(tmp, "task-broken.json"), "not json at all", "utf-8");
+    writeFileSync(join(tmp, "task-broken.toml"), "not toml at all", "utf-8");
     createTask(CWD, { id: "task-broken", title: "Fresh" });
     expect(existsSync(HISTORY_DIR())).toBe(false);
   });
@@ -1012,7 +1005,7 @@ describe("optimistic concurrency (expected_version)", () => {
     const snapshots = existsSync(join(tmp, "history"))
       ? readdirSync(join(tmp, "history")).filter((f) => f.startsWith("task-a.")).sort()
       : [];
-    expect(snapshots).toEqual(["task-a.v1.json"]);
+    expect(snapshots).toEqual(["task-a.v1.toml"]);
   });
 
   it("updateTask: omitted expected_version keeps the legacy last-writer-wins behavior", () => {

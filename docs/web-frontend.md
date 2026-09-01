@@ -10,7 +10,7 @@ web/  Svelte 5 + Vite + Svelte Flow (SPA, 纯前端)
 server/  Hono (Bun) — 只读 API
   │  直接复用 extensions/lib/tasks/{store,graph}.ts(纯模块,零 pi 依赖)
   ▼
-<root>/.pi/tasks/<id>.json   ← agent 团队 (pi 会话) 在写同一份数据
+<root>/.pi/tasks/<id>.toml   ← agent 团队 (pi 会话) 在写同一份数据
 ```
 
 - 派生语义(ready set、missing deps、dependents、环/悬空警告)全部在 server 端计算,前端只渲染,不重复实现图逻辑。

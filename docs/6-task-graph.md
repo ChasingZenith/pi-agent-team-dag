@@ -90,12 +90,14 @@
 ### 3.1 目录与图重建
 
 - **目录**：默认 `<cwd>/.pi/tasks/`（spawn 的 agent 与 spawner 同 cwd → 共享同一张图）；`PI_TASKS_DIR` env 可整体覆盖（测试与重定向，仿既有 `PI_*_DIR` 覆盖惯例）。
-- **图重建**：每次操作从目录扫描全部 `<id>.json` 重建图（无内存态）——任何 agent 的写入立即对所有 agent 可见；删除文件即从图中移除该节点。
-- **版本快照**：每次变更前，被替换版本的**完整内容**原子归档到 `.pi/tasks/history/<id>.v<N>.json`（N = 被替换的版本号；无上限，全量保留）——任何历史版本随时可回溯（`task_read` 的 `version=<n>`，见 §5）。`history/` 子目录不参与图重建（`task_list` 只扫描顶层 `.json` 文件）。
+- **图重建**：每次操作从目录扫描全部 `<id>.toml` 重建图（无内存态）——任何 agent 的写入立即对所有 agent 可见；删除文件即从图中移除该节点。
+- **版本快照**：每次变更前，被替换版本的**完整内容**原子归档到 `.pi/tasks/history/<id>.v<N>.toml`（N = 被替换的版本号；无上限，全量保留）——任何历史版本随时可回溯（`task_read` 的 `version=<n>`，见 §5）。`history/` 子目录不参与图重建（`task_list` 只扫描顶层 `.toml` 文件）。
 
-### 3.2 JSON 字段
+### 3.2 TOML 字段
 
-每个 task 一个 `<id>.json`：
+每个 task 一个 `<id>.toml`：持久化用 TOML（而非 JSON），自由文本字段（`description`、`completion_report`）写成**字面量多行字符串**（`'''...'''`）——整段原文照抄，换行 / 双引号 / 反斜杠都无需转义，Agent 写入时无需处理 JSON 式 `\n` / `\"` / `\\` 转义序列。
+
+| 字段 | 类型 | 语义 |
 
 | 字段 | 类型 | 语义 |
 |------|------|------|
@@ -107,7 +109,7 @@
 | `status` | string | `pending` / `dispatched` / `active` / `done` / `blocked` / `cancelled`（见 §2.4） |
 | `kind` | string | 粒度声明：`unit`（可直接执行——可带 deps 顺序依赖、无聚合子图——默认）/ `module`（聚合——可能有子图、可能需要下放；review 节点也是 module）。create 省略默认 `unit`；读取时 `kind` 缺失/非法按损坏文件处理（见 §3.4）；**unit 不能声明 `subgraph_deps`**（门绑定子图，unit 无子图可门） |
 | `version` | number | 创建为 1；每次变更 +1；`task_read` 返回，写操作可携带 `expected_version` 做乐观并发校验（见 §3.4） |
-| `history` | array | 版本追踪，**只存摘要**（每条：被本次写入替换的版本号 + updated_by + updated_at + change_summary），cap 10，最新在前——防上下文膨胀；被替换版本的**完整内容**见 `history/` 目录下的 `<id>.v<N>.json` 快照（§3.1） |
+| `history` | array | 版本追踪，**只存摘要**（每条：被本次写入替换的版本号 + updated_by + updated_at + change_summary），cap 10，最新在前——防上下文膨胀；被替换版本的**完整内容**见 `history/` 目录下的 `<id>.v<N>.toml` 快照（§3.1） |
 | `created_at` / `updated_at` | string | ISO 8601 时间戳 |
 | `updated_by` | string | 更新者（agent 身份名，身份不可得时为 `unknown`） |
 | `dispatched_to` | object \| null | 当前负责人 `{name, dispatched_by, dispatch_msg_id}`——在设置 `dispatched`（派发）时由 `task_dispatch` / `task_set_status` 写入，`active` 时保留，done/cancelled 自动清除；`name` 为负责 agent 的 comms 名字（即 comms 投递地址，跨重启稳定，无需解析任何会话文件）；`dispatched_by` 为派发者 agent 名、`dispatch_msg_id` 为委托消息的 msg_id（均 `task_dispatch` 记录；裸 `task_set_status` 派发为 `""`） |
@@ -118,26 +120,30 @@
 
 `auth-system`（目标任务，分解为两个模块）：
 
-```json
-{
-  "id": "auth-system",
-  "title": "实现认证系统",
-  "description": "总体目标：登录 + 注册 + JWT 签发与校验。模块间契约写入各子项 description。",
-  "deps": ["login-module", "register-module"],
-  "status": "pending",
-  "kind": "module",
-  "version": 3,
-  "history": [
-    { "version": 2, "updated_at": "2026-08-10T04:15:00.000Z", "updated_by": "planner-1", "change_summary": "注册模块拆分为 register-form / register-api" },
-    { "version": 1, "updated_at": "2026-08-10T03:30:00.000Z", "updated_by": "planner-1", "change_summary": "登录模块拆分为 login-form / login-api / jwt" }
-  ],
-  "created_at": "2026-08-10T03:00:00.000Z",
-  "updated_at": "2026-08-10T04:15:00.000Z",
-  "updated_by": "planner-1",
-  "dispatched_to": null,
-  "execution_session": null,
-  "completion_report": null
-}
+```toml
+id = 'auth-system'
+title = '实现认证系统'
+description = '总体目标：登录 + 注册 + JWT 签发与校验。模块间契约写入各子项 description。'
+deps = [ 'login-module', 'register-module' ]
+subgraph_deps = []
+status = 'pending'
+kind = 'module'
+version = 3
+created_at = '2026-08-10T03:00:00.000Z'
+updated_at = '2026-08-10T04:15:00.000Z'
+updated_by = 'planner-1'
+
+[[history]]
+version = 2
+updated_at = '2026-08-10T04:15:00.000Z'
+updated_by = 'planner-1'
+change_summary = '注册模块拆分为 register-form / register-api'
+
+[[history]]
+version = 1
+updated_at = '2026-08-10T03:30:00.000Z'
+updated_by = 'planner-1'
+change_summary = '登录模块拆分为 login-form / login-api / jwt'
 ```
 
 ### 3.4 写入语义
@@ -145,7 +151,7 @@
 - **原子写**：每次变更写 `.tmp` 再 `rename`——读方永远看不到半截文件。
 - **先归档后改写**：每次变更先把被替换版本的完整内容写成快照（原子），再改写主文件——新版本可见前旧版本已持久化；快照写入失败则本次变更整体失败、主文件不变（写入成功后才产生快照，故快照只对应成功变更）。
 - **乐观并发（optimistic concurrency）**：写操作携带调用方读到的版本——`task_update` / `task_set_status` 的可选参数 `expected_version`（`task_read` 返回当前 `version`）。写入时若节点已越过该版本，在**任何写入之前**拒绝并报冲突错误（错误信息含期望版本与实际版本，提示重读后重试）；主文件与快照均不变。省略 `expected_version` 时维持 last-writer-wins 语义。该机制补充而非替代角色分工——冲突保护的前提仍是写入方由角色分工约束、正常流程下互不冲突（见 docs/5）。
-- **失败语义**：`task_read` 遇到损坏文件（JSON 非法 / 缺字段）**严格报错**并列出可用 id；`task_list` **跳过**损坏文件；`task_create` **覆盖修复**（last-writer-wins 即修复）；`task_read` 的 `version=<n>` 读历史快照——版本非法 / ≥ 当前版本 / 快照缺失时报错并列出已归档版本。
+- **失败语义**：`task_read` 遇到损坏文件（TOML 非法 / 缺字段）**严格报错**并列出可用 id；`task_list` **跳过**损坏文件；`task_create` **覆盖修复**（last-writer-wins 即修复）；`task_read` 的 `version=<n>` 读历史快照——版本非法 / ≥ 当前版本 / 快照缺失时报错并列出已归档版本。
 
 
 ## 4. 写入校验与图算法

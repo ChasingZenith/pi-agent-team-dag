@@ -137,7 +137,7 @@ function watchItemsDir(onEvent: () => void): () => void {
 				// Atomic writes (store.ts: tmp + rename) surface here as a single
 				// "rename" event carrying the *tmp* filename on Linux — accept it
 				// too, or updates would never push an SSE event.
-				if (typeof filename === "string" && (filename.endsWith(".json") || filename.endsWith(".json.tmp"))) onEvent();
+				if (typeof filename === "string" && (filename.endsWith(".toml") || filename.endsWith(".toml.tmp"))) onEvent();
 			});
 			watcher.on("error", () => {
 				watcher?.close();

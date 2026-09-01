@@ -5,7 +5,8 @@
   "description": "Pi Agent Team DAG",
   "dependencies": {
     "dependency-graph": "^0.11.0",
-    "nats": "^2.29.3"
+    "nats": "^2.29.3",
+    "smol-toml": "^1.8.0"
   },
   "pi": {
     "extensions": [
