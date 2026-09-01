@@ -19,7 +19,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getRoleTemplate, type RoleTemplate } from "./lib/role-context/template";
+import { getRoleTemplate, setRoleWarn, type RoleTemplate } from "./lib/role-context/template";
 
 /** Value of `--<name> <value>` (or `--<name>=<value>`) in argv, if present. */
 function argValue(argv: string[], name: string): string | undefined {
@@ -42,6 +42,26 @@ export default function (pi: ExtensionAPI) {
     description: "Role template name (e.g. scout, worker, coordinator)",
     type: "string",
     default: undefined,
+  });
+
+  // --role-dir registers extra role template directories (repeatable, highest
+  // priority). Read directly from argv by roleDirsFromArgv — pi.getFlag only
+  // surfaces the LAST value of a repeated flag, and the values must apply to
+  // every template lookup in this process (spawned agents inherit the flag via
+  // their launch script). Registration is for --help visibility; unknown
+  // --flags are tolerated by pi anyway.
+  pi.registerFlag("role-dir", {
+    description: "Additional role template directory (repeatable, highest priority)",
+    type: "string",
+  });
+
+  // Route capability-resolution warnings (unresolved skills/extensions in role
+  // frontmatter) into the audit log. Failure must never break template loading
+  // — roleWarn already swallows writer errors.
+  setRoleWarn((msg) => {
+    try {
+      pi.appendEntry("role-context", { event: "capability_skip", message: msg });
+    } catch { /* not active yet — keep the console fallback silent */ }
   });
 
   pi.on("session_start", async () => {

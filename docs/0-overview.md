@@ -9,7 +9,7 @@ Pi Agent Team DAG 是运行在 Pi Coding Agent 之上的多 agent 协作系统�
 三个**独立组件**（相互不依赖）：
 
 - **comms** — 通信网络层：NATS + JetStream 上的 agent 发现、消息传递、回复应答、定时提醒（docs/1）
-- **role-context** — 角色模板与上下文：`--role` flag、角色模板注入、LLMContext 构建（docs/2）
+- **role-context** — 角色模板与上下文：`--role` flag、角色模板注入、LLMContext 构建；模板可从外部目录加载（`--role-dir`/`.pi/roles/`/`~/.pi/agent/roles/`，覆盖内置）+ 角色声明外部能力（`skills:`/`extensions:` 经 spawn 传播）（docs/2）
 - **tasks** — 任务图数据系统：图存储 + `task_*` 工具，进度权威源（docs/6）
 
 建立在独立组件之上的**组合组件**：
@@ -59,7 +59,7 @@ flowchart LR
 | 文档 | 内容 |
 |------|------|
 | [1-comms.md](1-comms.md) | comms 的设计与功能：NATS 拓扑、注册、消息、回复、提醒 |
-| [2-role-context.md](2-role-context.md) | role-context：角色模板格式、LLMContext 构建、session 创建/fork、`--role` 注入 |
+| [2-role-context.md](2-role-context.md) | role-context：角色模板格式（含外部角色目录与 `skills:`/`extensions:` 能力声明）、LLMContext 构建、session 创建/fork、`--role` 注入 |
 | [3-create-and-kill-agent-on-net.md](3-create-and-kill-agent-on-net.md) | agent-lifecycle：spawn / kill、auto-exit |
 | [4-teammate-provider.md](4-teammate-provider.md) | Teammate Provider：唯一注册中心、匹配 vs spawn、回复 agent 名 |
 | [5-coordinator.md](5-coordinator.md) | Coordinator 管理角色：图驱动闭环、需求明确入口、递归、接口仲裁 |

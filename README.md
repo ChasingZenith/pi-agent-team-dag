@@ -34,6 +34,8 @@ Spawned agents load the comms extension in their launch script, so they auto-con
 
 Gives agents a role and a context. A `--role` flag picks one of the role templates that get injected into the agent's system prompt: `coordinator` (owns the node handed to it and its subgraph, delegates everything), `planner` (graph decomposition), `scout` (codebase exploration), `web-searcher` (web research), `worker` (general execution), `experts-reviewer` (expert-panel review), `consultor` (suggestions), `requirements-clarifier` (requirements authoring).
 
+Role templates live in `extensions/lib/role-context/roles/` and can be replaced or extended from external directories: `--role-dir <path>` (repeatable, highest priority), `.pi/roles/` (project) and `~/.pi/agent/roles/` (user) — a same-named role replaces its built-in version. A role's frontmatter can also declare the external capabilities it needs: `skills:` (loaded into the spawned agent via `--skill`) and `extensions:` (via `-e`), e.g. `skills: playwright-cli`.
+
 Also provides LLMContext builders and SessionManager-backed session creation/fork — agents can fork an existing session into a new agent instead of starting from scratch.
 
 ### 4. teammate-provider — the central teammate registry

@@ -190,6 +190,7 @@ exec pi \
   -e extensions/comms.ts \
   -e extensions/role-context.ts \
   -e extensions/auto-exit.ts \
+  --skill <project>/.pi/skills \
   --cname '<name>' \
   --subnet '<subnet>' \                 # 通信域，继承 spawner 的 --subnet（未指定则省略）
   --system-prompt '<system_prompt>' \   # 角色的 system prompt 内容
@@ -198,10 +199,16 @@ exec pi \
   --session '<session_file>'
 ```
 
+角色声明的 `skills:`/`extensions:` 与 spawner 的 `--role-dir` 按需追加：`-e <role-extension>` 排在
+插件链之后、`--skill <role-skill-path>` 追加在项目 `.pi/skills` 之后（均只出现在角色声明时），
+`--role-dir <abs>` 随 subnet 一组（只在 spawner 带该 flag 时出现）。
+
 关键设计：
 - 使用 `exec pi` 替换 bash 进程，使 pi 退出时 tmux window 自动关闭
 - `--role`、`--system-prompt` 标志使 spawned agent 自带身份和上下文（spawn 路径已带插值模板作为 `--system-prompt`，role-context 的注入守卫跳过，不会双注入——见 docs/2 §5）
 - **subnet 继承**：spawner 通过 `--subnet` 加入的通信域会透传给 spawned agent（`subnetFromArgv` 扫描 spawner 进程 argv）——否则 spawn 的 agent 会落到默认 subnet，与 spawner 互不可见
+- **能力透传**：角色 frontmatter 声明的 `skills:`/`extensions:`（docs/2 §2.2）经 LLMContext 追加为 `--skill`/`-e`——agent 自带角色所需的外部能力；解析不到的引用由 spawner 侧警告跳过（details 的 `capabilityWarnings` 可见）
+- **role-dir 继承**：spawner 的 `--role-dir` 被绝对化后透传给 spawned agent（`roleDirsFromArgv`），其 role-context 工具白名单与 spawner 命中同一外部模板
 - `--model` 仅在提供了 model 时才出现——未指定时启动脚本**省略该标志**（不传空串），让 pi 自行选择默认模型；有 model 时优先使用调用者的 model
 - **不传 `--name`**：comms 拥有会话名——boot 认领基础名 `cname`，由 profile 的 `current_task` 驱动（`task_start` 设标题、`task_submit_report` 清空，见 docs/1 §6.6 与 docs/5 §3）；`dispatch` / `complete` / `block` / `cancel` 等管理动作不改变会话名；手动 `--name` / `/name` 永远优先，自动命名不再覆盖
 
@@ -268,6 +275,7 @@ interface AgentState {
 - **不在 tmux 中**：`checkTmux()` 抛出明确错误，引导用户先启动 tmux 会话
 - **同名 agent 已存在**：`executeAgentSpawn` 抛出错误，提示先 `agent_kill`（`executeAgentSpawnByRole` 的默认命名先去重，通常不触发）
 - **未知角色**：`executeAgentSpawnByRole` 返回 error result（`details.error = "Unknown role"` + 可用角色列表），不抛错、不 spawn
+- **能力解析失败**：角色的 `skills:`/`extensions:` 声明解析不到 → 警告并跳过（spawn 继续）；spawn 结果 `details` 携带 `skills`/`extensions`/`capabilityWarnings` 供调用方察觉（docs/2 §2.2）
 - **Spawn 失败 auto-cleanup**：任何步骤失败 → 自动 kill window + 清除 Map 状态 + 重新抛异常（不残留僵尸 window；见 §5.1 行为 7）
 - **kill 不存在的 agent**：返回提示信息，不抛错（幂等设计）
 - **tmux 操作失败**：`tmuxKillWindow` 静默忽略 window 已死的情况；`tmuxNewWindow` 异常会向上传播
