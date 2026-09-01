@@ -127,8 +127,9 @@ agent-lifecycle 提供 **2 个工具**：
     - `messages`（可选）：初始对话消息，经 pi `SessionManager`（`writePreloadedSessionFile`）写入 session JSONL。`context: "fork"` 时忽略。
     - `context`（可选，`"fresh" | "fork"`，默认 `"fresh"`）：会话来源——`"fresh"` 干净会话（空自举或预载 messages）；`"fork"` 分支 spawner 自己的会话（`SessionManager.createBranchedSession`），裁剪到最后一个 `comms-inbound` 委派消息之前，子 agent 继承任务背景、看不到委派对话（`messages` 忽略，任务经 comms_send 送达）。
     - `role`（可选）：角色模板名（`--role` 标志，如 scout, worker），由 `llmContextFromRole()` 内部设置。
+    - `tools`（可选，string[]）：**完整工具白名单**，覆盖角色 `defaultTools`（`--role-tools` 标志）——设置后仅这些工具激活；省略时用角色模板的 `defaultTools`。
   - `model`（string，可选）：模型覆盖。默认使用调用者的 model，无则省略 `--model` 标志（不传空串），让 pi 自行选择默认模型。
-- **LLM 直接调用时的 schema**：LLM 通过工具调用 `agent_spawn` 时，`llmContext` 暴露 `systemPrompt` / `messages` / `context` 三个字段；`role` 仅通过 `llmContextFromRole()` 在代码侧注入。
+- **LLM 直接调用时的 schema**：LLM 通过工具调用 `agent_spawn` 时，`llmContext` 暴露 `systemPrompt` / `messages` / `context` / `skills` / `extensions` / `tools` 字段；`role` 仅通过 `llmContextFromRole()` 在代码侧注入。
 - **上下文生成**：LLM 直调 `agent_spawn` 时直接构造 `llmContext: { systemPrompt: "..." }`——agent 的第一轮由到达的首条 comms 消息触发（comms_send 送达即触发 turn），无需初始 user 消息，任务在 spawn 后经 comms_send 送达（代码侧角色模板上下文见 §4）。
 - **行为**：
   1. 校验 tmux 环境（`checkTmux()`）
@@ -203,6 +204,12 @@ exec pi \
 插件链之后、`--skill <role-skill-path>` 追加在项目 `.pi/skills` 之后（均只出现在角色声明时），
 `--role-dir <abs>` 随 subnet 一组（只在 spawner 带该 flag 时出现）。
 
+**能力覆盖（add/exclude）**：`--role-tools <csv>`（完整工具白名单，覆盖角色 `defaultTools`）只在
+`executeAgentSpawnByRole` 收到 `addTools`/`excludeTools`（teammate-provider 的 `add_tools`/`exclude_tools`）
+或显式 `tools` 时出现；spawn 时的额外 skills/extensions（`addSkills`/`addExtensions`，除角色声明外追加）
+与 `excludeSkills`/`excludeExtensions`（跳过角色声明 skills/extensions）也在 agent-lifecycle 侧解析合并后以
+`--skill`/`-e` 发出——docs/4 §4.1、docs/2 §5。
+
 关键设计：
 - 使用 `exec pi` 替换 bash 进程，使 pi 退出时 tmux window 自动关闭
 - `--role`、`--system-prompt` 标志使 spawned agent 自带身份和上下文（spawn 路径已带插值模板作为 `--system-prompt`，role-context 的注入守卫跳过，不会双注入——见 docs/2 §5）
@@ -260,7 +267,7 @@ interface AgentState {
 | 函数 | 签名 | 用途 |
 |------|------|------|
 | `executeAgentSpawn(params, cwd, ctx)` | `→ Promise<SpawnResult>` | 核心 spawn 逻辑（接收 LLMContext） |
-| `executeAgentSpawnByRole(params, cwd, ctx)` | `→ Promise<SpawnResult>` | **role-aware spawn**：角色验证 → 去重命名 → `llmContextFromRole` → spawn——teammate-provider 的 `tp_spawn_agent` 只调用它 |
+| `executeAgentSpawnByRole(params, cwd, ctx)` | `→ Promise<SpawnResult>` | **role-aware spawn**：角色验证 → 去重命名 → `llmContextFromRole` → 应用能力覆盖（`addTools`/`excludeTools`/`addSkills`/`excludeSkills`/`addExtensions`/`excludeExtensions`）→ spawn——teammate-provider 的 `tp_spawn_agent` 只调用它（参数见 docs/4 §4.1） |
 | `executeAgentKill(params)` | `→ SpawnResult` | 核心 kill 逻辑 |
 | `listRoleNames` / `buildRoleCatalog` / `interpolate` | 转发自 lib/role-context | 角色查询——TP 构建自身 prompt 与工具描述时使用 |
 

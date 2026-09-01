@@ -101,6 +101,13 @@ export interface LLMContext {
   skills?: string[];
   /** Absolute extension paths passed via `-e` (repeatable). Set from a role template's `extensions:` field. */
   extensions?: string[];
+  /**
+   * Full tool whitelist for the spawned agent, overriding the role template's
+   * `defaultTools` when set (passed as `--role-tools`). Teammate-provider /
+   * agent-lifecycle compute this from (defaultTools − excludeTools) ∪ addTools;
+   * a direct caller (agent_spawn) may pass an explicit list.
+   */
+  tools?: string[];
 }
 
 // ---------------------------------------------------------------------------

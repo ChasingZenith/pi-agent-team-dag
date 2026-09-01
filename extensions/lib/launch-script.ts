@@ -62,6 +62,12 @@ export interface LaunchScriptParams {
   /** Absolute extension paths (role-declared) passed as -e, appended after the plugin chain. */
   extensions?: string[];
   /**
+   * Explicit tool whitelist (role-declared defaultTools − excluded ∪ added,
+   * computed by agent-lifecycle at spawn time). Passed as `--role-tools` so
+   * the spawned pi's role-context overrides its defaultTools with this set.
+   */
+  tools?: string[];
+  /**
    * External role template dirs (inherited from the spawner's --role-dir,
    * already absolutized). Passed verbatim so the spawned agent resolves the
    * SAME role catalog as the spawner.
@@ -146,6 +152,7 @@ export function buildLaunchScript(params: LaunchScriptParams): string {
     ...(params.roleDirs ?? []).flatMap((d) => ["--role-dir", sq(d)]),
     ...(params.systemPrompt ? ["--system-prompt", sq(params.systemPrompt)] : []),
     ...(params.role ? ["--role", sq(params.role)] : []),
+    ...(params.tools && params.tools.length ? ["--role-tools", sq(params.tools.join(","))] : []),
     ...(params.model ? ["--model", sq(params.model)] : []),
     "--session", sq(params.sessionFile),
   ];

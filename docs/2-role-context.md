@@ -137,6 +137,7 @@ interface LLMContext {
   context?: "fresh" | "fork",    // 默认 "fresh"；"fork" 继承 spawner 会话并裁剪委派尾巴
   skills?: string[],             // 绝对路径，spawn 时作为 --skill（可重复）
   extensions?: string[],         // 绝对路径，spawn 时作为 -e（可重复）
+  tools?: string[],              // 完整工具白名单（可选）；覆盖角色 defaultTools，spawn 时作为 --role-tools
 }
 ```
 
@@ -170,6 +171,7 @@ interface LLMContext {
 - 未知名 role 不注入 prompt（boot 不报错）；注入/跳过均有 `role-context` 审计条目可查
 - `--role` 不写入注册资料——comms 纯通信，peer 列表不显示角色标签
 - `--role-dir` 为外部角色目录（§2.1），从 argv 直接读取（与 `--subnet` 同模式，不依赖 `pi.getFlag`）
+- `--role-tools`（csv）为**完整工具白名单**：存在时**完全覆盖**角色的 `defaultTools`（否则用 `defaultTools` 经 `setActiveTools` 强制）。该标志由 agent-lifecycle 在 spawn 时计算一次（`defaultTools − exclude ∪ add`，来自 teammate-provider 的 `add_tools`/`exclude_tools`，docs/4 §4.1），spawned pi 只负责照单执行——白名单计算不落在 role-context 侧
 
 ---
 

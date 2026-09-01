@@ -55,6 +55,16 @@ export default function (pi: ExtensionAPI) {
     type: "string",
   });
 
+  // --role-tools is an explicit, complete tool whitelist (csv) that overrides
+  // the role template's defaultTools. It is produced by agent-lifecycle when a
+  // spawner adds/excludes tools (teammate-provider's add_tools/exclude_tools):
+  // the effective whitelist (defaultTools − exclude ∪ add) is computed once at
+  // spawn time and shipped to the spawned pi, so role-context just honors it.
+  pi.registerFlag("role-tools", {
+    description: "Explicit tool whitelist (csv) overriding the role's defaultTools",
+    type: "string",
+  });
+
   // Route capability-resolution warnings (unresolved skills/extensions in role
   // frontmatter) into the audit log. Failure must never break template loading
   // — roleWarn already swallows writer errors.
@@ -76,13 +86,21 @@ export default function (pi: ExtensionAPI) {
     // last, so the whitelist wins over the additive merges).
     // Applies to spawned agents too (they also pass --role) — the tool
     // constraint is independent of the prompt injection below.
-    if (!roleFlag) return;
-    const template = getRoleTemplate(roleFlag);
-    if (!template) return;
-    const tools = template.defaultTools
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+    // An explicit --role-tools (computed by agent-lifecycle at spawn time from
+    // defaultTools − exclude ∪ add) fully overrides the template's defaultTools.
+    const roleTools = argValue(process.argv, "role-tools");
+    if (!roleFlag && !roleTools) return;
+    let tools: string[];
+    if (roleTools) {
+      tools = roleTools.split(",").map((t) => t.trim()).filter(Boolean);
+    } else {
+      const template = getRoleTemplate(roleFlag!);
+      if (!template) return;
+      tools = template.defaultTools
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+    }
     pi.setActiveTools(tools);
     pi.appendEntry("role-context", { event: "tools_whitelisted", role: roleFlag, tools });
   });

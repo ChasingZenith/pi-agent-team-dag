@@ -82,9 +82,15 @@ TP 提供 **1 个工具**供自身的 LLM 使用。查看在线 agent 直接调 
 - **参数**：
   - `role`（string）：角色名（coordinator / scout / web-searcher / planner / experts-reviewer / consultor / worker）
   - `name`（可选）：自定义名称，默认从 role 去重生成
-- **实现**：**单步调用** `executeAgentSpawnByRole({ role, name }, cwd, ctx)`（docs/3 §8.2——模块函数导入，非工具调用）
+  - `add_tools`（可选，string[]）：在角色模板 `defaultTools` **之外追加**的工具名（模板里没有的工具）；最终白名单 =（`defaultTools` ∪ `add_tools`）− `exclude_tools`
+  - `exclude_tools`（可选，string[]）：从角色模板 `defaultTools` **移除**的工具名（如去掉 worker 的 `bash` 使其只读）
+  - `add_skills`（可选，string[]）：**额外加载**的 skill（裸名或路径，裸名按标准 skill 位置查找，见 docs/2 §2.2）——模板已声明的 skills 仍默认加载
+  - `exclude_skills`（可选，boolean）：**跳过**角色模板声明的 `skills:`（默认加载）
+  - `add_extensions`（可选，string[]）：**额外加载**的 extension 路径（相对路径以项目根为基准）
+  - `exclude_extensions`（可选，boolean）：**跳过**角色模板声明的 `extensions:`（默认加载）
+- **实现**：**单步调用** `executeAgentSpawnByRole({ role, name, addTools, excludeTools, addSkills, excludeSkills, addExtensions, excludeExtensions }, cwd, ctx)`（docs/3 §8.2——模块函数导入，非工具调用）；工具白名单的计算（`defaultTools − exclude ∪ add`）在 agent-lifecycle 侧完成一次，经 `--role-tools` 传给 spawned agent（docs/3 §7.1）
 - **上下文**：spawn 出的 agent 获得干净的模板上下文，不继承 TP 的对话历史（见 §3 上下文隔离）。
-- **返回值**：agent 名称、role、window ID、tools 等。任务不在 spawn 时传入——由调用方在收到 TP 回复后自行交付（`task_dispatch`）。
+- **返回值**：agent 名称、role、**有效工具白名单**、skills、window ID 等（`tools` 为计算后的白名单，而非模板原始 `defaultTools`）。任务不在 spawn 时传入——由调用方在收到 TP 回复后自行交付（`task_dispatch`）。
 
 ---
 

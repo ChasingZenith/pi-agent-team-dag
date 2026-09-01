@@ -46,6 +46,8 @@ import {
   interpolate,
   listRoleNames,
   llmContextFromRole,
+  resolveExtensionPath,
+  resolveSkillPath,
   roleDirsFromArgv,
   SESSION_PATH,
   setRoleWarn,
@@ -267,6 +269,7 @@ export async function executeAgentSpawn(
       subnet,
       skills: llmCtx.skills,
       extensions: llmCtx.extensions,
+      tools: llmCtx.tools,
       roleDirs: roleDirs.length ? roleDirs : undefined,
     });
 
@@ -340,6 +343,30 @@ export interface SpawnByRoleParams {
    * child to inherit this process's session via fork.
    */
   context?: "fresh" | "fork";
+  /**
+   * Tool names to ADD to the role template's defaultTools whitelist (tools
+   * NOT in the template). Effective whitelist = (defaultTools ∪ addTools) −
+   * excludeTools. Tool names are resolved against the template's defaultTools
+   * string — they do not need to be paths.
+   */
+  addTools?: string[];
+  /** Tool names to REMOVE from the role template's defaultTools whitelist. */
+  excludeTools?: string[];
+  /**
+   * Extra skills (bare names or paths) loaded beyond the role template's
+   * declared `skills:`. Bare names resolve through the standard skill
+   * locations (project first); literal/`~`/relative paths are used as-is.
+   */
+  addSkills?: string[];
+  /** Skip the role template's declared `skills:` (default: load them). */
+  excludeSkills?: boolean;
+  /**
+   * Extra extensions (paths) loaded beyond the role template's declared
+   * `extensions:`. Relative paths anchor at cwd; `~` expands to homedir.
+   */
+  addExtensions?: string[];
+  /** Skip the role template's declared `extensions:` (default: load them). */
+  excludeExtensions?: boolean;
 }
 
 /**
@@ -407,10 +434,66 @@ export async function executeAgentSpawnByRole(
     };
   }
 
+  // ---- Tool whitelist: defaultTools − excludeTools ∪ addTools ----
+  // Computed here (once) so role-context on the spawned pi just honors the
+  // resulting `--role-tools`. Deduped, order preserved.
+  const templateTools = template.defaultTools
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const excluded = new Set((params.excludeTools ?? []).map((t) => t.trim()));
+  const tools = [
+    ...new Set([
+      ...templateTools.filter((t) => !excluded.has(t)),
+      ...(params.addTools ?? []).map((t) => t.trim()).filter(Boolean),
+    ]),
+  ];
+
+  // ---- Skills: role-declared (unless excluded) ∪ caller-added ----
+  // Caller-added refs (bare names or paths) resolve to absolute paths through
+  // the same mechanism the template's own `skills:` field uses.
+  const capabilityWarnings = [...template.capabilityWarnings];
+  const extraSkills: string[] = [];
+  for (const ref of params.addSkills ?? []) {
+    const abs = resolveSkillPath(ref, { cwd });
+    if (abs) extraSkills.push(abs);
+    else {
+      capabilityWarnings.push(`spawn skill "${ref}" not found; skipped`);
+    }
+  }
+  const skills = [
+    ...new Set([
+      ...(params.excludeSkills ? [] : (llmCtx.skills ?? [])),
+      ...extraSkills,
+    ]),
+  ];
+
+  // ---- Extensions: role-declared ∪ caller-added ----
+  const extraExtensions: string[] = [];
+  for (const ref of params.addExtensions ?? []) {
+    const abs = resolveExtensionPath(ref, cwd);
+    if (abs) extraExtensions.push(abs);
+    else {
+      capabilityWarnings.push(`spawn extension "${ref}" not found; skipped`);
+    }
+  }
+  const extensions = [
+    ...new Set([
+      ...(params.excludeExtensions ? [] : (llmCtx.extensions ?? [])),
+      ...extraExtensions,
+    ]),
+  ];
+
   const spawnResult = await executeAgentSpawn(
     {
       name: agentName,
-      llmContext: { ...llmCtx, context: params.context ?? llmCtx.context },
+      llmContext: {
+        ...llmCtx,
+        context: params.context ?? llmCtx.context,
+        tools,
+        skills,
+        extensions,
+      },
       autoExit: params.autoExit,
     },
     cwd,
@@ -427,7 +510,7 @@ export async function executeAgentSpawnByRole(
         text:
           `✅ Spawned "${displayName(agentName)}" (${template.label})\n` +
           `- Role: ${role}\n` +
-          `- Tools: ${template.defaultTools}\n` +
+          `- Tools: ${tools.join(",")}\n` +
           `- Window: ${windowId || "unknown"}\n\n` +
           `Give this agent name to the caller.`,
       },
@@ -435,14 +518,14 @@ export async function executeAgentSpawnByRole(
     details: {
       agentName,
       role,
-      tools: template.defaultTools,
+      tools: tools.join(","),
       windowId,
       sessionFile: spawnDetails.sessionFile,
       status: spawnDetails.status,
-      ...(template.skillPaths.length ? { skills: template.skillPaths } : {}),
-      ...(template.extensionPaths.length ? { extensions: template.extensionPaths } : {}),
-      ...(template.capabilityWarnings.length
-        ? { capabilityWarnings: template.capabilityWarnings }
+      ...(skills.length ? { skills } : {}),
+      ...(extensions.length ? { extensions } : {}),
+      ...(capabilityWarnings.length
+        ? { capabilityWarnings }
         : {}),
     },
   };
@@ -580,6 +663,12 @@ export default function (pi: ExtensionAPI) {
             "Absolute extension paths passed to the spawned pi via -e " +
             "(repeatable). Set automatically when spawning from a role " +
             "template that declares extensions: in its frontmatter.",
+        })),
+        tools: Type.Optional(Type.Array(Type.String(), {
+          description:
+            "Full tool whitelist overriding the role's defaultTools (passed " +
+            "as --role-tools). When set, only these tool names are active; " +
+            "when omitted, the role template's defaultTools are used.",
         })),
       }, {
         description:

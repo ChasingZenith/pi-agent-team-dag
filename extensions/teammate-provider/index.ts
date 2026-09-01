@@ -63,6 +63,36 @@ export default function (pi: ExtensionAPI) {
           description: "Optional custom name. Defaults to the role name.",
         }),
       ),
+      add_tools: Type.Optional(Type.Array(Type.String(), {
+        description:
+          "Tool names to ADD to the role's default tools (tools NOT in the " +
+          "template's defaultTools). Effective whitelist = " +
+          "(defaultTools ∪ add_tools) − exclude_tools.",
+      })),
+      exclude_tools: Type.Optional(Type.Array(Type.String(), {
+        description:
+          "Tool names to REMOVE from the role's default tools. Effective " +
+          "whitelist = (defaultTools ∪ add_tools) − exclude_tools.",
+      })),
+      add_skills: Type.Optional(Type.Array(Type.String(), {
+        description:
+          "Extra skills (bare names or paths) loaded beyond the role " +
+          "template's declared `skills:`. Bare names resolve through the " +
+          "standard skill locations (project first).",
+      })),
+      exclude_skills: Type.Optional(Type.Boolean({
+        description:
+          "Skip the role template's declared `skills:` (default: load them).",
+      })),
+      add_extensions: Type.Optional(Type.Array(Type.String(), {
+        description:
+          "Extra extension paths loaded beyond the role template's declared " +
+          "`extensions:`. Relative paths anchor at the project root.",
+      })),
+      exclude_extensions: Type.Optional(Type.Boolean({
+        description:
+          "Skip the role template's declared `extensions:` (default: load them).",
+      })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const { role, name } = params as {
@@ -71,10 +101,20 @@ export default function (pi: ExtensionAPI) {
       };
 
       try {
-        // Role validation, unique naming, context build and spawn are all
-        // owned by agent-lifecycle's role-aware spawn.
+        // Role validation, unique naming, context build, and the add/exclude
+        // tool/skill/extension overrides are all owned by agent-lifecycle's
+        // role-aware spawn.
         return await executeAgentSpawnByRole(
-          { role, name },
+          {
+            role,
+            name,
+            addTools: params.add_tools,
+            excludeTools: params.exclude_tools,
+            addSkills: params.add_skills,
+            excludeSkills: params.exclude_skills,
+            addExtensions: params.add_extensions,
+            excludeExtensions: params.exclude_extensions,
+          },
           process.cwd(),
           ctx as any,
         );

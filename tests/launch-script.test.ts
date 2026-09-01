@@ -164,4 +164,14 @@ describe("buildLaunchScript", () => {
   it("omits --role-dir flags when absent", () => {
     expect(roleDirFlags(build())).toEqual([]);
   });
+
+  it("emits --role-tools as a csv when a computed whitelist is provided", () => {
+    const script = build({ role: "worker", tools: ["read", "write", "bash", "comms_send"] });
+    expect(script).toContain("--role-tools 'read,write,bash,comms_send'");
+  });
+
+  it("omits --role-tools when no explicit whitelist is provided", () => {
+    const script = build({ role: "worker" });
+    expect(script).not.toContain("--role-tools");
+  });
 });
