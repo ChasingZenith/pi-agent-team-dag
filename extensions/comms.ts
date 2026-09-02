@@ -474,11 +474,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Send a message to one or more peers on the comms hub.\n\n" +
 			"Calling this function sends the message to the specified peer(s). Each receiver automatically receives the message as an inbound turn or injection — the receiver does NOT need to poll or check an inbox. The exact time and way the message is injected depends on `deliver_as`.\n\n" +
-			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_s` to remind yourself if a reply has not arrived.\n\n" +
-			"REMINDERS (`remind_s`, seconds; defaults to 0)\n" +
-			"`remind_s = 0` (the default): no reminder; `remind_s > 0`: arm a reminder for this send — while it is active, a reminder turn is periodically injected to you. Same reminder semantics as comms_remind.\n\n" +
+			"This tool call returns immediately after sending the message and does NOT wait for the receiver to receive, read, process, or reply to it. The result includes a `msg_id` for each recipient. Because the sender does not wait for the receiver's response, you can optionally use `remind_s` to remind yourself if a reply has not arrived — the sender does NOT need to poll or check an outbox. \n\n" +
 			"REPLYING TO A RECEIVED MESSAGE — REQUIRED FOR PEER-TO-PEER REPLIES\n" +
-			"Writing a response in your own conversation does NOT send it to the peer. To reply, call this tool with `target` set to the peer name from the message framing and `reply_to_msg_id` set to that message's `msg_id`. For any received question, task, or confirmation request, use this tool unless the message explicitly provides another reply method. A valid `reply_to_msg_id` lets the sender associate your message with the original request and stop any reminder for it. Omit `reply_to_msg_id` only when sending a new message that is not a reply.",
+			"To reply an inbound message from a peer, call this tool with `target` set to the peer name from the message framing and `reply_to_msg_id` set to that message's `msg_id`. For any received question, task, or confirmation request, use this tool unless the message explicitly provides another reply method. A valid `reply_to_msg_id` lets the sender associate your message with the original request and stop any reminder for it. Omit `reply_to_msg_id` only when sending a new message that is not a reply.",
 		parameters: Type.Object({
 			target: Type.Optional(Type.String({ description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
 			targets: Type.Optional(Type.Array(Type.String(), { description: "Group send: multiple peer names (CASE-SENSITIVE). Set either target or targets; one msg_id is returned per recipient." })),
@@ -531,10 +529,6 @@ export default function (pi: ExtensionAPI) {
 			if (p.deliver_as) notes.push(`deliver as ${p.deliver_as}`);
 			const lines = results.map((r) => `comms_send to ${r.target} (${r.target_status})\nmsg_id ${r.msg_id}`);
 			const errLines = errors.map((e) => `comms_send to ${e.target}: FAILED — ${e.error}`);
-			// For a one-way request with a reminder armed, make the waiting state
-			// explicit so the caller knows to end its turn and await the injected
-			// reply / reminder turn rather than polling comms_outbox.
-			if (!p.reply_to_msg_id && p.remind_s) notes.push(`waiting — end your turn; the reply is injected (remind every ${p.remind_s} s)`);
 			const text = [...lines, ...errLines].join("\n") + (notes.length ? "\n" + notes.join(" · ") : "");
 
 			return {
