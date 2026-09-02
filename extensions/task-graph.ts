@@ -214,7 +214,7 @@ export default function (pi: ExtensionAPI) {
 			"The single content write: commits YOUR drafts into the true copies and forms a new version. " +
 			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then commit here — task_commit is the only way content becomes a version. " +
 			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind / info_refs; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
-			"WIRING (draft-only, never stored on this node): into_deps = [<parent ids>] makes THIS node a dep/member of each existing parent (appended to the parent's deps); into_subgraph_deps = [<module ids>] makes THIS node a gate of each module's subgraph. The parents must already exist and are re-committed structure-only (their content version is untouched — an actively driven parent is never disturbed). " +
+			"WIRING — a METADATA DRAFT FIELD of the .toml, NOT a parameter of this tool call: put `into_deps = [<parent ids>]` inside the metadata draft file (never in the call arguments) to make THIS node a dep/member of each existing parent (appended to the parent's deps); put `into_subgraph_deps = [<module ids>]` there to make THIS node a gate of each module's subgraph. The parents must already exist and are re-committed structure-only (their content version is untouched — an actively driven parent is never disturbed). " +
 			"Clear gates from a module by putting subgraph_deps = [] in the draft. " +
 			"info_refs = [<ids>] references shared information nodes (kind = \"info\") whose description is injected into this task at read time — write common requirements ONCE, reference them from many tasks (e.g. the same audit applied to 100 sites). " +
 			"This is the tool for GRAPH STRUCTURE — deps / subgraph_deps (each bump the task's struct_version, NOT its content version), plus content metadata — title / kind / description (which bump the content version). This tool does NOT change status (the lifecycle): to set pending / dispatched / active / done / blocked / cancelled use task_set_status, which is a lifecycle event and does NOT bump the version.",
@@ -432,7 +432,7 @@ export default function (pi: ExtensionAPI) {
 				writes.push(
 					{
 						path: metaPath,
-						content: `id = "${cleanId}"\n# title = "..."    # REQUIRED for creation\n# deps = []\n# subgraph_deps = []\n# info_refs = []    # ids of shared info nodes (kind = \"info\") to inject\n# kind = "unit"     # or "module", or "info" (shared information: pure content)\n`,
+						content: `id = "${cleanId}"\n# title = "..."    # REQUIRED for creation\n# deps = []\n# subgraph_deps = []\n# into_deps = []    # wiring: write a parent id here to become its child (appended to that parent's deps) — a draft-field, never a tool-call arg\n# into_subgraph_deps = []    # wiring: write a module id here to gate that module's subgraph (appended to its subgraph_deps) — a draft-field, never a tool-call arg\n# info_refs = []    # ids of shared info nodes (kind = \"info\") to inject\n# kind = "unit"     # or "module", or "info" (shared information: pure content)\n`,
 						label: "metadata",
 					},
 					{ path: dst, content: "", label: "description" },
