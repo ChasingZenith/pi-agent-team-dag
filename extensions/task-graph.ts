@@ -26,12 +26,17 @@
  * true copies (metadata toml + description.md + report.md) plus per-agent
  * drafts under .pi/tasks/draft/<cname>/. Agents write/edit DRAFTS and
  * task_commit is the single content write: it validates (deps existence, cycles, kind), forms a
- * new version (+1 on any change to title/description/deps/subgraph_deps/kind/info_refs),
- * and rewrites the true copies, consuming the drafts it used. task_checkout
+ * new version (+1 on any change to title/description/kind/info_refs — the worker's contract),
+ * and rewrites the true copies, consuming the drafts it used. deps/subgraph_deps changes do NOT
+ * bump that content `version` — they bump `struct_version` (and behind it a `struct_changed_at`
+ * soft signal, surfaced on task_read), so wiring a child into a parent never disturbs a consumer
+ * holding a content version. task_checkout
  * initializes the caller's draft BODY-ONLY (frontmatter is never handed to
  * the draft; commit re-adds it). Lifecycle events (status
  * transitions) and completion reports do NOT bump the version — version counts
- * content revisions only.
+ * content revisions only. The commit directive fields into_deps /
+ * into_subgraph_deps (draft-only, never stored) wire the committed node into an existing parent's
+ * deps / subgraph_deps atomically, re-committing the parent structure-only.
  *
  * Tools: task_commit, task_checkout, task_set_status,
  * task_read, task_list,
@@ -209,9 +214,10 @@ export default function (pi: ExtensionAPI) {
 			"The single content write: commits YOUR drafts into the true copies and forms a new version. " +
 			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then commit here — task_commit is the only way content becomes a version. " +
 			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind / info_refs; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
+			"WIRING (draft-only, never stored on this node): into_deps = [<parent ids>] makes THIS node a dep/member of each existing parent (appended to the parent's deps); into_subgraph_deps = [<module ids>] makes THIS node a gate of each module's subgraph. The parents must already exist and are re-committed structure-only (their content version is untouched — an actively driven parent is never disturbed). " +
 			"Clear gates from a module by putting subgraph_deps = [] in the draft. " +
 			"info_refs = [<ids>] references shared information nodes (kind = \"info\") whose description is injected into this task at read time — write common requirements ONCE, reference them from many tasks (e.g. the same audit applied to 100 sites). " +
-			"This is the tool for GRAPH STRUCTURE — deps / subgraph_deps, and content metadata — title / kind/ description. This tool does NOT change status (the lifecycle): to set pending / dispatched / active / done / blocked / cancelled use task_set_status, which is a lifecycle event and does NOT bump the version.",
+			"This is the tool for GRAPH STRUCTURE — deps / subgraph_deps (each bump the task's struct_version, NOT its content version), plus content metadata — title / kind / description (which bump the content version). This tool does NOT change status (the lifecycle): to set pending / dispatched / active / done / blocked / cancelled use task_set_status, which is a lifecycle event and does NOT bump the version.",
 		parameters: Type.Object({
 			id: Type.String({
 				description:
@@ -784,6 +790,12 @@ pi.registerTool({
 				`kind: ${item.kind}`,
 				`deps: ${item.deps.length > 0 ? item.deps.join(", ") : "(none)"}`,
 			];
+			// Soft structural signal: the subgraph (deps / subgraph_deps) has changed since a past
+			// content version — tells a consumer the graph grew WITHOUT forcing a re-read (content
+			// `version` is unchanged, so any report anchor still holds).
+			if (item.struct_version > 1 && item.struct_changed_at) {
+				lines.push(`subgraph changed (struct v${item.struct_version}) @ ${item.struct_changed_at} — deps/subgraph_deps grew; content version ${item.version} unchanged`);
+			}
 			if (item.subgraph_deps.length > 0) {
 				lines.push(`subgraph_deps: ${item.subgraph_deps.join(", ")} (subgraph gates — the whole subgraph waits for these)`);
 			}
@@ -868,7 +880,7 @@ pi.registerTool({
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
 					found: true,
-					item: { id: item.id, status: item.status, version: item.version },
+					item: { id: item.id, status: item.status, version: item.version, struct_version: item.struct_version },
 					dependents,
 					missing,
 					ready: isReady,

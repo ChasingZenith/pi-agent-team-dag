@@ -578,4 +578,21 @@ describe("tasks extension shell", () => {
     expect(text).toContain("site-100");
     expect(text).not.toContain("site-audit-common");
   });
+
+  it("task_read surfaces the subgraph-changed soft signal after wiring, without bumping content version", async () => {
+    const { pi, tools } = makeFakePi();
+    tasksExtension(pi);
+    const commit = tools.find((t) => t.name === "task_commit");
+    const read = tools.find((t) => t.name === "task_read");
+    await commitCreate(commit, "task-mod", "Module", { kind: "module" });
+
+    // wire a child into the module via into_deps
+    writeDraft(`draft/${ME}/task-sub.toml`, `id = 'task-sub'\ntitle = 'Sub'\ninto_deps = [ 'task-mod' ]`);
+    await commit.execute("c", { id: "task-sub", expected_version: 1 }, undefined, undefined);
+
+    const r = await read.execute("c", { id: "task-mod" }, undefined, undefined);
+    expect(r.details.item.version).toBe(1); // content version unchanged by wiring
+    expect(r.content[0].text).toContain("subgraph changed (struct v2)");
+    expect(r.content[0].text).toContain("task-sub"); // the wired child appears in the parent's deps
+  });
 });

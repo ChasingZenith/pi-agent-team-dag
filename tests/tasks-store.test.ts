@@ -218,7 +218,7 @@ describe("commitTask — create (v1)", () => {
 // ━━ update via commitTask (patch semantics) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 describe("commitTask — update (patch semantics)", () => {
-  it("version +1 on description/deps/subgraph_deps/title/kind changes; snapshot archives the old version", () => {
+  it("version +1 on description/title/kind changes (deps bump struct_version instead); snapshot archives the old version", () => {
     createTask({ id: "dep" });
     createTask({ id: "u", deps: [] });
     expect(readTask(CWD, "u")!.version).toBe(1);
@@ -232,23 +232,24 @@ describe("commitTask — update (patch semantics)", () => {
     expect(snap1.version).toBe(1);
     expect(snap1.description).toBe("");
 
-    // metadata patch: deps change → v3
+    // deps change → struct_version +1, content version UNCHANGED (structure-only)
     draft(`draft/${ME}/u.toml`, "deps = [ 'dep' ]");
     const v3 = commitTask(CWD, "u", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 2 }).item;
-    expect(v3.version).toBe(3);
+    expect(v3.version).toBe(2); // content version did NOT bump
+    expect(v3.struct_version).toBe(2); // structural version bumped
     expect(v3.history[0].changed_items).toContain("deps");
 
-    // title change → v4 (title bumps too)
+    // title change → v4 (title bumps content version)
     draft(`draft/${ME}/u.toml`, "title = 'New Title'");
-    const v4 = commitTask(CWD, "u", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 3 }).item;
-    expect(v4.version).toBe(4);
+    const v4 = commitTask(CWD, "u", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 2 }).item;
+    expect(v4.version).toBe(3);
     expect(v4.title).toBe("New Title");
     expect(v4.history[0].changed_items).toContain("title");
 
-    // kind flip → v5
+    // kind flip → v4
     draft(`draft/${ME}/u.toml`, "kind = 'module'");
-    const v5 = commitTask(CWD, "u", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 4 }).item;
-    expect(v5.version).toBe(5);
+    const v5 = commitTask(CWD, "u", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 3 }).item;
+    expect(v5.version).toBe(4);
     expect(v5.kind).toBe("module");
   });
 
@@ -722,5 +723,139 @@ describe("shared information nodes (kind = info)", () => {
     expect(summary.info_refs).toEqual(["common-reqs"]);
     const infoSummary = listTasks(CWD).find((s) => s.id === "common-reqs")!;
     expect(infoSummary.kind).toBe("info");
+  });
+});
+
+// ━━ struct_version split + into_* wiring ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe("struct_version + into_* wiring", () => {
+  it("deps/subgraph_deps changes bump struct_version, not the content version", () => {
+    createTask({ id: "dep" });
+    createTask({ id: "m", kind: "module" });
+    draft(`draft/${ME}/m.toml`, "deps = [ 'dep' ]");
+    const r = commitTask(CWD, "m", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 }).item;
+    expect(r.version).toBe(1); // content contract untouched
+    expect(r.struct_version).toBe(2); // structure bumped
+    expect(r.struct_changed_at).toBeTruthy();
+    // no snapshot written for a structure-only change
+    expect(existsSync(join(tmp, "history", "m.v2"))).toBe(false);
+  });
+
+  it("into_deps wires a child into an EXISTING parent via its own commit — parent's deps grow, content version unchanged", () => {
+    createTask({ id: "mod", kind: "module" });
+    // child commits and declares it belongs in mod's deps
+    draft(`draft/${ME}/child.toml`, `id = 'child'\ntitle = 'child'\ninto_deps = [ 'mod' ]`);
+    const r = commitTask(CWD, "child", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+    expect(r.created).toBe(true);
+    const child = readTask(CWD, "child")!;
+    // the relation lives on the PARENT only — child metadata carries no into_deps
+    expect(child.deps).toEqual([]);
+    const parent = readTask(CWD, "mod")!;
+    expect(parent.deps).toEqual(["child"]);
+    expect(parent.version).toBe(1); // parent content version NOT bumped
+    expect(parent.struct_version).toBe(2); // parent structure bumped
+    expect(parent.history[0].event).toBe("wiring");
+  });
+
+  it("into_subgraph_deps wires a node as a module's gate", () => {
+    createTask({ id: "code" });
+    createTask({ id: "tests-mod", kind: "module" });
+    draft(`draft/${ME}/code.toml`, `id = 'code'\ntitle = 'code'\ninto_subgraph_deps = [ 'tests-mod' ]`);
+    commitTask(CWD, "code", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+    const parent = readTask(CWD, "tests-mod")!;
+    expect(parent.subgraph_deps).toEqual(["code"]);
+    expect(parent.version).toBe(1);
+    expect(parent.struct_version).toBe(2);
+  });
+
+  it("wiring into an ACTIVE parent does not disturb it (content version unchanged, still reportable)", () => {
+    createTask({ id: "mod", kind: "module" });
+    setTaskStatus(CWD, "mod", "dispatched", {
+      dispatched_to: { name: "coord", dispatched_by: "planner", dispatch_msg_id: "m1" },
+      event: "dispatch",
+      updated_by: "planner",
+    });
+    setTaskStatus(CWD, "mod", "active", {
+      execution_session: { session_id: "sess", session_file: "f" },
+      event: "start",
+      updated_by: "coord",
+    });
+    const before = readTask(CWD, "mod")!;
+    draft(`draft/${ME}/t2.toml`, `id = 't2'\ntitle = 't2'\ninto_deps = [ 'mod' ]`);
+    commitTask(CWD, "t2", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+    const after = readTask(CWD, "mod")!;
+    expect(after.version).toBe(before.version); // 并未推高 content version
+    expect(after.struct_version).toBe(before.struct_version + 1);
+    expect(after.status).toBe("active");
+    expect(after.dispatched_to?.name).toBe("coord");
+  });
+
+  it("wiring is idempotent — a second commit declaring the same parent is a no-op on the parent", () => {
+    createTask({ id: "mod", kind: "module" });
+    draft(`draft/${ME}/c1.toml`, `id = 'c1'\ntitle = 'c1'\ninto_deps = [ 'mod' ]`);
+    commitTask(CWD, "c1", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+    const pv1 = readTask(CWD, "mod")!.struct_version;
+    // child re-commits (content change) declaring the same parent — parent's deps already contains it
+    draft(`draft/${ME}/c1.toml`, `title = 'c1 v2'\ninto_deps = [ 'mod' ]`);
+    commitTask(CWD, "c1", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 });
+    expect(readTask(CWD, "mod")!.struct_version).toBe(pv1); // no additional bump
+  });
+
+  it("into_deps requires an existing parent; missing target rejected with available ids", () => {
+    draft(`draft/${ME}/orphan.toml`, `id = 'orphan'\ntitle = 'orphan'\ninto_deps = [ 'nope' ]`);
+    expect(() =>
+      commitTask(CWD, "orphan", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/into_deps target "nope" does not exist/);
+  });
+
+  it("into_deps into a finished (done) parent is rejected", () => {
+    createTask({ id: "mod", kind: "module" });
+    setTaskStatus(CWD, "mod", "done", { event: "complete", updated_by: "planner" });
+    draft(`draft/${ME}/late.toml`, `id = 'late'\ntitle = 'late'\ninto_deps = [ 'mod' ]`);
+    expect(() =>
+      commitTask(CWD, "late", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/terminal/);
+  });
+
+  it("into_subgraph_deps requires a module target — a unit is rejected", () => {
+    createTask({ id: "unt" });
+    draft(`draft/${ME}/g.toml`, `id = 'g'\ntitle = 'g'\ninto_subgraph_deps = [ 'unt' ]`);
+    expect(() =>
+      commitTask(CWD, "g", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/only a module has a subgraph/);
+  });
+
+  it("an info node cannot be wired (into_deps/into_subgraph_deps)", () => {
+    createTask({ id: "mod", kind: "module" });
+    draft(`draft/${ME}/inf.toml`, `id = 'inf'\ntitle = 'inf'\nkind = 'info'\ninto_deps = [ 'mod' ]`);
+    expect(() =>
+      commitTask(CWD, "inf", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/kind "info" cannot declare into_deps/);
+  });
+
+  it("wiring an existing node into a parent (update path) works and does not bump the child content version", () => {
+    createTask({ id: "mod", kind: "module" });
+    createTask({ id: "node1" });
+    draft(`draft/${ME}/node1.toml`, `into_deps = [ 'mod' ]`);
+    const r = commitTask(CWD, "node1", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 }).item;
+    expect(r.version).toBe(1); // child content unchanged
+    expect(readTask(CWD, "mod")!.deps).toEqual(["node1"]);
+  });
+
+  it("wiring lines up before orphan detection — a wired child is no longer an orphan", () => {
+    createTask({ id: "mod", kind: "module" });
+    draft(`draft/${ME}/leaf.toml`, `id = 'leaf'\ntitle = 'leaf'\ninto_deps = [ 'mod' ]`);
+    commitTask(CWD, "leaf", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+    // parent's deps is the true edge; leaf is referenced, so it is not free-floating
+    const parent = readTask(CWD, "mod")!;
+    expect(parent.deps).toContain("leaf");
+  });
+
+  it("struct_version round-trips through parseTask/serializeMetadata", () => {
+    createTask({ id: "s1", deps: [] });
+    const raw = readFileSync(join(tmp, "s1.toml"), "utf-8");
+    const parsed = parseTask(raw)!;
+    expect(parsed.struct_version).toBe(1);
+    expect(typeof parsed.struct_changed_at).toBe("string");
   });
 });

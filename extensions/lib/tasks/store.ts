@@ -190,8 +190,18 @@ export interface Task {
 	info_refs: string[];
 	status: TaskStatus;
 	kind: TaskKind;
-	/** Content revision — +1 on every change to title/description/deps/subgraph_deps/kind/info_refs. */
+	/** Content revision — +1 on every change to title/description/kind/info_refs (the worker's
+	 *  contract). deps/subgraph_deps changes do NOT bump THIS — they bump struct_version.
+	 *  This is the value `expected_version` (commit/report) and the report `for_version` anchor against. */
 	version: number;
+	/** Structural revision — +1 on every deps/subgraph_deps change (including into_* wiring that
+	 *  re-commits a parent). Used for write-concurrency on the edge arrays, and exposed as a soft
+	 *  signal (struct_changed_at) so a consumer holding a stale content version knows the subgraph
+	 *  grew without being forced to re-read. Independent of `version` — wiring never bumps `version`. */
+	struct_version: number;
+	/** ISO timestamp of the last structural (deps/subgraph_deps) change — the soft signal a consumer
+	 *  sees on task_read. Never forces a re-read (content `version` is unchanged), just informs. */
+	struct_changed_at: string;
 	/** sha256 of the true description.md bytes (frontmatter included). */
 	description_sha256: string | null;
 	/** sha256 of the true report.md bytes. */
@@ -222,6 +232,7 @@ export interface TaskSummary {
 	status: TaskStatus;
 	kind: TaskKind;
 	version: number;
+	struct_version: number;
 	updated_at: string;
 	updated_by: string;
 	/** Current responsible agent, when dispatched. */
@@ -460,6 +471,8 @@ export function serializeMetadata(item: Task): string {
 	S("status", item.status);
 	S("kind", item.kind);
 	L.push(`version = ${item.version}`);
+	L.push(`struct_version = ${item.struct_version}`);
+	S("struct_changed_at", item.struct_changed_at);
 	if (item.description_sha256) L.push(`description_sha256 = '${item.description_sha256}'`);
 	if (item.report_sha256) L.push(`report_sha256 = '${item.report_sha256}'`);
 	S("created_at", item.created_at);
@@ -558,6 +571,12 @@ export function parseTask(raw: string): Task | null {
 		status: d.status as TaskStatus,
 		kind: d.kind as TaskKind,
 		version: d.version,
+		/* struct_version: missing in legacy files → 1; struct_changed_at → created_at (or ""). */
+		struct_version:
+			typeof d.struct_version === "number" && Number.isInteger(d.struct_version) && d.struct_version >= 1
+				? d.struct_version
+				: 1,
+		struct_changed_at: typeof d.struct_changed_at === "string" ? d.struct_changed_at : "",
 		report_for_version: d.version,
 		description_sha256: typeof d.description_sha256 === "string" ? d.description_sha256 : null,
 		report_sha256: typeof d.report_sha256 === "string" ? d.report_sha256 : null,
@@ -822,6 +841,13 @@ function writeMetadataAndDescription(cwd: string, item: Task): void {
 	atomicWriteFile(taskDescriptionPath(cwd, item.id), descContent);
 }
 
+/** Write only the metadata toml (structure-only change: deps/subgraph_deps grew but the
+ *  description contract did not). The description.md / report.md true copies are NOT touched,
+ *  and description_sha256 is carried over unchanged (the file bytes are identical). */
+function writeMetadataOnly(cwd: string, item: Task): void {
+	atomicWriteFile(taskTomlPath(cwd, item.id), serializeMetadata(item));
+}
+
 /** Delete consumed draft files (best effort). */
 function consumeDrafts(paths: string[]): string[] {
 	const consumed: string[] = [];
@@ -842,11 +868,14 @@ function consumeDrafts(paths: string[]): string[] {
 
 /**
  * Parse a metadata DRAFT toml. Patch semantics: only the fields present in the
- * draft change — title / deps / subgraph_deps / kind; absent fields keep their
- * current value (update) or default (create). Machine-managed fields (status,
- * version, history, timestamps, hashes, dispatched_to, execution_session) are
- * ignored if present — they can only be changed by their dedicated tools. An
- * `id` in the draft must resolve to the committed task id.
+ * draft change — title / deps / subgraph_deps / kind / info_refs; absent fields
+ * keep their current value (update) or default (create). `into_deps` /
+ * `into_subgraph_deps` are COMMIT-TIME DIRECTIVES (see commitTask): they declare
+ * which existing parents this node should be wired into (this id appended to the
+ * parent's deps / subgraph_deps), consumed by the commit and NEVER stored on this
+ * node. Machine-managed fields (status, version, struct_version, history,
+ * timestamps, hashes, dispatched_to, execution_session) are ignored if present.
+ * An `id` in the draft must resolve to the committed task id.
  */
 function parseDraftToml(cwd: string, path: string, cleanId: string): {
 	title?: string;
@@ -854,6 +883,8 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 	subgraph_deps?: string[];
 	kind?: TaskKind;
 	info_refs?: string[];
+	into_deps?: string[];
+	into_subgraph_deps?: string[];
 } {
 	let data: unknown;
 	try {
@@ -872,7 +903,7 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 			`tasks: draft id "${d.id}" does not match task "${cleanId}" — fix the draft or the task id`,
 		);
 	}
-	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind; info_refs?: string[] } = {};
+	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind; info_refs?: string[]; into_deps?: string[]; into_subgraph_deps?: string[] } = {};
 	if (typeof d.title === "string") out.title = d.title;
 	if (Array.isArray(d.deps) && d.deps.every((x) => typeof x === "string")) out.deps = d.deps;
 	if (Array.isArray(d.subgraph_deps) && d.subgraph_deps.every((x) => typeof x === "string")) {
@@ -880,6 +911,12 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 	}
 	if (Array.isArray(d.info_refs) && d.info_refs.every((x) => typeof x === "string")) {
 		out.info_refs = d.info_refs;
+	}
+	if (Array.isArray(d.into_deps) && d.into_deps.every((x) => typeof x === "string")) {
+		out.into_deps = d.into_deps;
+	}
+	if (Array.isArray(d.into_subgraph_deps) && d.into_subgraph_deps.every((x) => typeof x === "string")) {
+		out.into_subgraph_deps = d.into_subgraph_deps;
 	}
 	if (typeof d.kind === "string") out.kind = d.kind as TaskKind;
 	return out;
@@ -1067,6 +1104,184 @@ function resolveKind(
 }
 
 // ---------------------------------------------------------------------------
+// Wiring — into_deps / into_subgraph_deps (commit-time directives)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a caller-provided into_deps list (commit directive): sanitize,
+ * deduplicate, sort. Each target must EXIST (it will be re-committed — its
+ * deps array grows by this node's id), must not be an `info` node (info carries
+ * no deps), and must not equal the child's own id (a child cannot be its own
+ * parent). The child itself (and info nodes generally) cannot be a dep of
+ * anything except a task/module parent; a `info` child cannot be wired at all.
+ */
+function normalizeIntoDeps(cwd: string, childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
+	const targets = [...new Set(rawTargets.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	if (targets.length === 0) return targets;
+	if (childKind === "info") {
+		throw new Error(
+			`tasks: kind "info" cannot declare into_deps — a shared information node is pure content, it can never be a task's dependency`,
+		);
+	}
+	for (const t of targets) {
+		if (t === childId) {
+			throw new Error(`tasks: into_deps target "${t}" is the child's own id — a node cannot be its own parent (self-loop)`);
+		}
+		const target = tryReadTaskFile(cwd, t);
+		if (!target) {
+			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
+			throw new Error(
+				`tasks: into_deps target "${t}" does not exist — create it first (a parent must exist before a child wires into it) — available tasks: ${available}`,
+			);
+		}
+		if (target.kind === "info") {
+			throw new Error(
+				`tasks: into_deps target "${t}" is a shared information node (kind = "info") — info has no deps and cannot be a parent; wire into a task or module`,
+			);
+		}
+	}
+	return targets;
+}
+
+/**
+ * Normalize a caller-provided into_subgraph_deps list (commit directive): the
+ * child becomes a GATE of each target module's subgraph. Targets must exist and
+ * be kind = "module" (only a module has a subgraph to gate); the child itself
+ * cannot be `info`. A gate must sit OUTSIDE the module's own subgraph, so the
+ * child may not be the module or within its transitive deps.
+ */
+function normalizeIntoSubgraphDeps(cwd: string, childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
+	const targets = [...new Set(rawTargets.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	if (targets.length === 0) return targets;
+	if (childKind === "info") {
+		throw new Error(
+			`tasks: kind "info" cannot declare into_subgraph_deps — a shared information node gates nothing`,
+		);
+	}
+	for (const t of targets) {
+		if (t === childId) {
+			throw new Error(`tasks: into_subgraph_deps target "${t}" is the child's own id — a module cannot gate on itself`);
+		}
+		const target = tryReadTaskFile(cwd, t);
+		if (!target) {
+			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
+			throw new Error(
+				`tasks: into_subgraph_deps target "${t}" does not exist — create the module first, then gate it on this node — available tasks: ${available}`,
+			);
+		}
+		if (target.kind !== "module") {
+			throw new Error(
+				`tasks: into_subgraph_deps target "${t}" is kind "${target.kind}" — only a module has a subgraph to gate; wire into kind "module"`,
+			);
+		}
+	}
+	return targets;
+}
+
+/**
+ * Wire the freshly-committed child into each declared parent: for every into_deps
+ * target, append childId to the parent's deps; for every into_subgraph_deps
+ * target, append childId to the module's subgraph_deps. Parent writes are
+ * STRUCTURE-ONLY: the parent's deps/subgraph_deps array grows, `struct_version`
+ * +1 and `struct_changed_at` is refreshed, but the parent's content `version`,
+ * description, report and everything a worker anchors on is untouched — so a
+ * parent being actively driven is never disturbed by a child joining its subgraph.
+ *
+ * CONCURRENCY (no global lock — per-owner compare-and-swap): each parent re-read
+ * is done FRESH at write time (not from the snapshot taken at the child commit),
+ * so if another writer appended to the same parent meanwhile, we re-read again
+ * and re-append — the union is idempotent, so no child is ever lost silently.
+ * A parent re-commit only succeeds on a consistent read within the same call.
+ *
+ * Returns the ids of the parents actually modified (deps/subgraph_deps changed).
+ */
+function wireIntoParents(
+	cwd: string,
+	childId: string,
+	childKind: TaskKind,
+	intoDeps: string[],
+	intoSubgraphDeps: string[],
+	updatedBy: string,
+	changeSummary: string,
+): string[] {
+	const wired: string[] = [];
+	for (const t of intoDeps) {
+		const fresh = tryReadTaskFile(cwd, t);
+		if (!fresh) continue; // vanished concurrently — skip (validation passed earlier)
+		if (fresh.status === "done" || fresh.status === "cancelled") {
+			throw new Error(
+				`tasks: into_deps target "${t}" is ${fresh.status} (terminal) — a finished parent cannot gain a new child; reopen/undo it first`,
+			);
+		}
+		if (fresh.deps.includes(childId)) continue; // already wired — idempotent
+		const newDeps = [...fresh.deps, childId].sort();
+		assertSubgraphDepOutsideSubgraph(cwd, t, newDeps, fresh.subgraph_deps);
+		assertNoCycle(cwd, t, newDeps, fresh.subgraph_deps);
+		writeWiredParent(cwd, fresh, { deps: newDeps }, updatedBy, changeSummary);
+		wired.push(t);
+	}
+	for (const t of intoSubgraphDeps) {
+		const fresh = tryReadTaskFile(cwd, t);
+		if (!fresh) continue;
+		if (fresh.status === "done" || fresh.status === "cancelled") {
+			throw new Error(
+				`tasks: into_subgraph_deps target "${t}" is ${fresh.status} (terminal) — a finished module cannot gain a new gate; reopen/undo it first`,
+			);
+		}
+		if (fresh.subgraph_deps.includes(childId)) continue;
+		const newGates = [...fresh.subgraph_deps, childId].sort();
+		assertSubgraphDepOutsideSubgraph(cwd, t, fresh.deps, newGates);
+		assertNoCycle(cwd, t, fresh.deps, newGates);
+		writeWiredParent(cwd, fresh, { subgraph_deps: newGates }, updatedBy, changeSummary);
+		wired.push(t);
+	}
+	return wired;
+}
+
+/**
+ * Re-write ONE parent's metadata with a structure change (deps or subgraph_deps
+ * array grew). The parent's content `version` is unchanged; only `struct_version`
+ * +1 and `struct_changed_at`/`updated_at` refresh. History gains a summary entry
+ * (changed_items describes deps/subgraph_deps) so the change is traceable, but
+ * no snapshot is written (the description contract did not change).
+ */
+function writeWiredParent(
+	cwd: string,
+	fresh: Task,
+	patch: { deps?: string[]; subgraph_deps?: string[] },
+	updatedBy: string,
+	changeSummary: string,
+): void {
+	const now = new Date().toISOString();
+	const changedItems: string[] = [];
+	if (patch.deps) changedItems.push("deps");
+	if (patch.subgraph_deps) changedItems.push("subgraph_deps");
+	const newItem: Task = {
+		...fresh,
+		deps: patch.deps ?? fresh.deps,
+		subgraph_deps: patch.subgraph_deps ?? fresh.subgraph_deps,
+		struct_version: fresh.struct_version + 1,
+		struct_changed_at: now,
+		updated_at: now,
+		updated_by: updatedBy,
+		history: [
+			{
+				changed_items: changedItems,
+				version: fresh.version,
+				event: "wiring",
+				updated_at: now,
+				updated_by: updatedBy,
+				change_summary: changeSummary.trim() || `wired: ${changedItems.join(", ")}`,
+			},
+			...fresh.history,
+		].slice(0, HISTORY_CAP),
+	};
+	delete (newItem as Partial<Task>).integrity_warnings;
+	delete (newItem as Partial<Task>).report_for_version;
+	writeMetadataOnly(cwd, newItem);
+}
+
+// ---------------------------------------------------------------------------
 // Commit (create / content update) — task_commit
 // ---------------------------------------------------------------------------
 
@@ -1162,6 +1377,11 @@ export function commitTask(
 		assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
 		assertNoCycle(cwd, clean, deps, moduleDeps);
 		const kind = resolveKind(draft.kind, deps, moduleDeps, infoRefs);
+		// Wiring directives: validated before the child exists (parents must exist & be legal), but
+		// APPLIED after the child is committed — the child must be a real dep before any parent can
+		// reference it.
+		const intoDeps = normalizeIntoDeps(cwd, clean, kind, draft.into_deps ?? []);
+		const intoSubgraphDeps = normalizeIntoSubgraphDeps(cwd, clean, kind, draft.into_subgraph_deps ?? []);
 		const description = existsSync(draftDesc)
 			? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
 			: "";
@@ -1176,6 +1396,8 @@ export function commitTask(
 			status: "pending",
 			kind,
 			version: 1,
+			struct_version: 1,
+			struct_changed_at: now,
 			description_sha256: null,
 			report_sha256: null,
 			created_at: now,
@@ -1199,6 +1421,8 @@ export function commitTask(
 			serializeMetadata({ ...item, description_sha256: sha256(renderBodyFile({ version: 1 }, description)), report_sha256: sha256(reportContent) }),
 		);
 		const consumed = consumeDrafts([draftToml, ...(existsSync(draftDesc) ? [draftDesc] : [])]);
+		// Wire the freshly-created child into its declared parents (structure-only, no content bump).
+		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, opts.updated_by ?? "unknown", "wired new child");
 		return {
 			item: readTask(cwd, clean) ?? item,
 			created: true,
@@ -1217,6 +1441,8 @@ export function commitTask(
 	let moduleDeps = existing.subgraph_deps;
 	let infoRefs = existing.info_refs;
 	let kind = existing.kind;
+	let intoDeps: string[] = [];
+	let intoSubgraphDeps: string[] = [];
 	if (metaScope && draftPresent) {
 		const patch = parseDraftToml(cwd, draftToml, clean);
 		if (patch.title !== undefined) {
@@ -1234,20 +1460,28 @@ export function commitTask(
 			assertNoCycle(cwd, clean, deps, moduleDeps);
 		}
 		kind = resolveKind(kind, deps, moduleDeps, infoRefs);
+		// Wiring directives on an EXISTING node: parents must exist & be legal; applied after commit.
+		intoDeps = normalizeIntoDeps(cwd, clean, kind, patch.into_deps ?? []);
+		intoSubgraphDeps = normalizeIntoSubgraphDeps(cwd, clean, kind, patch.into_subgraph_deps ?? []);
 	}
 
 	const description = descScope && existsSync(draftDesc)
 		? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
 		: existing.description;
 
-	const changed: string[] = [];
-	if (title !== existing.title) changed.push("title");
-	if (deps.join("|") !== existing.deps.join("|")) changed.push("deps");
-	if (moduleDeps.join("|") !== existing.subgraph_deps.join("|")) changed.push("subgraph_deps");
-	if (infoRefs.join("|") !== existing.info_refs.join("|")) changed.push("info_refs");
-	if (kind !== existing.kind) changed.push("kind");
-	if (description !== existing.description) changed.push("description");
-	if (changed.length === 0) {
+	const contentChanged: string[] = [];
+	const structChanged: string[] = [];
+	if (title !== existing.title) contentChanged.push("title");
+	if (infoRefs.join("|") !== existing.info_refs.join("|")) contentChanged.push("info_refs");
+	if (kind !== existing.kind) contentChanged.push("kind");
+	if (description !== existing.description) contentChanged.push("description");
+	if (deps.join("|") !== existing.deps.join("|")) structChanged.push("deps");
+	if (moduleDeps.join("|") !== existing.subgraph_deps.join("|")) structChanged.push("subgraph_deps");
+	// A pure into_* commit (no content/structure change) is a VALID commit: it wires an existing
+	// node into a parent. The wiring itself is applied after the child is committed.
+	const hasWiring = intoDeps.length > 0 || intoSubgraphDeps.length > 0;
+	const changed = [...contentChanged, ...structChanged];
+	if (changed.length === 0 && !hasWiring) {
 		throw new Error(
 			`tasks: task_commit "${clean}": no changes to commit — draft content is identical to v${existing.version}; nothing to do`,
 		);
@@ -1255,7 +1489,13 @@ export function commitTask(
 
 	const now = new Date().toISOString();
 	const updatedBy = opts.updated_by ?? "unknown";
-	const newVersion = existing.version + 1;
+	// Content changes bump `version` (the worker's contract anchor); structural changes (deps /
+	// subgraph_deps) bump `struct_version` only — wiring never disturbs a consumer holding a
+	// stale content version. A mixed commit bumps both. Snapshots (history/<id>.v<N>/) are only
+	// written on a content change, since structure-only changes leave the description contract and
+	// the report anchor untouched.
+	const newVersion = contentChanged.length > 0 ? existing.version + 1 : existing.version;
+	const newStructVersion = structChanged.length > 0 ? existing.struct_version + 1 : existing.struct_version;
 	const newItem: Task = {
 		...existing,
 		title,
@@ -1265,6 +1505,8 @@ export function commitTask(
 		kind,
 		description,
 		version: newVersion,
+		struct_version: newStructVersion,
+		struct_changed_at: structChanged.length > 0 ? now : existing.struct_changed_at,
 		updated_at: now,
 		updated_by: updatedBy,
 		history: [
@@ -1282,18 +1524,28 @@ export function commitTask(
 	delete (newItem as Partial<Task>).integrity_warnings;
 	delete (newItem as Partial<Task>).report_for_version;
 
-	// old version durable before the new one becomes visible
-	writeTaskSnapshot(cwd, existing);
-	writeMetadataAndDescription(cwd, newItem);
+	// old version durable before the new one becomes visible — only on a content change (a
+	// structure-only change leaves the version and the description.md the same).
+	if (contentChanged.length > 0) {
+		writeTaskSnapshot(cwd, existing);
+		writeMetadataAndDescription(cwd, newItem);
+	} else {
+		writeMetadataOnly(cwd, newItem);
+	}
 
 	const consumed = consumeDrafts([
 		...(metaScope && draftPresent ? [draftToml] : []),
 		...(descScope && existsSync(draftDesc) ? [draftDesc] : []),
 	]);
+	// Wire this node into its declared parents (structure-only on the parents; this node's own
+	// commit, content or not, is already done). Only meaningful when into directives were present.
+	if (hasWiring) {
+		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
+	}
 	return {
 		item: readTask(cwd, clean) ?? newItem,
 		created: false,
-		changed_items: changed,
+		changed_items: [...changed, ...(hasWiring ? ["wiring"] : [])],
 		consumed: consumed.map((p) => relative(cwd, p)),
 	};
 }
@@ -1604,6 +1856,7 @@ export function listTasks(cwd: string): TaskSummary[] {
 				status: item.status,
 				kind: item.kind,
 				version: item.version,
+				struct_version: item.struct_version,
 				updated_at: item.updated_at,
 				updated_by: item.updated_by,
 				dispatched_to: item.dispatched_to,
