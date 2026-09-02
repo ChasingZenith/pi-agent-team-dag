@@ -12,12 +12,9 @@
 |--------|------|------|
 | 图作者：子图生成 / 嵌入 / 子图门 / 重构——每层 planner 只写本层骨架 | Planner | 草稿文件 + `task_commit`（见 docs/6 §5） |
 | 执行：代码 / 命令 / 文件 | Worker | read/write/edit/bash |
-| 审查：对照验收标准验证交付物 | **review 节点**，由 experts-reviewer 执行 | task_read + read/bash |
 | 驱动：就绪集辨识 / 派发 / 状态推进 / 仲裁 | Coordinator | task-comms-ops 高级工具 |
 
-**分层规划（layered planning）**：每层 Coordinator 委托的 planner 只编写该层节点的**直接子图**——子模块、子单元、审查节点、模块间门（subgraph_deps）。子模块的内部子图**不在上层预规划**：该模块启动时由它的 Coordinator 委托自己的 planner 编写，一层一次委托，深度不限。未展开的模块 = 正常待定（pending, not missing），不是规划缺失。
-
-**审查是图上的一等公民**：Planner 分解时给每个可交付实现节点规划一个 `review` 节点（deps 指向实现节点），Coordinator 在就绪集中发现它后派 experts-reviewer 执行，基于 review 结论推进（`task_complete` 或返工）——审查不是 Coordinator 的隐式动作，而是图上一个显式的步骤。
+**分层规划（layered planning）**：每层 Coordinator 委托的 planner 只编写该层节点的**直接子图**——子模块、子单元、模块间门（subgraph_deps）。子模块的内部子图**不在上层预规划**：该模块启动时由它的 Coordinator 委托自己的 planner 编写，一层一次委托，深度不限。未展开的模块 = 正常待定（pending, not missing），不是规划缺失。
 
 **完整链路**：`用户需求 → Requirements Clarifier（需求明确）→ Coordinator（顶层，拥有目标节点）→ 递归子 Coordinator（拥有父级交给的节点）`——深度不限，各层协议一致。
 
@@ -44,12 +41,11 @@ Coordinator（顶层）拥有目标节点（经 TP spawn：role=coordinator，ta
     │ ① 就绪集辨识（task_ready_set；可 for=<id> 限定某节点及其依赖闭包；就绪集按 kind 分桶）
     │    按 kind 路由每个就绪节点：
     │      · unit（可直接执行）→ comms_send 找 agent（TP 定角色）→ task_dispatch
-    │      · module 且是 review 节点（验证实现子节点——按内容识别）→ comms_send 找 agent 做验证 → task_dispatch
     │      · module 且子图已完成（聚合父节点，deps 全满足）→ 不派发：task_complete 标 done
     │      · 其他 module（无子图，未细化）→ 决定驱动者：
     │          · 简单（单次派发可完成）→ 直接找 agent 执行
     │          · 否则 → 找 agent 接管节点并驱动其子图（TP 定角色；子图可为空——分层规划：
-    │              该模块启动时由它委托的 planner 只写这一层骨架——子模块 / 子单元 / 审查节点 / 门）
+    │              该模块启动时由它委托的 planner 只写这一层骨架——子模块 / 子单元 / 门）
     │    门（subgraph_deps，见 docs/6 §2.7）：未就绪项缺失清单含门 → 等门，不强推；
     │      门节点完成 → task_complete 返回新解锁清单，整个门控前沿一次就绪 → 照常派发
     │    就绪集 = 并行度：N 个就绪项 → N 个 agent（一任务一 agent）
@@ -61,7 +57,7 @@ Coordinator（顶层）拥有目标节点（经 TP spawn：role=coordinator，ta
     │    一个 agent 同时只持有一个 dispatched/active 任务；其任务未 done/cancelled 前不再派第二个——需要更多并行度就向 TP 请求新 agent（同角色多实例 web-searcher-2…）
     │    委托消息 header 由工具保证，message 参数只带补充信息（§2.1）
     ▼
-Worker / Reviewer 执行
+Worker 执行
     │
     ├─ 一切正常 → 完成情况写入节点（task_submit_report，带委托消息 msg_id）→ 自动回复委托消息（细节在节点上）
     │
@@ -72,7 +68,6 @@ Worker / Reviewer 执行
     │    粒度错判（上报显示任务可拆、超出单次派发）→ 草稿改 kind="module" + task_commit 翻转 → 按 module 路由（①）⬅️
     │    假设不成立（现实与图前提冲突）→ Adjust：草稿 + task_commit 小调整 / 大重构走 module 路径（下放子 coordinator，由其委托 planner）/ task_block ⬅️
     │    信息不足 → comms_send 找 agent 补充调查（TP 定角色——scout / consultor）
-    │    交付验证 → review 节点（planner 规划、reviewer 执行）→ 通过则 task_complete，不过则返工
     ▼
     │ ④ Adjust（修正图）
     │    草稿 + task_commit（改 description / deps / title，change_summary 记录偏差）
@@ -96,7 +91,7 @@ Worker / Reviewer 执行
 
 ### 2.1 委托消息格式
 
-Coordinator 发给 worker / reviewer / planner 的委托消息（`task_dispatch` 的 `message` 参数）是**指针而非复述**：Objective / Output / Context / Assumptions 都写在任务的 description 里，对方 `task_read` 自行读取即可，不要重复 plan 内容。**dispatch header 由工具保证**：`task_dispatch` 始终在消息开头放置常量协议头——命令式 `Complete task <id>` + task_read 指引 + `task_start` 开工声明 + 完成规则（每条 dispatch 是一条任务，收到的都要完成）——并在**消息末尾**放置回复 guide（回应方式：`task_checkout(id, scope="report")` 生成草稿 → `write/edit` 正文 → `task_submit_report` 写节点、工具自动回复这条委托消息）——所以接收方永远知道做什么、读哪个任务、如何回应，且能同时持有多个委派。受阻上报（reality-beats-plan skill）写在各执行角色的角色模板里，消息中**无须复述**。**不要重申对方角色**——角色在 TP 选人时已定，名字即角色（如 `worker-3`），且 spawn 时角色模板已注入其身份。消息只放 plan 里没有的补充信息：
+Coordinator 发给 worker / planner 的委托消息（`task_dispatch` 的 `message` 参数）是**指针而非复述**：Objective / Output / Context / Assumptions 都写在任务的 description 里，对方 `task_read` 自行读取即可，不要重复 plan 内容。**dispatch header 由工具保证**：`task_dispatch` 始终在消息开头放置常量协议头——命令式 `Complete task <id>` + task_read 指引 + `task_start` 开工声明 + 完成规则（每条 dispatch 是一条任务，收到的都要完成）——并在**消息末尾**放置回复 guide（回应方式：`task_checkout(id, scope="report")` 生成草稿 → `write/edit` 正文 → `task_submit_report` 写节点、工具自动回复这条委托消息）——所以接收方永远知道做什么、读哪个任务、如何回应，且能同时持有多个委派。受阻上报（reality-beats-plan skill）写在各执行角色的角色模板里，消息中**无须复述**。**不要重申对方角色**——角色在 TP 选人时已定，名字即角色（如 `worker-3`），且 spawn 时角色模板已注入其身份。消息只放 plan 里没有的补充信息：
 
 - **协作对象（可选）** — 遇到相关问题时可以找的 peer
 - **其他补充（可选）** — coordinator 知道但 plan 没写的上下文、需要特别点名的假设编号
@@ -154,21 +149,18 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 ├── deps: [login-module, register-module]
 │
 ├── login-module                   ← 子图（子 Coordinator 拥有——父 Coordinator 交给它）
-│   ├── deps: [login-form, login-api, login-review]
+│   ├── deps: [login-form, login-api]
 │   ├── login-form                 ← 无依赖 → 就绪（可并行）
 │   ├── login-api                  ← deps: [jwt] → 等 jwt 完成后才就绪（串行）
-│   ├── jwt                        ← 无依赖 → 就绪（可并行）
-│   └── login-review               ← deps: [login-form, login-api, jwt] → 三者完成后就绪，派 experts-reviewer
+│   └── jwt                        ← 无依赖 → 就绪（可并行）
 │
 └── register-module                ← 子图（另一个子 Coordinator；与 login-module 无依赖 → 并行）
-    ├── deps: [register-form, register-api, register-review]
+    ├── deps: [register-form, register-api]
     ├── register-form
-    ├── register-api
-    └── register-review
+    └── register-api
 ```
 
 - **分工由 deps 推导**：`login-module` 与 `register-module` 之间无依赖边 → 并行调度；`login-form` 与 `jwt` 无依赖 → 并行；`login-api` 依赖 `jwt` → 串行在后。
-- **审查是节点**：`login-review` 依赖全部实现子节点——全部完成后就绪，Coordinator 派 experts-reviewer 执行；审查通过（review 节点 done）后 `login-module` 的 deps 才全满足。
 - **分解 = 目标任务 + 分解产物作 deps**：`auth-system` 的 done 由管理节点在 deps 全部完成后手动标记（`task_complete` 校验 deps 满足）。
 - **递归**：子 Coordinator 拥有父级交给它的子图，可在其下继续分解（委托 planner）——深度不限，任意深度下同一套协议。
 - **模块间排序用门**：若 `register-module` 需等 `login-module` 整体完成，在 `register-module` 声明 `subgraph_deps: [login-module]` 即可——整棵子树等待，不用逐叶写 deps（前端渲染为模块与门之间的紫色箭头）。门是排序边，不是数据依赖（语义见 docs/6 §2.7）。
@@ -190,7 +182,7 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 - 委托方式与 specialist 相同：`comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id> — the node needs a sub-Coordinator to own it and drive its subgraph")` → TP 定角色（coordinator）→ `task_dispatch` 交付节点
 - 约束：子 Coordinator 服从父 Coordinator 的图（尊重 deps 与契约）、重要变更上报父 Coordinator、局部改动不得静默改变全局依赖
 - **协议各层一致**：遇阻上报（reality-beats-plan skill)、调整（草稿 + task_commit / task_block）、同步（comms 无提醒公告）在每一层是同一套
-- **分层规划**：一层一次委托——每个 Coordinator 只委托一个 planner 编写本层骨架（子模块 / 子单元 / 审查节点 / 门）；子模块内部子图在其启动时由下一层规划，深度不限；未展开 = 正常待定，不是规划缺失
+- **分层规划**：一层一次委托——每个 Coordinator 只委托一个 planner 编写本层骨架（子模块 / 子单元 / 门）；子模块内部子图在其启动时由下一层规划，深度不限；未展开 = 正常待定，不是规划缺失
 - 反模式：不要为一次派发就能完成的工作建层；**优先最浅结构**，只有子目标真正需要独立循环时才加深
 
 ---
@@ -245,7 +237,7 @@ extensions/lib/role-context/roles/
 └── specialist/
     ├── requirements-clarifier.md       ← 入口角色（需求明确 → 建 module → 派发给 Coordinator）
     ├── planner.md                      ← 图的作者（草稿 + task_commit：子图生成 + 嵌入 + 子图门；一层一次委托）
-    └── worker / scout / web-searcher / experts-reviewer / consultor
+    └── worker / scout / web-searcher / consultor
 
 .pi/skills/reality-beats-plan.md        ← 遇阻上报统一协议（含新披露边缘三分类）
 ```
