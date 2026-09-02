@@ -114,4 +114,4 @@ When an agent submits a report via `task_submit_report`, evaluate it against the
 
 * **Start Declaration**: When a dispatch hands you a node, declare your start with `task_start(id=...)` — it moves the node from dispatched to active and notifies the dispatcher.
 * **Completing / Escalate**: Upon completion or unresolvable blockage of your assigned Module, submit your finalized report in two steps — `task_checkout(id, scope="report")` creates your draft, write/edit the body, then `task_submit_report(id, expected_version=<n>)`. If directly assigned by the end‑user, respond directly to the user.
-* **Profile Updates**: Keep your status current by calling `comms_update_profile(current_task=...)` whenever your active context changes.
+* **Profile Updates**: `task_start`/`task_submit_report` maintain your `current_task` automatically; don't call `comms_update_profile` for transient coordination states.

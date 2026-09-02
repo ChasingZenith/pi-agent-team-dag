@@ -531,6 +531,10 @@ export default function (pi: ExtensionAPI) {
 			if (p.deliver_as) notes.push(`deliver as ${p.deliver_as}`);
 			const lines = results.map((r) => `comms_send to ${r.target} (${r.target_status})\nmsg_id ${r.msg_id}`);
 			const errLines = errors.map((e) => `comms_send to ${e.target}: FAILED — ${e.error}`);
+			// For a one-way request with a reminder armed, make the waiting state
+			// explicit so the caller knows to end its turn and await the injected
+			// reply / reminder turn rather than polling comms_outbox.
+			if (!p.reply_to_msg_id && p.remind_s) notes.push(`waiting — end your turn; the reply is injected (remind every ${p.remind_s} s)`);
 			const text = [...lines, ...errLines].join("\n") + (notes.length ? "\n" + notes.join(" · ") : "");
 
 			return {
@@ -571,6 +575,11 @@ export default function (pi: ExtensionAPI) {
 			"if the total exceeds the limit, the header says so and shows only the latest ones).\n" +
 			"With msg_id: full detail — sent content, state (waiting / ended: replied / expired), the live remind " +
 			"marker if a reminder is active, and the reply's msg_id when replied.\n\n" +
+			"Replies are delivered to you automatically as an inbound turn — you do NOT need to poll this outbox " +
+			"to check whether a reply has arrived; polling right after a send only returns \"no reply yet\" and " +
+			"yields no new information before the target responds. Use this tool to look up or recover past sends " +
+			"and their reply status after a context compaction or restart, or to determine why a pending request " +
+			"never got a reply — not as a polling mechanism for new replies.\n\n" +
 			"Reminder state is per-process memory; after a restart the status is derived from the " +
 			"persisted history instead.",
 		parameters: Type.Object({
@@ -805,7 +814,12 @@ pi.registerTool({
 		description:
 			"Declare what you are currently working on to the comms hub. Peers — especially the Teammate Provider " +
 			"when matching you to incoming work — use it to decide whether you are available for reuse. " +
-			"Only the fields you pass are updated; visible to peers immediately.",
+			"Only the fields you pass are updated; visible to peers immediately.\n\n" +
+			"This is for declaring availability-for-reuse — only meaningful for free/reusable agents the Teammate " +
+			"Provider might match to incoming work. If you are a dispatched worker or coordinator, the task tools " +
+			"already maintain current_task for you (task_start sets it, task_submit_report clears it). Do not call " +
+			"this to log transient micro-states (e.g. \"awaiting X\", \"planning Y\"); update it only when your " +
+			"durable work item changes and it would change a peer's availability decision.",
 		parameters: Type.Object({
 			current_task: Type.Optional(Type.String({
 				description: "What you are currently working on. Shown in comms_list_peer.",

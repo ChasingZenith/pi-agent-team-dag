@@ -298,7 +298,12 @@ export default function (pi: ExtensionAPI) {
 			"verifies it is dispatched AND dispatched_to is your agent name); the dispatcher is notified " +
 			"automatically that you have started, via an injected inbound turn that wakes it. The tool also " +
 			"records YOUR execution session (session id + JSONL transcript) on the item, so the manager can " +
-			"open it later and review how the work was done.",
+			"open it later and review how the work was done.\n\n" +
+			"This tool automatically sets your comms profile current_task to the task title, so you do NOT need to " +
+			"also call comms_update_profile to announce that you are working on this item — doing so would just " +
+			"overwrite the same value with redundant or more transient wording. Reserve comms_update_profile for " +
+			"availability declarations that matter to the Teammate Provider (free reusable agents); a dispatched " +
+			"worker/coordinator is not reusable and should not call it to log transient states.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the item you were dispatched (must be status dispatched and dispatched to you).",
