@@ -77,6 +77,32 @@ function expandedContent(result: { content?: Array<{ type: string; text?: string
 	return t?.type === "text" && t.text ? t.text : fallback;
 }
 
+/** TOML-inline array of simple ids (for metadata draft templates). */
+function tomlInlineArray(ids: string[]): string {
+	return ids.length ? `[ ${ids.map((x) => `"${x}"`).join(", ")} ]` : "[]";
+}
+
+/**
+ * The metadata draft template for an EXISTING task (patch semantics): every
+ * changeable field is written as a COMMENT line carrying the CURRENT value,
+ * so the LLM uncomments (and edits) only the field(s) it wants to change —
+ * absent fields keep their current value when committed. `id` stays active so
+ * commit can validate the match; `title` notes it is required if kept.
+ */
+function metadataDraftForUpdate(item: Task): string {
+	const kindHint = "unit | module | info";
+	return [
+		// `id` is not commented — commit validates it matches the target task.
+		`id = "${item.id}"`,
+		`# title = "${item.title.replace(/"/g, "\\\"")}"    # current — uncomment to change`,
+		`# deps = ${tomlInlineArray(item.deps)}    # current — dependency edges (deps complete before this)`,
+		`# subgraph_deps = ${tomlInlineArray(item.subgraph_deps)}    # current — subgraph gates (modules only)`,
+		`# info_refs = ${tomlInlineArray(item.info_refs)}    # current — ids of shared info nodes (kind = \"info\") to inject`,
+		`# kind = "${item.kind}"    # current — choose ${kindHint}`,
+		``,
+	].join("\n");
+}
+
 // =============================================================================
 // Extension
 // =============================================================================
@@ -151,7 +177,8 @@ export default function (pi: ExtensionAPI) {
 			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then commit here — task_commit is the only way content becomes a version. " +
 			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind / info_refs; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
 			"Clear gates from a module by putting subgraph_deps = [] in the draft. " +
-			"info_refs = [<ids>] references shared information nodes (kind = \"info\") whose description is injected into this task at read time — write common requirements ONCE, reference them from many tasks (e.g. the same audit applied to 100 sites).",
+			"info_refs = [<ids>] references shared information nodes (kind = \"info\") whose description is injected into this task at read time — write common requirements ONCE, reference them from many tasks (e.g. the same audit applied to 100 sites). " +
+			"This is the tool for GRAPH STRUCTURE — deps / subgraph_deps, and content metadata — title / kind/ description. This tool does NOT change status (the lifecycle): to set pending / dispatched / active / done / blocked / cancelled use task_set_status, which is a lifecycle event and does NOT bump the version.",
 		parameters: Type.Object({
 			id: Type.String({
 				description:
@@ -259,8 +286,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Check out a working copy of a task's content for editing — Step 1 of any content change. " +
 			"An existing draft is kept untouched (check out a fresh task id, or clear it manually). " +
-			"For METADATA changes you do not need this tool — write a small patch (only the fields to change) and " +
-			"commit it with task_commit(id, scope=\"metadata\"). " +
+			"For METADATA changes to an existing task, use scope=\"metadata\" — it scaffolds a metadata draft carrying " +
+			"the CURRENT title / deps / subgraph_deps / info_refs / kind as COMMENTED templates; uncomment-and-edit " +
+			"only the field(s) you want to change (patch semantics), then task_commit(id, expected_version, scope=\"metadata\"). " +
 			"Creating a NEW task: task_checkout(id=<new-id>, version=0) scaffolds the metadata draft (with `id`) and the empty description draft — fill both with write/edit, then task_commit(id=<new-id>, expected_version=1). " +
 			"Checking out a HISTORICAL version of an existing task's description: pass version=<n> (n < current).",
 		parameters: Type.Object({
@@ -274,13 +302,14 @@ export default function (pi: ExtensionAPI) {
 						'then edit with write/edit (Step 2) and commit it with task_commit(id=..., expected_version=..., scope="description") — commit re-adds the frontmatter. ' +
 						'"report": creates YOUR report draft as a FRESH EMPTY scaffold (no frontmatter) — the old report is never copied or edited; ' +
 						'then write/edit the body (Step 2) and submit it with ' +
-						'task_submit_report(id=..., expected_version=...) — it commits the report (re-adding the for_version anchor), replies to the dispatcher and stops the reminder.',
+						'task_submit_report(id=..., expected_version=...) — it commits the report (re-adding the for_version anchor), replies to the dispatcher and stops the reminder. ' +
+						'"metadata": scaffolds the metadata draft for an EXISTING task as a PATCH — the current title / deps / subgraph_deps / info_refs / kind are written as COMMENTED templates; uncomment and edit only the field(s) you want to change, then task_commit(id=..., expected_version=..., scope="metadata") (absent fields keep their current value). Not valid with version (no historical metadata).',
 				}),
 			),
 			version: Type.Optional(
 				Type.Number({
 					description:
-						'Which version to check out. Omit = the CURRENT version of an existing task. A positive integer n < current = that HISTORICAL snapshot\'s description. version=0 = the id does not exist yet — scaffold the creation drafts (metadata draft with `id` + empty description draft) to fill and commit with task_commit(id=..., expected_version=1).',
+						'Which version to check out. Omit = the CURRENT version of an existing task. A positive integer n < current = that HISTORICAL snapshot\'s description. version=0 = the id does not exist yet — scaffold the creation drafts (metadata draft with `id` + empty description draft) to fill and commit with task_commit(id=..., expected_version=1). Not valid with scope="metadata" (no historical metadata).',
 				}),
 			),
 					}),
@@ -289,12 +318,16 @@ export default function (pi: ExtensionAPI) {
 			if (!p.id || !p.id.trim()) {
 				throw new Error("tasks: task_checkout requires an id");
 			}
-			const isDesc = p.scope !== "report";
+			const isMeta = p.scope === "metadata";
+			const isReport = p.scope === "report";
+			const isDesc = !isMeta && !isReport;
 			const dstFn = isDesc ? store.taskDraftDescriptionPath : store.taskDraftReportPath;
 			const commitHint = (id: string, v: number) =>
-				isDesc
-					? `task_commit(id="${id}", expected_version=${v}, scope="description")`
-					: `task_submit_report(id="${id}", expected_version=${v})`;
+				isMeta
+					? `task_commit(id="${id}", expected_version=${v}, scope="metadata")`
+					: isDesc
+						? `task_commit(id="${id}", expected_version=${v}, scope="description")`
+						: `task_submit_report(id="${id}", expected_version=${v})`;
 			const me = commsName();
 			const target = store.readTask(cwd, p.id);
 			const requested = p.version;
@@ -302,9 +335,15 @@ export default function (pi: ExtensionAPI) {
 			let content = "";
 
 			if (target) {
-				// EXISTING task — description copies the live or a historical body; report is always a fresh empty scaffold.
+				// EXISTING task — description copies the live or a historical body; report is always a fresh empty scaffold; metadata is a current-value comment template.
 				version = requested ?? target.version;
-				if (!Number.isInteger(version) || version < 1) {
+				if (isMeta) {
+					if (requested !== undefined) {
+						throw new Error(
+							`tasks: scope="metadata" checks out the CURRENT metadata — pass no version (historical metadata is not stored)`,
+						);
+					}
+				} else if (!Number.isInteger(version) || version < 1) {
 					throw new Error(
 						`tasks: invalid version "${version}" — use a positive integer for an existing task (version=0 is only for creating a NEW task)`,
 					);
@@ -330,7 +369,14 @@ export default function (pi: ExtensionAPI) {
 			const dst = dstFn(cwd, me, p.id);
 			// Drafts are BODY-ONLY (frontmatter is added by commit, never by checkout).
 			const writes: { path: string; content: string; label: string }[] = [];
-			if (target) {
+			if (target && isMeta) {
+				// Metadata patch scaffold for an existing task: current values as commented templates.
+				writes.push({
+					path: store.taskDraftTomlPath(cwd, me, p.id),
+					content: metadataDraftForUpdate(target),
+					label: "metadata",
+				});
+			} else if (target) {
 				writes.push({ path: dst, content, label: isDesc ? "description" : "report" });
 			} else {
 				// Creation: scaffold the metadata draft (id) + empty description draft.
@@ -365,9 +411,11 @@ export default function (pi: ExtensionAPI) {
 			const lines = [
 				`task_checkout: draft ready at ${paths}` +
 					(target
-						? isDesc
-							? ` (description body from v${version})`
-							: " (empty report scaffold — commit adds the for_version anchor)"
+						? isMeta
+							? " (metadata scaffold — current title / deps / subgraph_deps / info_refs / kind are COMMENTED templates; uncomment and edit only the field(s) to change, then task_commit(id=..., expected_version=..., scope=\"metadata\"))"
+							: isDesc
+								? ` (description body from v${version})`
+								: " (empty report scaffold — commit adds the for_version anchor)"
 						: " (creation scaffold — fill `title` in the metadata draft and the description body, then task_commit(id=..., expected_version=1))"),
 			];
 			if (target) lines[0] += `\n  edit it with write/edit, then ${commitHint(p.id, version)}`;
@@ -377,7 +425,7 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
 					id: p.id,
-					scope: isDesc ? "description" : "report",
+					scope: isMeta ? "metadata" : isDesc ? "description" : "report",
 					creating: !target,
 					draft: paths,
 					version,
@@ -387,7 +435,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args: Record<string, unknown>, theme: any, context: any) {
 			const a = args as Record<string, unknown>;
-			const scope = (a.scope as string) === "report" ? " report" : "";
+			const scope = (a.scope as string) === "report" ? " report" : (a.scope as string) === "metadata" ? " metadata" : "";
 			const text =
 				theme.fg("toolTitle", theme.bold("task_checkout ")) +
 				theme.fg("accent", `${(a.id as string) || "?"}${scope}`);

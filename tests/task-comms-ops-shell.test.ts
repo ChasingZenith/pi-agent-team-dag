@@ -36,10 +36,13 @@ afterEach(() => {
 });
 
 /** Create a task through the real public API (metadata draft → commitTask). */
-function createTask(id: string, title: string): void {
+function createTask(id: string, title: string, kind?: string): void {
   const dir = join(process.env.PI_TASKS_DIR!, "draft", "tester");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${id}.toml`), `id = '${id}'\ntitle = '${title}'`);
+  writeFileSync(
+    join(dir, `${id}.toml`),
+    `id = '${id}'\ntitle = '${title}'` + (kind ? `\nkind = '${kind}'` : ""),
+  );
   commitTask(CWD, id, { scope: "all", cname: "tester", updated_by: "tester", expected_version: 1 });
 }
 /** Write the worker's report draft (per-agent path). */
@@ -206,6 +209,23 @@ describe("task-comms-ops extension shell", () => {
 
     // already active → only dispatched items can be started
     await expect(start.execute("c4", { id: "task-x" }, undefined, undefined)).rejects.toThrow(/only dispatched items/);
+  });
+
+  it("task_dispatch refuses an info node BEFORE sending any message (no orphaned delegation)", async () => {
+    const { pi, tools, handlers } = makeFakePi();
+    opsExtension(pi);
+    await handlers["session_start"]({}, { cwd: CWD });
+    const sent: Array<{ target: string; body: string; opts: any }> = [];
+    const dispatch = tools.find((t) => t.name === "task_dispatch");
+
+    createTask("common-reqs", "Common audit", "info");
+    handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
+
+    // rejected before any send — the shared info node is pure content, never dispatched
+    await expect(
+      dispatch.execute("c5", { task_id: "common-reqs", agent: "worker-1", message: "go" }, undefined, undefined),
+    ).rejects.toThrow(/shared information node \(kind = "info"\), pure content that is never dispatched/);
+    expect(sent).toHaveLength(0); // NO delegation message went out
   });
 
   it("task_start refuses a worker that is not the dispatchee", async () => {

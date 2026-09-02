@@ -197,6 +197,16 @@ export default function (pi: ExtensionAPI) {
 			const idt = commsIdentity();
 			const item = store.readTask(cwd, p.task_id);
 			if (!item) throw notFoundError(cwd, p.task_id);
+			// A dispatch SENDS a message BEFORE marking dispatched — so an
+			// invalid target must be rejected HERE, before any side effect.
+			// info nodes are pure shared content: never dispatchable (the store
+			// would refuse the status write, but only AFTER the message went
+			// out — an orphaned delegation).
+			if (item.kind === "info") {
+				throw new Error(
+					`tasks: cannot dispatch "${p.task_id}" — it is a shared information node (kind = "info"), pure content that is never dispatched; dispatch a real task (unit/module) instead`,
+				);
+			}
 
 			// The dispatch header is a constant protocol prefix, independent of
 			// what the LLM wrote, so it can never be lost or diluted (duplicating
