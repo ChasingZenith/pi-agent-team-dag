@@ -9,11 +9,10 @@ Workflows are modeled as a Directed Acyclic Graph (DAG) consisting of two distin
 
 ## 1. Task Types
 
-- **Unit**: A concrete, directly executable work item assigned to a single agent. 
+- **Unit**: A concrete, directly executable work item assigned to a single agent.
   - *Constraint*: Units are atomic leaves in the graph. Units **cannot** carry `deps` (dependencies) or `subgraph_deps` (gates).
 - **Module**: A higher-level objective that encompasses sub-goals or multiple execution phases.
   - *Constraint*: Modules act as containers/interfaces. They do not specify atomic inner details up front; their subgraphs are decomposed layer-by-layer as execution progresses. Modules **can** carry `deps` and `subgraph_deps`.
-
 
 ## 2. Dependency Edge Types
 
@@ -29,20 +28,14 @@ Workflows are modeled as a Directed Acyclic Graph (DAG) consisting of two distin
 
 ## 3. Graph Integrity Rules
 
-1. **Strict Acyclicity**: The underlying store validates every write against the live graph. Any `task_create` or `task_update` operation that would form a cycle (evaluating expanded gates alongside standard `deps`) is rejected with a cycle path trace in the error.
+1. **Strict Acyclicity**: The store validates every write against the live graph. Any `task_commit` that would form a cycle (evaluating expanded gates alongside standard `deps`) is rejected with a cycle path trace in the error.
 2. **Bottom-Up Creation**: Dependencies and gates must exist in the system *before* referencing them (`deps` and `subgraph_deps` targets must be created first).
 
 ## 4. Graph Operations & Tools
 
-- **Subgraph Generation (`task_create`)**: Creates a new task node in the graph.
-  - Mandatory parameters include `title`, `description`, `kind` (`unit` | `module`).
-  - `deps` can be supplied on creation (requires `kind="module"` and existing target IDs).
-- **Subgraph Embedding / Refinement (`task_update`)**: Updates task metadata, dependencies, or kinds.
-  - Modifies attributes on existing tasks (e.g., updating `description`, `deps`, or `subgraph_deps`).
-  - Clear gates from a module by passing `subgraph_deps: []`.
-  - Requires a concise summary in `change_summary` to preserve the item's historical audit trail.
-- **Read & Execution Tools**:
-  - `task_read`: Retrieves a specific task node — by default its metadata and graph context (deps, dependents, readiness, change history) WITHOUT the long description / completion report bodies; `fields="description"` / `fields="report"` / `fields="full"` load the bodies on demand (instructions only, report only, or everything).
-  - `task_list`: Displays tasks across the current domain/context.
-  - `task_ready_set`: Fetches nodes whose dependencies (`deps` and expanded `subgraph_deps`) are satisfied and ready for execution dispatch.
-  - `task_render`: Generates visual or structural representations of the DAG.
+The full operational guidance for every graph tool lives in each tool's own description, shown at call time: `task_commit`, `task_checkout`, `task_set_status`, `task_read`, `task_list`, `task_ready_set`, `task_render`. Key flows:
+
+- **Node Creation / Subgraph Embedding**: `task_checkout` to prepare a draft → edit it as a file → `task_commit` (metadata PATCH: only present fields change; `status` / `version` / `history` are machine-managed). Clear gates by putting `subgraph_deps = []` in the draft.
+- **Description editing**: `task_checkout(scope="description")` → edit → `task_commit(scope="description")`.
+- **Worker reports**: `task_checkout(scope="report")` + `task_submit_report` — see the `task-lifecycle-reporting` skill.
+- **Read & Execution**: `task_read` (metadata + graph context by default, long bodies on demand via `fields`), `task_list`, `task_ready_set` (ready set / missing deps), `task_render` (graph tree), and lifecycle `task_set_status` — status transitions do NOT bump the version (versions count content commits only).

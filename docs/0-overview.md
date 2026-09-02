@@ -80,4 +80,4 @@ flowchart LR
 
 - **spawn 统一装配**：spawn 出的 agent 由 launch script 统一加载 comms + role-context + auto-exit（docs/3 §7.1），自动注册 comms、自带角色模板；交互式启动的 agent 加载组合扩展目录即可——`extensions/agent-lifecycle`、`extensions/teammate-provider` 等入口的 `package.json` `pi.extensions` 清单声明其低层依赖并按顺序自动加载，不需要手写依赖清单（docs/2 §5）
 - **跨组件调用不走工具层**：TP 经模块导入直接调用 agent-lifecycle 的 `executeAgentSpawnByRole`（docs/3 §8.2）；task-comms-ops 在代码内部组合 comms 与 tasks 能力
-- **角色工具构成**：Coordinator = task-comms-ops 高级工具 + tasks 只读工具 + comms 工具（docs/5 §3）；各 specialist 在 spawn 时经 launch script 获得 tasks 图工具与 comms 工具
+- **角色工具构成**：Coordinator = task-comms-ops 高级工具 + tasks 工具（task_commit / task_checkout 做小调整，其余只读）+ comms 工具（docs/5 §3）；各 specialist 在 spawn 时经 launch script 获得 tasks 图工具与 comms 工具

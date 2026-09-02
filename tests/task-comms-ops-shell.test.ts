@@ -14,11 +14,11 @@
  * Run: bun test tests/task-comms-ops-shell.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COMMS_RUNTIME_EVENT } from "../extensions/lib/comms/runtime";
-import { createTask, readTask, setTaskStatus } from "../extensions/lib/tasks/store";
+import { commitTask, readTask, setTaskStatus } from "../extensions/lib/tasks/store";
 
 // ━━ helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -34,6 +34,20 @@ afterEach(() => {
   delete process.env.PI_TASKS_DIR;
   rmSync(tmp, { recursive: true, force: true });
 });
+
+/** Create a task through the real public API (metadata draft → commitTask). */
+function createTask(id: string, title: string): void {
+  const dir = join(process.env.PI_TASKS_DIR!, "draft", "tester");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${id}.toml`), `id = '${id}'\ntitle = '${title}'`);
+  commitTask(CWD, id, { scope: "all", cname: "tester", updated_by: "tester", expected_version: 1 });
+}
+/** Write the worker's report draft (per-agent path). */
+function writeReportDraft(agent: string, id: string, body: string): void {
+  const dir = join(process.env.PI_TASKS_DIR!, "draft", agent);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${id}.report.md`), body);
+}
 
 function makeFakePi() {
   const tools: any[] = [];
@@ -139,7 +153,7 @@ describe("task-comms-ops extension shell", () => {
     const dispatch = tools.find((t) => t.name === "task_dispatch");
     const start = tools.find((t) => t.name === "task_start");
 
-    createTask(CWD, { id: "task-x", title: "X" }); // task creation is task-graph's job
+    createTask("task-x", "X"); // task creation is task-graph's job
 
     // the manager dispatches to worker-1 (identity = manager-1)
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
@@ -202,7 +216,7 @@ describe("task-comms-ops extension shell", () => {
     const dispatch = tools.find((t) => t.name === "task_dispatch");
     const start = tools.find((t) => t.name === "task_start");
 
-    createTask(CWD, { id: "task-x", title: "X" });
+    createTask("task-x", "X");
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
     await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined);
@@ -224,7 +238,7 @@ describe("task-comms-ops extension shell", () => {
     const reportCompletion = tools.find((t) => t.name === "task_submit_report");
 
     const dispatchMsgId = "msg-1234567890abcdef";
-    createTask(CWD, { id: "task-x", title: "X" });
+    createTask("task-x", "X");
 
     // the manager dispatches to worker-1 (identity = manager-1)
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
@@ -233,15 +247,16 @@ describe("task-comms-ops extension shell", () => {
     // the worker writes its record — the reply to the dispatch message is
     // automatic (the msg_id lives on the dispatch, no parameter needed)
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("worker-1", sent));
+    writeReportDraft("worker-1", "task-x", "Implemented.\nDeviation: the API returned camelCase.");
     const res = await reportCompletion.execute(
       "c3",
-      { id: "task-x", report: "Implemented.\nDeviation: the API returned camelCase." },
+      { id: "task-x", expected_version: 1 },
       undefined,
       undefined,
     );
-    // record persisted (multiline), version bumped
+    // record persisted (multiline); version unchanged (create v1, dispatch and report do NOT bump)
     expect(res.details.item.completion_report).toBe("Implemented.\nDeviation: the API returned camelCase.");
-    expect(res.details.version).toBe(3); // create v1 → dispatch v2 → report v3
+    expect(res.details.version).toBe(1);
     expect(readTask(CWD, "task-x")!.completion_report).toBe("Implemented.\nDeviation: the API returned camelCase.");
     // the reply: to the dispatcher, marked as a reply to the dispatch message,
     // no reminder (remindS 0)
@@ -269,7 +284,7 @@ describe("task-comms-ops extension shell", () => {
     const sent: Array<{ target: string; body: string; opts: any }> = [];
     const reportCompletion = tools.find((t) => t.name === "task_submit_report");
 
-    createTask(CWD, { id: "task-x", title: "X" });
+    createTask("task-x", "X");
     // a bare set_status dispatch: no dispatcher, no delegation message —
     // there is nothing to reply to
     setTaskStatus(CWD, "task-x", "dispatched", {
@@ -277,9 +292,10 @@ describe("task-comms-ops extension shell", () => {
     });
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("worker-1", sent));
+    writeReportDraft("worker-1", "task-x", "Done.");
     const res = await reportCompletion.execute(
       "c3",
-      { id: "task-x", report: "Done." },
+      { id: "task-x", expected_version: 1 },
       undefined,
       undefined,
     );
@@ -297,14 +313,15 @@ describe("task-comms-ops extension shell", () => {
     const dispatch = tools.find((t) => t.name === "task_dispatch");
     const reportCompletion = tools.find((t) => t.name === "task_submit_report");
 
-    createTask(CWD, { id: "task-x", title: "X" });
+    createTask("task-x", "X");
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
     await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined);
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("worker-2", sent));
+    writeReportDraft("worker-2", "task-x", "hijack");
     await expect(
-      reportCompletion.execute("c3", { id: "task-x", report: "hijack" }, undefined, undefined),
+      reportCompletion.execute("c3", { id: "task-x", expected_version: 1 }, undefined, undefined),
     ).rejects.toThrow(/dispatched to worker-1/);
 
     // nothing written, nothing sent
@@ -325,7 +342,7 @@ describe("task-comms-ops extension shell", () => {
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("worker-1", sent, profiles));
     await handlers["session_start"]({}, { cwd: CWD });
 
-    createTask(CWD, { id: "task-x", title: "Implement auth" });
+    createTask("task-x", "Implement auth");
     setTaskStatus(CWD, "task-x", "dispatched", {
       dispatched_to: { name: "worker-1", dispatched_by: "manager-1", dispatch_msg_id: "" },
     });
@@ -340,7 +357,8 @@ describe("task-comms-ops extension shell", () => {
     // task_submit_report clears it — the worker is idle again (the display
     // name falls back to the bare agent name on comms' side)
     const submit = tools.find((t) => t.name === "task_submit_report");
-    await submit.execute("c2", { id: "task-x", report: "done" }, undefined, undefined);
+    writeReportDraft("worker-1", "task-x", "done");
+    await submit.execute("c2", { id: "task-x", expected_version: 1 }, undefined, undefined);
     expect(profiles).toEqual([{ current_task: "Implement auth" }, { current_task: undefined }]);
   });
 });

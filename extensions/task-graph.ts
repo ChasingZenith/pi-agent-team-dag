@@ -3,7 +3,7 @@
  *
  * A task is the unit of tracked work. It unifily represent task at any granularity
  * module, unit task, subtask. Items form a pure dependency DAG: deps are the edges
- * (B.deps=[A] means A completes before B can complete), validated at write
+ * (B.deps=[A] means A completes before B can complete), validated at commit
  * time — cycles and dangling deps are rejected, so the graph is always a DAG.
  *
  * Status machine: pending → dispatched → active / blocked → done; done →
@@ -14,21 +14,34 @@
  * dispatch list managers delegate from (task_ready_set); marking done unlocks
  * dependents that became newly ready (dispatch them in parallel).
  *
- * Tools: task_create, task_update, task_set_status, task_read, task_list,
+ * CONTENT IS FILE-DRIVEN: the plan is edited as FILES. Each task is three
+ * true copies (metadata toml + description.md + report.md) plus per-agent
+ * drafts under .pi/tasks/draft/<cname>/. Agents write/edit DRAFTS and
+ * task_commit is the single content write: it validates (deps existence, cycles, kind), forms a
+ * new version (+1 on any change to title/description/deps/subgraph_deps/kind),
+ * and rewrites the true copies, consuming the drafts it used. task_checkout
+ * initializes the caller's draft BODY-ONLY (frontmatter is never handed to
+ * the draft; commit re-adds it). Lifecycle events (status
+ * transitions) and completion reports do NOT bump the version — version counts
+ * content revisions only.
+ *
+ * Tools: task_commit, task_checkout, task_set_status,
+ * task_read, task_list,
  * task_ready_set, task_render.
  *
  * Implementation: storage in lib/tasks/store.ts (filesystem under
  * .pi/tasks/, PI_TASKS_DIR override), graph semantics in
  * lib/tasks/graph.ts (ready set, DAG validation, tree rendering). The
  * shell wires the tools to them, audits writes on the "tasks-log"
- * channel, and enforces the teaching rules (dep existence, cycles, deps
- * satisfied before done) with errors that teach the model instead of failing
- * silently.
+ * channel, and enforces the teaching rules with errors that teach the
+ * model instead of failing silently.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative } from "node:path";
 import * as store from "./lib/tasks/store";
 import type { Task, TaskDispatch, TaskKind, TaskStatus } from "./lib/tasks/store";
 import * as graph from "./lib/tasks/graph";
@@ -64,11 +77,11 @@ export default function (pi: ExtensionAPI) {
 	let cwd = process.cwd();
 
 	/**
-	 * Agent name for the updated_by stamp — read from the --cname CLI flag
-	 * (spawned agents always carry it). Both "--cname <value>" and
-	 * "--cname=<value>" forms are accepted; anything else yields "unknown".
-	 * task-graph.ts has NO comms dependency: the name comes from the CLI, not from
-	 * any comms runtime.
+	 * Agent name for the updated_by stamp and the draft directory — read from
+	 * the --cname CLI flag (spawned agents always carry it). Both "--cname
+	 * <value>" and "--cname=<value>" forms are accepted; anything else yields
+	 * "unknown". task-graph.ts has NO comms dependency: the name comes from
+	 * the CLI, not from any comms runtime.
 	 */
 	function commsName(): string {
 		const argv = process.argv;
@@ -107,283 +120,111 @@ export default function (pi: ExtensionAPI) {
 		cancelled: "⊘",
 	};
 
+	/** Number of the caller's existing draft files. Used to indicate "you have N uncommitted
+	 *  draft(s) for this task" in task_read. */
+	function callerDraftCount(id: string): number {
+		const me = commsName();
+		return [
+			store.taskDraftTomlPath(cwd, me, id),
+			store.taskDraftDescriptionPath(cwd, me, id),
+			store.taskDraftReportPath(cwd, me, id),
+		].filter((p) => existsSync(p)).length;
+	}
+
 	// =============================================================================
-	// task_create
+	// task_commit
 	// =============================================================================
 
 	pi.registerTool({
-		name: "task_create",
-		label: "Task Create",
+		name: "task_commit",
+		label: "Task Commit",
 		description:
-			"Create a task — the unified unit of tracked work at any granularity (module, task, subtask). " +
-			"deps are this item's completion prerequisites: deps=[A] means A completes before this item can complete. " +
-			"deps must ALREADY exist — create the child items first, then link them via deps; a missing dep is " +
-			"rejected with the list of available items. " +
-			"subgraph_deps declares SUBGRAPH GATES (modules only): the module AND its whole subgraph — everything " +
-			"it depends on, transitively — additionally wait for these ids (full semantics in the parameter). " +
-			"id is a kebab-case slug; omit it for an auto-generated one (task-<ulid8>). " +
-			"kind: unit (directly executable, no children — the default) or module (aggregation node — may have " +
-			"a subgraph; review nodes are modules too). Both kinds may carry deps (a unit with deps waits for its " +
-			"prerequisites, still executed directly); subgraph_deps stay module-only.",
-		parameters: Type.Object({
-			id: Type.Optional(
-				Type.String({
-					description:
-						"Task id (kebab-case, lowercase letters/digits/_/-). Omitted = auto-generated (task-<ulid8>).",
-				}),
-			),
-			title: Type.String({
-				description: "Short title of the item (what the work is). Required.",
-			}),
-			description: Type.Optional(
-				Type.String({
-					description: "Optional detail: scope, acceptance criteria, context.",
-				}),
-			),
-			deps: Type.Optional(
-				Type.Array(
-					Type.String({
-						description:
-							"Completion prerequisites — item ids that must complete before this one can complete. All must already exist (create them first). Legal on any kind: a unit with deps waits for its prerequisites but is still executed directly (no delegation); modules use deps to hold their subgraph.",
-					}),
-				),
-			),
-			subgraph_deps: Type.Optional(
-				Type.Array(
-					Type.String({
-						description:
-							"Subgraph gates (modules only) — item ids that this module's WHOLE subgraph waits for: the module itself and every task under it (its deps, transitively) become ready only after these complete. An ordering edge, not a data dependency. Stored once on the module and applied to the whole subgraph at read time — tasks added to the subgraph later are gated automatically. Every gate must already exist and must NOT be inside this module's own subgraph.",
-					}),
-				),
-			),
-			kind: Type.Optional(
-				Type.String({
-					description:
-						'Granularity kind: "unit" (directly executable — default; may still carry deps as ordering edges) or "module" (aggregation node — may have a subgraph; review nodes are modules).',
-				}),
-			),
-			change_summary: Type.Optional(
-				Type.String({
-					description:
-						"Why this create happens — goes into the item's change history.",
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate) {
-			const p = params as {
-				id?: string;
-				title: string;
-				description?: string;
-				deps?: string[];
-				subgraph_deps?: string[];
-				kind?: string;
-				change_summary?: string;
-			};
-			if (!p.title || !p.title.trim()) {
-				throw new Error("tasks: task_create requires a title — name the item so it is traceable");
-			}
-			const deps = p.deps ?? [];
-			if (deps.length > 0) {
-				const byId = loadAllItems(cwd);
-				const missing = deps.filter((d) => !byId.has(d));
-				if (missing.length > 0) throw missingDepsError(cwd, missing);
-			}
-			const moduleDeps = p.subgraph_deps ?? [];
-			if (moduleDeps.length > 0) {
-				const byId = loadAllItems(cwd);
-				const missing = moduleDeps.filter((d) => !byId.has(d));
-				if (missing.length > 0) throw missingSubgraphDepsError(cwd, missing);
-			}
-			const item = store.createTask(cwd, {
-				id: p.id,
-				title: p.title,
-				description: p.description,
-				deps,
-				subgraph_deps: moduleDeps,
-				kind: p.kind as TaskKind | undefined,
-				change_summary: p.change_summary,
-				updated_by: commsName(),
-			});
-			audit("task_create", {
-				item_id: item.id,
-				title: item.title,
-				kind: item.kind,
-				deps: item.deps,
-				subgraph_deps: item.subgraph_deps,
-				version: item.version,
-				change_summary: p.change_summary,
-			});
-			const summary = p.change_summary?.trim() || "created";
-			const text =
-				`task_create: "${item.id}" v${item.version} (${item.kind}, by ${item.updated_by})\n` +
-				`deps: ${item.deps.length > 0 ? item.deps.join(", ") : "(none)"}\n` +
-				`subgraph_deps: ${item.subgraph_deps.length > 0 ? item.subgraph_deps.join(", ") : "(none)"}\n` +
-				broadcastLine("created", item.id, item.status, summary);
-			return {
-				content: [{ type: "text" as const, text }],
-				details: {
-					id: item.id,
-					title: item.title,
-					status: item.status,
-					kind: item.kind,
-					deps: item.deps,
-					subgraph_deps: item.subgraph_deps,
-					version: item.version,
-					created: true,
-					updated_at: item.updated_at,
-					updated_by: item.updated_by,
-					change_summary: summary,
-				},
-			};
-		},
-		renderCall(args, theme, context) {
-			const a = args as Record<string, unknown>;
-			const id = (a.id as string) || "(auto)";
-			const text =
-				theme.fg("toolTitle", theme.bold("task_create ")) + theme.fg("accent", id);
-			if (!context.expanded) return new Text(text, 0, 0);
-			// Expanded: the full call args, as the LLM saw them.
-			return new Text(text + "\n" + fmtArgs(a), 0, 0);
-		},
-	});
-
-	// =============================================================================
-	// task_update
-	// =============================================================================
-
-	pi.registerTool({
-		name: "task_update",
-		label: "Task Update",
-		description:
-			"Update a task: title, description, kind, deps or subgraph_deps (omit a field to keep its current value). " +
-			"Changing deps re-validates the graph: every dep must already exist and the result must stay acyclic — " +
-			"a cycle is rejected with the cycle path in the error. subgraph_deps (modules only) sets the subgraph " +
-			"gates — the ids this module's whole subgraph additionally waits for; [] clears them; a gate must not lie " +
-			"inside the module's own subgraph, and a unit cannot declare gates. kind can flip a unit to module when " +
-			"execution reveals the item needs decomposition. Read the item first (task_read) to see its current " +
-			"values; pass its version as expected_version to make the write conditional (optimistic concurrency) — " +
-			"a stale version fails with a conflict error, re-read and retry.",
+			"The single content write: commits YOUR drafts into the true copies and forms a new version. " +
+			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then commit here — task_commit is the only way content becomes a version. " +
+			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
+			"Clear gates from a module by putting subgraph_deps = [] in the draft. " ,
 		parameters: Type.Object({
 			id: Type.String({
-				description: "Id of the item to update (must already exist).",
+				description:
+					"Id of the task to create or update (kebab-case). For CREATE it must not exist yet; for UPDATE it must already exist.",
 			}),
-			title: Type.Optional(
-				Type.String({
-					description: "New title.",
-				}),
-			),
-			description: Type.Optional(
-				Type.String({
-					description: "New description.",
-				}),
-			),
-			deps: Type.Optional(
-				Type.Array(
-					Type.String({
+			scope: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("metadata"),
+						Type.Literal("description"),
+						Type.Literal("all"),
+					],
+					{
 						description:
-							"New full deps list (replaces the stored one) — all must already exist and the result must stay acyclic. Legal on any kind: a unit with deps waits for its prerequisites but is still executed directly.",
-					}),
+							'Which drafts to commit: "metadata" (only the metadata draft patch), "description" (only the description draft), "all" (default — commit whatever drafts exist).',
+					},
 				),
-			),
-			subgraph_deps: Type.Optional(
-				Type.Array(
-					Type.String({
-						description:
-							"New full subgraph-gates list (replaces the stored one; modules only) — the ids this module's whole subgraph additionally waits for; [] clears the gates. Every gate must already exist and must not be inside this module's own subgraph; the expanded graph (gates included) must stay acyclic.",
-					}),
-				),
-			),
-			kind: Type.Optional(
-				Type.String({
-					description:
-						'New granularity kind: "unit" (directly executable — may still carry deps as ordering edges) or "module" (aggregation — may have a subgraph).',
-				}),
 			),
 			change_summary: Type.Optional(
 				Type.String({
 					description:
-						"Why this update happens — goes into the item's change history.",
+						"Why this commit happens — goes into the item's change history (required practice: name the deviation / assumption you corrected).",
 				}),
 			),
-			expected_version: Type.Optional(
-				Type.Number({
-					description:
-						"Optional expected version (optimistic concurrency): the write fails with a conflict error if the node has moved past it since you read it — re-read (task_read returns version) and retry.",
-				}),
-			),
+			expected_version: Type.Number({
+				description:
+					"The version of the task you are committing against. For CREATE pass 1 — a new task is always created at v1. " +
+					"For UPDATE pass the version task_read returned (REQUIRED): a concurrent commit makes it stale and the write is rejected — " +
+					"re-read, merge your changes into your draft, retry.",
+			}),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate) {
 			const p = params as {
 				id: string;
-				title?: string;
-				description?: string;
-				deps?: string[];
-				subgraph_deps?: string[];
-				kind?: string;
+				scope?: string;
 				change_summary?: string;
-				expected_version?: number;
+				expected_version: number;
 			};
 			if (!p.id || !p.id.trim()) {
-				throw new Error("tasks: task_update requires an id");
+				throw new Error("tasks: task_commit requires an id");
 			}
-			const byId = loadAllItems(cwd);
-			const target = byId.get(p.id);
-			if (!target) throw notFoundError(cwd, p.id);
-			const newDeps = p.deps !== undefined ? p.deps : target.deps;
-			if (p.deps !== undefined && newDeps.length > 0) {
-				const missing = newDeps.filter((d) => !byId.has(d));
-				if (missing.length > 0) throw missingDepsError(cwd, missing);
-			}
-			const newGates =
-				p.subgraph_deps !== undefined ? p.subgraph_deps : target.subgraph_deps;
-			if (p.subgraph_deps !== undefined && newGates.length > 0) {
-				const missing = newGates.filter((d) => !byId.has(d));
-				if (missing.length > 0) throw missingSubgraphDepsError(cwd, missing);
-			}
-			if (p.deps !== undefined || p.subgraph_deps !== undefined) {
-				// Would-be graph cycle check (dangling is impossible here — all deps
-				// and gates exist). validateGraph checks the EXPANDED graph, so
-				// gate-created cycles surface here too.
-				const wouldBe = [...byId.values()].map((i) =>
-					i.id === p.id ? { ...i, deps: newDeps, subgraph_deps: newGates } : i,
-				);
-				const { cycles } = graph.validateGraph(wouldBe);
-				if (cycles.length > 0) throw cycleError(cycles[0]);
-			}
-			const item = store.updateTask(cwd, p.id, {
-				title: p.title,
-				description: p.description,
-				deps: p.deps,
-				subgraph_deps: p.subgraph_deps,
-				kind: p.kind as TaskKind | undefined,
+			const me = commsName();
+			const r = store.commitTask(cwd, p.id, {
+				scope: (p.scope as store.SubmitScope) ?? "all",
+				cname: me,
 				change_summary: p.change_summary,
+				updated_by: me,
 				expected_version: p.expected_version,
-				updated_by: commsName(),
 			});
-			audit("task_update", {
-				item_id: item.id,
-				kind: item.kind,
-				version: item.version,
-				subgraph_deps: item.subgraph_deps,
+			audit("task_commit", {
+				item_id: r.item.id,
+				created: r.created,
+				version: r.item.version,
+				kind: r.item.kind,
+				changed_items: r.changed_items,
 				change_summary: p.change_summary,
+				consumed: r.consumed,
 			});
-			const summary = p.change_summary?.trim() || "updated";
-			const text =
-				`task_update: "${item.id}" → v${item.version} (${item.kind}, by ${item.updated_by})\n` +
-				broadcastLine("update", item.id, item.status, summary);
+			const summary = p.change_summary?.trim() || (r.created ? "created" : `updated: ${r.changed_items.join(", ")}`);
+			const lines = r.created
+				? [`task_commit: "${r.item.id}" created v1 (${r.item.kind}, by ${r.item.updated_by})`]
+				: [
+						`task_commit: "${r.item.id}" → v${r.item.version} (changed: ${r.changed_items.join(", ")}, by ${r.item.updated_by})`,
+						`  consumed drafts: ${r.consumed.length > 0 ? r.consumed.join(", ") : "(none)"}`,
+					];
+			const idNote = store.sanitizedIdNote(p.id);
+			if (idNote) lines.push(idNote);
 			return {
-				content: [{ type: "text" as const, text }],
+				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
-					id: item.id,
-					title: item.title,
-					status: item.status,
-					kind: item.kind,
-					deps: item.deps,
-					subgraph_deps: item.subgraph_deps,
-					version: item.version,
-					created: false,
-					updated_at: item.updated_at,
-					updated_by: item.updated_by,
+					id: r.item.id,
+					title: r.item.title,
+					status: r.item.status,
+					kind: r.item.kind,
+					deps: r.item.deps,
+					subgraph_deps: r.item.subgraph_deps,
+					version: r.item.version,
+					created: r.created,
+					changed_items: r.changed_items,
+					consumed: r.consumed,
+					updated_at: r.item.updated_at,
+					updated_by: r.item.updated_by,
 					change_summary: summary,
 				},
 			};
@@ -391,7 +232,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			const a = args as Record<string, unknown>;
 			const text =
-				theme.fg("toolTitle", theme.bold("task_update ")) + theme.fg("accent", (a.id as string) || "?");
+				theme.fg("toolTitle", theme.bold("task_commit ")) + theme.fg("accent", (a.id as string) || "?");
 			if (!context.expanded) return new Text(text, 0, 0);
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
@@ -399,85 +240,239 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// =============================================================================
-	// task_set_status
+	// task_checkout
 	// =============================================================================
 
 	pi.registerTool({
-		name: "task_set_status",
-		label: "Task Set Status",
+		name: "task_checkout",
+		label: "Task Checkout",
 		description:
-			"Set a task's raw status: pending (not started), dispatched (delegation sent, owner recorded, work " +
-			"not yet started), active (in progress), done (finished), blocked (reality is blocking progress), " +
-			"cancelled (abandoned). The dispatched worker moves its item to active with task_start. done can be " +
-			"reopened (done → active); cancelled can be undone (cancelled → pending). cancelled counts as satisfied " +
-			"for dependents. Note: this tool only changes the status — it sends no delegation and notifies no one " +
-			"(the task-comms-ops tools do both). Read the item first (task_read) to see its current status and " +
-			"version; pass the version as expected_version to make the transition conditional (optimistic " +
-			"concurrency) — a stale version fails with a conflict error, re-read and retry.",
+			"Check out a working copy of a task's content for editing — Step 1 of any content change. " +
+			"An existing draft is kept untouched (check out a fresh task id, or clear it manually). " +
+			"For METADATA changes you do not need this tool — write a small patch (only the fields to change) and " +
+			"commit it with task_commit(id, scope=\"metadata\"). " +
+			"Creating a NEW task: task_checkout(id=<new-id>, version=0) scaffolds the metadata draft (with `id`) and the empty description draft — fill both with write/edit, then task_commit(id=<new-id>, expected_version=1). " +
+			"Checking out a HISTORICAL version of an existing task's description: pass version=<n> (n < current).",
 		parameters: Type.Object({
 			id: Type.String({
-				description: "Id of the item to change (must already exist).",
+				description: "Id of the task whose body to prepare in your draft.",
 			}),
-			status: Type.String({
-				description: "New status: pending | dispatched | active | done | blocked | cancelled.",
-			}),
-			dispatched_to: Type.Optional(
+			scope: Type.Optional(
 				Type.String({
 					description:
-						"Agent name to record as the item's responsible owner — only valid when setting dispatched " +
-						"(dispatch). Cleared automatically on done/cancelled.",
+						'Which draft to prepare. "description" (default): copies the TRUE description BODY (frontmatter STRIPPED) into your draft — ' +
+						'then edit with write/edit (Step 2) and commit it with task_commit(id=..., expected_version=..., scope="description") — commit re-adds the frontmatter. ' +
+						'"report": creates YOUR report draft as a FRESH EMPTY scaffold (no frontmatter) — the old report is never copied or edited; ' +
+						'then write/edit the body (Step 2) and submit it with ' +
+						'task_submit_report(id=..., expected_version=...) — it commits the report (re-adding the for_version anchor), replies to the dispatcher and stops the reminder.',
 				}),
 			),
-			change_summary: Type.Optional(
-				Type.String({
-					description:
-						"Why this transition happens — goes into the item's change history.",
-				}),
-			),
-			expected_version: Type.Optional(
+			version: Type.Optional(
 				Type.Number({
 					description:
-						"Optional expected version (optimistic concurrency): the write fails with a conflict error if the node has moved past it since you read it — re-read (task_read returns version) and retry.",
+						'Which version to check out. Omit = the CURRENT version of an existing task. A positive integer n < current = that HISTORICAL snapshot\'s description. version=0 = the id does not exist yet — scaffold the creation drafts (metadata draft with `id` + empty description draft) to fill and commit with task_commit(id=..., expected_version=1).',
 				}),
 			),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate) {
-			const p = params as {
-				id: string;
-				status: string;
-				dispatched_to?: string;
-				change_summary?: string;
-				expected_version?: number;
-			};
+					}),
+		async execute(_toolCallId: string, params: Record<string, unknown>) {
+			const p = params as { id: string; scope?: string; version?: number };
 			if (!p.id || !p.id.trim()) {
-				throw new Error("tasks: task_set_status requires an id");
+				throw new Error("tasks: task_checkout requires an id");
 			}
-			if (!STATUSES.includes(p.status as TaskStatus)) {
-				throw new Error(
-					`tasks: invalid status "${p.status}" — one of: ${STATUSES.join(" | ")}`,
-				);
-			}
+			const isDesc = p.scope !== "report";
+			const dstFn = isDesc ? store.taskDraftDescriptionPath : store.taskDraftReportPath;
+			const commitHint = (id: string, v: number) =>
+				isDesc
+					? `task_commit(id="${id}", expected_version=${v}, scope="description")`
+					: `task_submit_report(id="${id}", expected_version=${v})`;
+			const me = commsName();
 			const target = store.readTask(cwd, p.id);
-			if (!target) throw notFoundError(cwd, p.id);
-			let dispatch: TaskDispatch | null = null;
-			if (p.dispatched_to && p.dispatched_to.trim()) {
-				if (p.status !== "dispatched") {
+			const requested = p.version;
+			let version: number;
+			let content = "";
+
+			if (target) {
+				// EXISTING task — description copies the live or a historical body; report is always a fresh empty scaffold.
+				version = requested ?? target.version;
+				if (!Number.isInteger(version) || version < 1) {
 					throw new Error(
-						`tasks: dispatch records the agent — set status to "dispatched" together with dispatched_to (got "${p.status}")`,
+						`tasks: invalid version "${version}" — use a positive integer for an existing task (version=0 is only for creating a NEW task)`,
 					);
 				}
-				const name = p.dispatched_to.trim();
-				// The dispatch records the agent NAME — the comms identity, the
-				// address comms delivers to (stable across restarts).
-				// no dispatcher nor delegation message on a bare dispatch —
-				// task_start stays quiet, task_submit_report has nothing to reply to
-				dispatch = { name, dispatched_by: "", dispatch_msg_id: "" };
+				if (isDesc) {
+					if (version === target.version) {
+						content = target.description;
+					} else {
+						const hist = store.readTaskVersion(cwd, p.id, version); // throws for n >= current or missing snapshot
+						content = hist?.description ?? "";
+					}
+				}
+			} else {
+				// NEW task — version must be 0 (explicit or omitted): scaffold the creation drafts.
+				if (requested !== undefined && requested !== 0) {
+					throw new Error(
+						`tasks: "${p.id}" does not exist yet — creating it requires version=0 (leave version unset to create)`,
+					);
+				}
+				version = 0;
 			}
-			const r = store.setTaskStatus(cwd, p.id, p.status as TaskStatus, {
-				change_summary: p.change_summary,
-				updated_by: commsName(),
-				expected_version: p.expected_version,
-				...(dispatch ? { dispatched_to: dispatch } : {}),
+
+			const dst = dstFn(cwd, me, p.id);
+			// Drafts are BODY-ONLY (frontmatter is added by commit, never by checkout).
+			const writes: { path: string; content: string; label: string }[] = [];
+			if (target) {
+				writes.push({ path: dst, content, label: isDesc ? "description" : "report" });
+			} else {
+				// Creation: scaffold the metadata draft (id) + empty description draft.
+				const cleanId = store.sanitizeTaskId(p.id) ?? p.id;
+				const metaPath = store.taskDraftTomlPath(cwd, me, p.id);
+				writes.push(
+					{
+						path: metaPath,
+						content: `id = "${cleanId}"\n# title = "..."    # REQUIRED for creation\n# deps = []\n# subgraph_deps = []\n# kind = "unit"     # or "module"\n`,
+						label: "metadata",
+					},
+					{ path: dst, content: "", label: "description" },
+				);
+			}
+
+			for (const w of writes) {
+				if (existsSync(w.path)) {
+					const existing = readFileSync(w.path, "utf-8");
+					if (existing !== w.content) {
+						throw new Error(
+							`tasks: you already have a draft at ${relative(cwd, w.path)} — it differs from the current content; edit it with write/edit, or clear it manually to re-create it`,
+						);
+					}
+					// Identical to what checkout would create — treat as a successful no-op.
+				} else {
+					mkdirSync(dirname(w.path), { recursive: true });
+					writeFileSync(w.path, w.content, "utf-8");
+				}
+			}
+
+			const paths = writes.map((w) => relative(cwd, w.path)).join(", ");
+			const lines = [
+				`task_checkout: draft ready at ${paths}` +
+					(target
+						? isDesc
+							? ` (description body from v${version})`
+							: " (empty report scaffold — commit adds the for_version anchor)"
+						: " (creation scaffold — fill `title` in the metadata draft and the description body, then task_commit(id=..., expected_version=1))"),
+			];
+			if (target) lines[0] += `\n  edit it with write/edit, then ${commitHint(p.id, version)}`;
+			const idNote = store.sanitizedIdNote(p.id);
+			if (idNote) lines.push(idNote);
+			return {
+				content: [{ type: "text" as const, text: lines.join("\n") }],
+				details: {
+					id: p.id,
+					scope: isDesc ? "description" : "report",
+					creating: !target,
+					draft: paths,
+					version,
+					chars: writes.reduce((s, w) => s + w.content.length, 0),
+				},
+			};
+		},
+		renderCall(args: Record<string, unknown>, theme: any, context: any) {
+			const a = args as Record<string, unknown>;
+			const scope = (a.scope as string) === "report" ? " report" : "";
+			const text =
+				theme.fg("toolTitle", theme.bold("task_checkout ")) +
+				theme.fg("accent", `${(a.id as string) || "?"}${scope}`);
+			if (!context.expanded) return new Text(text, 0, 0);
+			// Expanded: the full call args, as the LLM saw them.
+			return new Text(text + "\n" + fmtArgs(a), 0, 0);
+		},
+});
+
+// =============================================================================
+// task_set_status
+// =============================================================================
+
+
+// =============================================================================
+// task_set_status
+// =============================================================================
+
+pi.registerTool({
+	name: "task_set_status",
+	label: "Task Set Status",
+	description:
+		"Set a task's raw status. cancelled counts as satisfied for dependents. " +
+		"A LIFECYCLE event: the version is NOT bumped (versions count content commits only) and no " +
+		"snapshot is written — the transition is recorded in the change history (change_summary) and updates " +
+		"updated_at/updated_by. Note: this tool only changes the status — it sends no delegation and notifies no one " +
+		"(the task-comms-ops tools do both).",
+	parameters: Type.Object({
+		id: Type.String({
+			description: "Id of the item to change (must already exist).",
+		}),
+		status: Type.Union(
+			[
+				Type.Literal("pending"),
+				Type.Literal("dispatched"),
+				Type.Literal("active"),
+				Type.Literal("done"),
+				Type.Literal("blocked"),
+				Type.Literal("cancelled"),
+			],
+			{
+				description:
+					"New status to set. pending; dispatched (delegation sent, owner recorded, work not yet started — " +
+					"set together with dispatched_to); active (in progress — the dispatched worker moves its item here via task_start); " +
+					"done; blocked (reality is blocking progress); cancelled. " +
+					"done can be reopened (done → active); cancelled can be undone (cancelled → pending). " +
+					"A task can only be marked done when all deps are done/cancelled — otherwise the transition is rejected with the missing deps listed.",
+			},
+		),
+		dispatched_to: Type.Optional(
+			Type.String({
+				description:
+					"Agent name to record as the item's responsible owner — only valid when setting dispatched " +
+					"(dispatch). Cleared automatically on done/cancelled.",
+			}),
+		),
+		change_summary: Type.Optional(
+			Type.String({
+				description:
+					"Why this transition happens — goes into the item's change history.",
+			}),
+		),
+	}),
+	async execute(_toolCallId, params, _signal, _onUpdate) {
+		const p = params as {
+			id: string;
+			status: string;
+			dispatched_to?: string;
+			change_summary?: string;
+		};
+		if (!p.id || !p.id.trim()) {
+			throw new Error("tasks: task_set_status requires an id");
+		}
+		if (!STATUSES.includes(p.status as TaskStatus)) {
+			throw new Error(
+				`tasks: invalid status "${p.status}" — one of: ${STATUSES.join(" | ")}`,
+			);
+		}
+		const target = store.readTask(cwd, p.id);
+		if (!target) throw notFoundError(cwd, p.id);
+		let dispatch: TaskDispatch | null = null;
+		if (p.dispatched_to && p.dispatched_to.trim()) {
+			if (p.status !== "dispatched") {
+				throw new Error(
+					`tasks: dispatch records the agent — set status to "dispatched" together with dispatched_to (got "${p.status}")`,
+				);
+			}
+			const name = p.dispatched_to.trim();
+			dispatch = { name, dispatched_by: "", dispatch_msg_id: "" };
+		}
+		const r = store.setTaskStatus(cwd, p.id, p.status as TaskStatus, {
+			change_summary: p.change_summary,
+			updated_by: commsName(),
+			event: p.status,
+			...(dispatch ? { dispatched_to: dispatch } : {}),
 			});
 			audit("task_set_status", {
 				item_id: r.item.id,
@@ -488,7 +483,7 @@ export default function (pi: ExtensionAPI) {
 			});
 			const summary = p.change_summary?.trim() || `set to ${r.item.status}`;
 			const lines = [
-				`task_set_status: "${r.item.id}" → ${r.item.status} (by ${r.item.updated_by})`,
+				`task_set_status: "${r.item.id}" → ${r.item.status} (by ${r.item.updated_by}; version unchanged — lifecycle event recorded in history)`,
 			];
 			if (dispatch) {
 				lines.push(`  dispatched to ${dispatch.name}`);
@@ -499,6 +494,8 @@ export default function (pi: ExtensionAPI) {
 				lines.push(`  unlocked: ${r.unlocked.join(", ")} — deps now satisfied (dispatch the newly ready ones)`);
 			}
 			lines.push(broadcastLine("update", r.item.id, r.item.status, summary));
+			const idNote = store.sanitizedIdNote(p.id);
+			if (idNote) lines.push(idNote);
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
@@ -531,13 +528,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Task Read",
 		description:
 			"Read one task: metadata + graph context (deps, subgraph_deps, dispatched_to, execution_session, " +
-			"dependents, readiness, change history) plus optionally the long bodies. Default returns the metadata WITHOUT " +
-			"the description / completion report bodies. Load a body on demand: fields=\"description\" adds " +
-			"the task instructions, fields=\"report\" adds the completion report (avoids re-reading the " +
-			"instructions when verifying a finished item), fields=\"full\" adds both. Omitted bodies are " +
-			"reported with their size in chars, so you can judge whether a follow-up read is worth it. " +
-			"Optional version=<n>: read the archived full-content snapshot of that past version instead of " +
-			"the current record.",
+			"dependents, readiness, change history) plus optionally " +
+			"the long-form content. Reading and editing are separate: READ here (fields= loads the content); to EDIT, task_checkout prepares your draft, write/edit modifies it, and task_commit / task_submit_report commit it — content is changed ONLY through those tools, never by touching task storage directly.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the item to read (use task_list to see all items).",
@@ -545,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 			version: Type.Optional(
 				Type.Number({
 					description:
-						"Optional: read the archived full-content snapshot of this past version (a positive integer, less than the current version) instead of the current record.",
+						"Read the archived snapshot of this past version (a positive integer, less than the current version) instead of the current record.",
 				}),
 			),
 			fields: Type.Optional(
@@ -557,9 +549,10 @@ export default function (pi: ExtensionAPI) {
 					],
 					{
 						description:
-							'Optional: which long body to load in addition to the metadata. "description" = the task ' +
-							'instructions body; "report" = the completion report body; "full" = both bodies. ' +
-							'Default (omitted): metadata + graph context only; omitted bodies are reported with their size.',
+							'Which long-form content to load in addition to the metadata. If the fields parameter is ' +
+							'omitted, returns only the metadata + graph context — no long-form content (the omitted ' +
+							'content is reported by size in chars). "description" = the task ' +
+							'instructions; "report" = the completion report; "full" = both.',
 					},
 				),
 			),
@@ -567,6 +560,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate) {
 			const p = params as { id: string; version?: number; fields?: string };
 			const fields = p.fields ?? "core";
+			const me = commsName();
 			const item = store.readTask(cwd, p.id);
 			if (!item) {
 				return {
@@ -583,8 +577,7 @@ export default function (pi: ExtensionAPI) {
 				// Archived snapshot read — the item's past version as it was
 				// before it was replaced. Live-graph facts (dependents,
 				// readiness) do not apply to old versions, so they are not
-				// computed. Errors from the store (invalid / out-of-range
-				// version, missing or corrupted snapshot) propagate.
+				// computed.
 				const snap = store.readTaskVersion(cwd, p.id, p.version);
 				if (!snap) {
 					return {
@@ -612,32 +605,29 @@ export default function (pi: ExtensionAPI) {
 					lines.push(`dispatched_to: ${snap.dispatched_to.name}`);
 				}
 				if (snap.execution_session) {
-					lines.push(
-						`execution_session: ${snap.execution_session.session_id} (${snap.execution_session.session_file || "no file"}) — the worker's transcript, open it to review this execution`,
-					);
+					lines.push(`execution_session: ${snap.execution_session.session_id}`);
 				}
-				// Long bodies — loaded on demand; each read reports what was
-				// omitted and how large it is, so the caller can decide whether
-				// a follow-up read is worth it.
 				const descLen = snap.description?.length;
 				const reportLen = snap.completion_report?.length;
 				if (fields === "description") {
 					lines.push(snap.description ? `description: ${snap.description}` : "description: (none)");
 					if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="report")`);
 				} else if (fields === "report") {
-					if (snap.completion_report) lines.push(`── Completion report ──`, snap.completion_report);
+					if (snap.completion_report) lines.push(`── Completion report (for description v${snap.report_for_version ?? "?"}) ──`, snap.completion_report);
 					else lines.push("completion report: (none)");
 					if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="description")`);
 				} else if (fields === "full") {
 					if (snap.description) lines.push(`description: ${snap.description}`);
-					if (snap.completion_report) lines.push(`── Completion report ──`, snap.completion_report);
+					if (snap.completion_report) {
+						lines.push(
+							`── Completion report (for description v${snap.report_for_version ?? "?"}) ──`,
+							snap.completion_report,
+						);
+					}
 				} else {
 					if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="description")`);
 					if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="report")`);
 				}
-				// The store digests the completion report by its first line (the
-				// history entry that wrote it repeats that text) — when the report
-				// body is shown above, echoing the digest again is pure duplication.
 				const reportShown = fields === "report" || fields === "full";
 				const reportDigest =
 					reportShown && snap.completion_report
@@ -648,16 +638,16 @@ export default function (pi: ExtensionAPI) {
 						reportDigest && h.change_summary === reportDigest
 							? "(completion report digest — see the report above)"
 							: h.change_summary;
-					return `  v${h.version} ${h.updated_at} by ${h.updated_by} — ${summary}`;
+					return `  v${h.version} [${h.changed_items.join(", ") || h.event || "update"}] ${h.updated_at} by ${h.updated_by} — ${summary}`;
 				});
 				lines.push(
 					`── Change history (as of v${snap.version}) ──`,
 					historyLines.length > 0 ? historyLines.join("\n") : "  (none)",
 				);
+				const archivedIdNote = store.sanitizedIdNote(p.id);
+				if (archivedIdNote) lines.push(archivedIdNote);
 				return {
 					content: [{ type: "text" as const, text: lines.join("\n") }],
-					// item trimmed to the fields the TUI render reads — the full
-					// record would duplicate the content text in stored messages.
 					details: {
 						found: true,
 						archived: true,
@@ -687,7 +677,7 @@ export default function (pi: ExtensionAPI) {
 				readyLine = "ready: no";
 			}
 			const lines = [
-				`task_read: ${item.id} v${item.version} — ${statusLine} — by ${item.updated_by} at ${item.updated_at}`,
+				`id: ${item.id} v${item.version} — ${statusLine} — updated by ${item.updated_by} at ${item.updated_at}`,
 				`title: ${item.title}`,
 				`kind: ${item.kind}`,
 				`deps: ${item.deps.length > 0 ? item.deps.join(", ") : "(none)"}`,
@@ -695,29 +685,38 @@ export default function (pi: ExtensionAPI) {
 			if (item.subgraph_deps.length > 0) {
 				lines.push(`subgraph_deps: ${item.subgraph_deps.join(", ")} (subgraph gates — the whole subgraph waits for these)`);
 			}
+			const descLen = item.description?.length ?? 0;
+			const reportLen = item.completion_report?.length ?? 0;
 			lines.push(
 				`dispatched_to: ${item.dispatched_to ? item.dispatched_to.name : "(none)"}`,
-				`execution_session: ${item.execution_session ? `${item.execution_session.session_id} (${item.execution_session.session_file || "no file"}) — open the transcript to review how it was executed` : "(none — the worker records it at task_start)"}`,
+				`execution_session: ${item.execution_session ? `${item.execution_session.session_id}` : "(none — the worker records it at task_start)"}`,
 				`dependents: ${dependents.length > 0 ? dependents.join(", ") : "(none)"}`,
 				readyLine,
+				`description (v${item.version}): ${descLen} chars`,
+				`completion report (for description v${item.report_for_version ?? "?"}): ${reportLen} chars`,
 			);
-			// Long bodies — loaded on demand; each read reports what was
-			// omitted and how large it is, so the caller can decide whether a
-			// follow-up read is worth it.
-			const descLen = item.description?.length;
-			const reportLen = item.completion_report?.length;
+			const draftCount = callerDraftCount(item.id);
+			if (draftCount > 0) {
+				lines.push(
+					`you have ${draftCount} uncommitted draft(s) for this task`,
+				);
+			}
+			if (item.integrity_warnings && item.integrity_warnings.length > 0) {
+				for (const w of item.integrity_warnings) lines.push(`⚠ integrity: ${w}`);
+			}
+			// Long bodies — loaded on demand.
 			if (fields === "description") {
 				lines.push(item.description ? `description: ${item.description}` : "description: (none)");
 				if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}", fields="report")`);
 			} else if (fields === "report") {
-				if (item.completion_report) lines.push(`── Completion report ──`, item.completion_report);
+				if (item.completion_report) lines.push(`── Completion report (for description v${item.report_for_version ?? "?"}) ──`, item.completion_report);
 				else lines.push("completion report: (none)");
 				if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}", fields="description")`);
 			} else if (fields === "full") {
 				if (item.description) lines.push(`description: ${item.description}`);
 				if (item.completion_report) {
 					lines.push(
-						`── Completion report (written by the dispatched agent; the manager reads it before task_complete) ──`,
+						`── Completion report (for description v${item.report_for_version ?? "?"} — written by the dispatched agent; the manager reads it before task_complete) ──`,
 						item.completion_report,
 					);
 				}
@@ -726,8 +725,7 @@ export default function (pi: ExtensionAPI) {
 				if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}", fields="report")`);
 			}
 			// The store digests the completion report by its first line (the
-			// history entry that wrote it repeats that text) — when the report
-			// body is shown above, echoing the digest again is pure duplication.
+			// history entry that wrote it repeats that text).
 			const reportShown = fields === "report" || fields === "full";
 			const reportDigest =
 				reportShown && item.completion_report
@@ -738,7 +736,7 @@ export default function (pi: ExtensionAPI) {
 					reportDigest && h.change_summary === reportDigest
 						? "(completion report digest — see the report above)"
 						: h.change_summary;
-				return `  v${h.version} ${h.updated_at} by ${h.updated_by} — ${summary}`;
+				return `  v${h.version} [${h.changed_items.join(", ") || h.event || "update"}] ${h.updated_at} by ${h.updated_by} — ${summary}`;
 			});
 			lines.push(
 				`── Change history ──`,
@@ -749,16 +747,17 @@ export default function (pi: ExtensionAPI) {
 					`archived snapshots: v1..v${item.version - 1} — task_read(id, version=<n>) to read one`,
 				);
 			}
+			const idNote = store.sanitizedIdNote(p.id);
+			if (idNote) lines.push(idNote);
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
-				// item trimmed to the fields the TUI render reads — the full
-				// record would duplicate the content text in stored messages.
 				details: {
 					found: true,
 					item: { id: item.id, status: item.status, version: item.version },
 					dependents,
 					missing,
 					ready: isReady,
+					integrity_warnings: item.integrity_warnings ?? [],
 				},
 			};
 		},
@@ -970,8 +969,6 @@ export default function (pi: ExtensionAPI) {
 			const progress = (d?.progress as Record<string, number>) ?? {};
 			const n = ready.length;
 			const blocked = progress.blocked ?? 0;
-			// Compact: the ready ids matter more than the raw count — the
-			// dispatch list is what the manager acts on.
 			let text = `◻ ${n} ready`;
 			if (n > 0) {
 				const ids = (ready as { id: string }[]).slice(0, 3).map((i) => i.id);
@@ -1028,8 +1025,8 @@ export default function (pi: ExtensionAPI) {
 		cwd = ctx.cwd || process.cwd();
 
 		const ourTools = [
-			"task_create",
-			"task_update",
+			"task_commit",
+			"task_checkout",
 			"task_set_status",
 			"task_read",
 			"task_list",

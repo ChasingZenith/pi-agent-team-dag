@@ -15,10 +15,54 @@
  * inside the gated module's own subgraph (that would be a cycle), and the
  * expanded graph stays DAG-checked.
  *
- * Storage: <cwd>/.pi/tasks/<id>.toml — one TOML file per item. All spawned
- * agents share the spawner's cwd, so the whole network reads and writes the
- * same directory. PI_TASKS_DIR overrides the whole directory for tests and
- * redirection (same pattern as PI_COMMS_DIR).
+ * THREE-FILE LAYOUT — every task is THREE true-copy files (metadata, body,
+ * report) plus per-agent DRAFTS and per-version SNAPSHOTS:
+ *
+ *   .pi/tasks/
+ *   ├── <id>.toml              # ① metadata 真本 (no bodies; carries sha256 of both bodies)
+ *   ├── <id>.description.md    # ② description 真本 — frontmatter: version — ONLY commit rewrites it
+ *   ├── <id>.report.md         # ③ report 真本 — frontmatter: for_version — ONLY report/void rewrites it
+ *   ├── draft/
+ *   │   └── <cname>/           # per-agent drafts (write/edit freely; consumed by commit)
+ *   │       ├── <id>.toml              # metadata 草稿 (patch semantics)
+ *   │       ├── <id>.description.md    # description 草稿
+ *   │       └── <id>.report.md         # report 草稿
+ *   └── history/
+ *       └── <id>.v<N>/         # version N snapshot — ALSO three files, frozen at the commit
+ *           ├── metadata.toml
+ *           ├── description.md
+ *           └── report.md
+ *
+ * True copies are machine-maintained and stay clean between commits: agents
+ * edit DRAFTS, and task_commit / task_submit_report atomically validate,
+ * snapshot the replaced version (history/<id>.v<N>/ — the OLD version's
+ * exact three-file state, archived before the new one becomes visible), and
+ * write the new true copies. A commit consumes the drafts it used.
+ *
+ * BODY FORMAT — description.md and report.md carry a YAML-ish frontmatter so
+ * the files are self-describing when opened directly:
+ *   description.md: ---\nversion: <N>\n---\n\n<body>
+ *   report.md:      ---\nfor_version: <N>\n---\n\n<body>
+ * `for_version` anchors the report to the description version it was written
+ * against — after a replan the report's anchor makes the staleness visible.
+ * Drafts may carry frontmatter too (copied from a true copy); commit strips
+ * it and rebuilds it machine-side.
+ *
+ * INTEGRITY — the metadata toml stores `description_sha256` / `report_sha256`
+ * = sha256 of the exact true-copy file bytes (frontmatter included), written
+ * at commit. Reads recompute the hashes and compare: a mismatch or a missing
+ * true file surfaces as an integrity warning (tampering / outside-modification
+ * of a true copy) — the record stays readable, the warning names the file.
+ *
+ * VERSION SEMANTICS — `version` counts CONTENT revisions: +1 on every change
+ * to title / description / deps / subgraph_deps / kind (i.e. every successful
+ * task_commit). Lifecycle events (status transitions, dispatch, start) and
+ * completion reports do NOT bump the version — they append a history entry
+ * (changed_items) and update updated_at/by. Snapshots are written only on
+ * version bumps. `expected_version` (optimistic concurrency) is MANDATORY on
+ * every commit (create requires 1; updates require task_read's version) and on
+ * reports — a stale version rejects the write before anything is touched; the
+ * caller re-reads and re-bases.
  *
  * State machine — done/cancelled are terminal except reopen/undo; cancelled
  * counts as satisfied everywhere (dependents), so cancelling resolves a stuck
@@ -36,34 +80,23 @@
  * execution session (session id + JSONL transcript file, kept for
  * retrospection even after done/cancelled). Constraint beyond the table:
  * marking a node done while deps are unsatisfied is a hard error listing the
- * missing deps ("mark them done, cancel them, or update the deps").
+ * missing deps.
  *
- * Versioning: create = v1; every update/status change bumps the version, the
- * old version's trace entry (summaries only, single-lined) is pushed into
- * history (cap HISTORY_CAP), and the file is rewritten atomically
- * (.tmp + rename). Before the main file is rewritten, the REPLACED version's
- * full content is archived atomically to history/<id>.v<N>.toml (N = the
- * replaced version; no cap — full retention), so any past version stays
- * retrievable (see readTaskVersion).
+ * REOPEN/UNDO void the completion report (the work restarts) — the report
+ * true copy is reset to an empty body. The old single-TOML plan format is NOT
+ * supported (no migration): a stale file from a previous format parses but
+ * yields an empty description — the supported path is draft + task_commit.
  *
- * Optimistic concurrency: the three write functions (updateTask,
- * setTaskStatus, setCompletionReport) accept an optional expected_version —
- * when provided and the record has moved past it, the write is rejected with
- * a conflict error (both versions named) BEFORE anything is written — main
- * file and snapshot untouched; the caller re-reads and retries. Omitted =
- * last-writer-wins as before (the default for role-split writers).
- *
- * Corruption: readTask throws with the available ids; createTask
- * silently overwrites a corrupted file (last-writer-wins as repair);
- * listTasks skips corrupted files so the listing never blows up; the
- * graph layer (validateGraph) exists to inspect hand-edited damage.
+ * Corruption: readTask throws with the available ids; listTasks skips
+ * corrupted files so the listing never blows up; the graph layer
+ * (validateGraph) exists to inspect hand-edited damage.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { DepGraphCycleError } from "dependency-graph";
 import { parse } from "smol-toml";
-import { ulid } from "../comms/protocol";
 import { buildGraph, dependencyClosure, effectiveDeps, unlockedBy } from "./graph";
 
 // ---------------------------------------------------------------------------
@@ -79,20 +112,30 @@ const STATUSES: readonly TaskStatus[] = ["pending", "dispatched", "active", "don
  * (aggregation — may have a subgraph below it and need delegation). Review
  * nodes are modules too: their deps are the implementation children they
  * verify. Both kinds carry deps (ordering edges — see Task.deps); the
- * difference is executability: a unit with deps just waits for its
- * prerequisites, it is still dispatched directly to one worker. subgraph_deps
- * (subgraph gates) stay module-only — a gate is meaningless without a
- * subgraph to gate.
+ * difference is executability. subgraph_deps (subgraph gates) stay
+ * module-only — a gate is meaningless without a subgraph to gate.
  */
 export type TaskKind = "module" | "unit";
 
 const KINDS: readonly TaskKind[] = ["module", "unit"];
 
-/** One version's trace entry — summaries only; full content lives in the
- *  history/<id>.v<N>.toml snapshots (see readTaskVersion). */
+/**
+ * One change's trace entry. `changed_items` names WHAT changed in this write
+ * (a commit can change several at once): title / description / deps /
+ * subgraph_deps / kind for content commits, "status" for lifecycle events,
+ * "report" for completion-report writes. `version` is the description version
+ * the entry relates to (the new version for a content commit, the current
+ * version at event time otherwise). `event` carries the lifecycle action
+ * (dispatch / start / complete / block / cancel / status) when the entry is
+ * a status transition, else "".
+ */
 export interface TaskHistoryEntry {
-	/** The version that was replaced by this write. */
+	/** The items this write changed: title | description | deps | subgraph_deps | kind | status | report. */
+	changed_items: string[];
+	/** The description version this entry relates to. */
 	version: number;
+	/** Lifecycle action when this is a status transition, else "". */
+	event: string;
 	updated_at: string;
 	updated_by: string;
 	/** Why this write happened — deviations and corrected assumptions go here. */
@@ -104,24 +147,16 @@ export interface TaskDispatch {
 	/** Agent name — the comms identity (name IS the address: messages,
 	 *  history and the consumer are all name-anchored). */
 	name: string;
-	/** The dispatcher's agent name — who delegated this item; notified when the worker's task_start declares the start. */
+	/** The dispatcher's agent name — who delegated this item. */
 	dispatched_by: string;
 	/** The msg_id of the delegation message — the worker's task_submit_report replies to it. */
 	dispatch_msg_id: string;
 }
 
-/**
- * The worker's execution session — recorded by the WORKER itself at
- * task_start (only the executing agent knows its own pi session). Points at
- * the session transcript (JSONL) so the manager can open it and see how the
- * item was actually executed. Kept on terminal states on purpose — that is
- * exactly when retrospection happens; a reopen/undo keeps it until the next
- * start overwrites it.
- */
+/** The worker's execution session — recorded by the WORKER itself at
+ *  task_start (only the executing agent knows its own pi session). */
 export interface TaskExecutionSession {
-	/** pi session id — the session header id (uuidv7) of the worker's session file. */
 	session_id: string;
-	/** The worker's session file (JSONL transcript), relative to the shared cwd. */
 	session_file: string;
 }
 
@@ -131,33 +166,35 @@ export interface Task {
 	id: string;
 	/** Single-line title. */
 	title: string;
-	/** Free-form Markdown: acceptance criteria, numbered assumptions (A1/A2), interface contracts. */
+	/** Body of .pi/tasks/<id>.description.md — the content contract (acceptance
+	 *  criteria, numbered assumptions, interface contracts). Frontmatter stripped. */
 	description: string;
-	/** Dependency edges (deduplicated, sorted): B.deps = [A] means B depends on A having completed.
-	 *  Legal on any kind — a unit with deps waits for its prerequisites but is still executed directly. */
+	/** Dependency edges (deduplicated, sorted): B.deps = [A] means B depends on A having completed. */
 	deps: string[];
-	/** Subgraph gates (modules only, deduplicated, sorted): the whole subgraph of this
-	 *  item — itself plus everything it depends on, transitively — additionally waits
-	 *  for these ids to complete. An ordering edge, not a data dependency. Stored once
-	 *  here and expanded at read time (see lib/tasks/graph): nodes added to the subgraph
-	 *  later are gated automatically. A gate must exist and must not be inside the
-	 *  item's own subgraph (that would create a cycle at expansion). */
+	/** Subgraph gates (modules only, deduplicated, sorted). */
 	subgraph_deps: string[];
 	status: TaskStatus;
-	/** Granularity kind: "unit" (directly executable, no children — may still carry deps) or "module" (aggregation — may have a subgraph). */
 	kind: TaskKind;
+	/** Content revision — +1 on every change to title/description/deps/subgraph_deps/kind. */
 	version: number;
+	/** sha256 of the true description.md bytes (frontmatter included). */
+	description_sha256: string | null;
+	/** sha256 of the true report.md bytes. */
+	report_sha256: string | null;
 	created_at: string;
 	updated_at: string;
 	updated_by: string;
-	/** Current responsible agent — set at dispatch (status dispatched), preserved while active, cleared on done/cancelled. */
 	dispatched_to: TaskDispatch | null;
-	/** The executing agent's pi session — session id + JSONL transcript file, recorded by the worker itself at task_start (task-comms-ops), kept on terminal states for retrospection. Null until the worker starts. */
 	execution_session: TaskExecutionSession | null;
-	/** The dispatched agent's execution record — what was actually done, how it deviates from the plan (written by the worker via task_submit_report, read by the manager before task_complete). Null until reported; cleared on reopen/undo. */
+	/** Body of .pi/tasks/<id>.report.md — the worker's completion record. Null when empty. */
 	completion_report: string | null;
-	/** Past version traces, newest first. */
+	/** Past change traces, newest first. */
 	history: TaskHistoryEntry[];
+	/** ── transient (never serialized) ── */
+	/** Integrity problems found while loading the true copies (hash mismatch / missing file). */
+	integrity_warnings?: string[];
+	/** The description version the current report is anchored to (report.md frontmatter). */
+	report_for_version?: number;
 }
 
 /** One row of the task listing. */
@@ -193,17 +230,68 @@ export function tasksDir(cwd: string): string {
 	return process.env.PI_TASKS_DIR ?? join(cwd, ".pi", "tasks");
 }
 
-function taskTomlPath(cwd: string, id: string): string {
+/** The true metadata file — used by shells to report paths. */
+export function taskTomlPath(cwd: string, id: string): string {
 	return join(tasksDir(cwd), `${id}.toml`);
+}
+
+/** True description body file. */
+export function taskDescriptionPath(cwd: string, id: string): string {
+	return join(tasksDir(cwd), `${id}.description.md`);
+}
+
+/** True report body file. */
+export function taskReportPath(cwd: string, id: string): string {
+	return join(tasksDir(cwd), `${id}.report.md`);
+}
+
+/** Per-agent draft directory (draft/<cname>/). */
+export function taskDraftDir(cwd: string, cname: string): string {
+	return join(tasksDir(cwd), "draft", sanitizeAgentName(cname));
+}
+
+/** Metadata draft file for one task. */
+export function taskDraftTomlPath(cwd: string, cname: string, id: string): string {
+	return join(taskDraftDir(cwd, cname), `${id}.toml`);
+}
+
+/** Description draft file for one task. */
+export function taskDraftDescriptionPath(cwd: string, cname: string, id: string): string {
+	return join(taskDraftDir(cwd, cname), `${id}.description.md`);
+}
+
+/** Report draft file for one task. */
+export function taskDraftReportPath(cwd: string, cname: string, id: string): string {
+	return join(taskDraftDir(cwd, cname), `${id}.report.md`);
+}
+
+/** Directory holding archived version snapshots (history/). */
+function taskHistoryDir(cwd: string): string {
+	return join(tasksDir(cwd), "history");
+}
+
+/** Directory of one archived version: history/<id>.v<N>/ — three files inside. */
+function taskVersionDir(cwd: string, id: string, version: number): string {
+	return join(taskHistoryDir(cwd), `${id}.v${version}`);
+}
+
+function versionMetadataPath(cwd: string, id: string, version: number): string {
+	return join(taskVersionDir(cwd, id, version), "metadata.toml");
+}
+
+function versionDescriptionPath(cwd: string, id: string, version: number): string {
+	return join(taskVersionDir(cwd, id, version), "description.md");
+}
+
+function versionReportPath(cwd: string, id: string, version: number): string {
+	return join(taskVersionDir(cwd, id, version), "report.md");
 }
 
 /**
  * Sanitize a user-supplied task id: lowercase; illegal characters become
- * "-" (same convention as sanitizePlanId, so "Work Auth!" → "work-auth" keeps
+ * "-" (same convention as before, so "Work Auth!" → "work-auth" keeps
  * kebab-case readability); collapse runs of separators and strip leading/
- * trailing ones — "Work Auth!" and "work-auth" must never be two files.
- * Returns "" when nothing survives (caller decides: omitted ids auto-generate,
- * explicit invalid ids error).
+ * trailing ones. Returns "" when nothing survives (caller decides).
  */
 export function sanitizeTaskId(id: string): string {
 	return id
@@ -214,24 +302,75 @@ export function sanitizeTaskId(id: string): string {
 }
 
 /**
- * Auto-generated task id when the caller omits one: "task-<ulid8>". The
- * tail of the ulid (the random segment) is used, not the head (the timestamp
- * prefix) — two ids generated in the same millisecond must still differ.
+ * True if sanitizeTaskId would rewrite the given id — i.e. the raw id the
+ * agent supplied is not already clean kebab-case. Tools surface this so a
+ * caller always sees when the id they typed was normalized (e.g. "My Task!"
+ * → "my-task").
  */
-export function defaultTaskId(): string {
-	return `task-${ulid().toLowerCase().slice(-8)}`;
+export function taskIdNeedsSanitize(id: string): boolean {
+	return id !== sanitizeTaskId(id);
 }
 
-/** Resolve a caller-provided id: omitted → auto; explicit → sanitized or error. */
-function resolveTaskId(cwd: string, rawId: string | undefined): string {
-	if (!rawId || !rawId.trim()) return defaultTaskId();
-	const cleaned = sanitizeTaskId(rawId);
-	if (!cleaned) {
-		throw new Error(
-			`tasks: invalid task id "${rawId}" — use letters, digits, underscore, hyphen (e.g. "task-auth-login")`,
-		);
+/** A one-line note for a tool result when the supplied id was normalized. */
+export function sanitizedIdNote(rawId: string): string | null {
+	const clean = sanitizeTaskId(rawId);
+	if (rawId === clean) return null;
+	return `  note: id "${rawId}" was normalized to "${clean}" (kebab-case)`;
+}
+
+/** Sanitize an agent identity (--cname) into a safe draft directory name. */
+export function sanitizeAgentName(name: string): string {
+	const cleaned = name
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]/g, "-")
+		.replace(/-{2,}/g, "-")
+		.replace(/^[-_]+|[-_]+$/g, "");
+	return cleaned || "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// Body files: frontmatter + hashing
+// ---------------------------------------------------------------------------
+
+function sha256(s: string): string {
+	return createHash("sha256").update(s, "utf-8").digest("hex");
+}
+
+/** A parsed body file: frontmatter stripped, full-content hash kept. */
+export interface BodyFile {
+	body: string;
+	hash: string;
+	version?: number;
+	for_version?: number;
+}
+
+/**
+ * Split a body file into its frontmatter (a leading `---\nkey: value\n---\n`
+ * block) and the body. No frontmatter (or a malformed one) → whole content is
+ * the body. Frontmatter keys are parsed leniently (numbers may be absent).
+ */
+export function parseBodyFile(raw: string): BodyFile {
+	const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n(?:[ \t]*\r?\n)?/.exec(raw);
+	if (!m) return { body: raw, hash: sha256(raw) };
+	const kv: Record<string, string> = {};
+	for (const line of m[1].split(/\r?\n/)) {
+		const i = line.indexOf(":");
+		if (i > 0) kv[line.slice(0, i).trim()] = line.slice(i + 1).trim();
 	}
-	return cleaned;
+	return {
+		body: raw.slice(m[0].length),
+		hash: sha256(raw),
+		version: kv.version !== undefined ? Number(kv.version) : undefined,
+		for_version: kv.for_version !== undefined ? Number(kv.for_version) : undefined,
+	};
+}
+
+/** Render a body file with machine frontmatter — the canonical true-copy format. */
+function renderBodyFile(kv: Record<string, string | number>, body: string): string {
+	const head = Object.entries(kv)
+		.map(([k, v]) => `${k}: ${v}`)
+		.join("\n");
+	return `---\n${head}\n---\n\n${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,9 +379,7 @@ function resolveTaskId(cwd: string, rawId: string | undefined): string {
 
 /**
  * Escape a string for a TOML basic ("...") string: backslash and the
- * double-quote delimiter plus control characters. Used only for the rare
- * single-line strings that contain a single quote (which rules out the
- * literal '...' form) and for the `'''`-in-content multi-line fallback.
+ * double-quote delimiter plus control characters.
  */
 function tomlEscapeBasic(s: string): string {
 	let out = "";
@@ -262,13 +399,9 @@ function tomlEscapeBasic(s: string): string {
 
 /**
  * Emit one string as a TOML value, staying as close to the original text as
- * possible so agents don't have to escape quotes / backslashes:
- * - multi-line text → literal triple-quoted `'''...'''` (no escaping at all,
- *   the whole block is written verbatim with one leading newline that TOML
- *   trims); falls back to a basic `"""..."""` block only when the content
- *   itself contains `'''`;
- * - single-line text → literal `'...'` when it contains no single quote,
- *   otherwise a basic `"..."` string (escaped).
+ * possible: multi-line text → literal `'''...'''` block (one leading newline
+ * that TOML trims); falls back to a basic `"""..."""` block when the content
+ * contains `'''`; single-line → literal `'...'` unless it contains a quote.
  */
 function tomlString(s: string): string {
 	if (s.includes("\n") || s.includes("\r")) {
@@ -282,36 +415,35 @@ function tomlString(s: string): string {
 	return tomlEscapeBasic(s);
 }
 
-/** Inline TOML array of simple strings (deps, subgraph_deps ids). */
+/** Inline TOML array of simple strings. */
 function tomlArray(ids: string[]): string {
 	return ids.length ? `[ ${ids.map(tomlString).join(", ")} ]` : "[]";
 }
 
 /**
- * Serialize a task to its file form: TOML + trailing newline. Free-form text
- * (description, completion_report) is written as literal triple-quoted blocks
- * so the stored file reads verbatim — no JSON-style `\n` / `\"` / `\\`
- * escapes. All root scalar keys are emitted before any table header ([...] /
- * [[...]]), which TOML requires (a header makes every following key a member
- * of that table). Nullable fields (dispatched_to, execution_session,
- * completion_report) are omitted when null.
+ * Serialize the METADATA record to its file form (no bodies — those live in
+ * the .description.md / .report.md true copies). All root scalar keys are
+ * emitted before any table header ([...] / [[...]]), which TOML requires.
+ * Nullable fields (dispatched_to, execution_session, hashes) are omitted when
+ * null. Transient fields (integrity_warnings, report_for_version) are never
+ * serialized.
  */
-export function serializeTask(item: Task): string {
+export function serializeMetadata(item: Task): string {
 	const L: string[] = [];
 	const S = (k: string, v: string) => L.push(`${k} = ${tomlString(v)}`);
 
 	S("id", item.id);
 	S("title", item.title);
-	S("description", item.description);
 	L.push(`deps = ${tomlArray(item.deps)}`);
 	L.push(`subgraph_deps = ${tomlArray(item.subgraph_deps)}`);
 	S("status", item.status);
 	S("kind", item.kind);
 	L.push(`version = ${item.version}`);
+	if (item.description_sha256) L.push(`description_sha256 = '${item.description_sha256}'`);
+	if (item.report_sha256) L.push(`report_sha256 = '${item.report_sha256}'`);
 	S("created_at", item.created_at);
 	S("updated_at", item.updated_at);
 	S("updated_by", item.updated_by);
-	if (item.completion_report !== null) S("completion_report", item.completion_report);
 
 	if (item.dispatched_to) {
 		L.push("");
@@ -330,7 +462,9 @@ export function serializeTask(item: Task): string {
 		L.push("");
 		for (const h of item.history) {
 			L.push("[[history]]");
+			L.push(`changed_items = ${tomlArray(h.changed_items)}`);
 			L.push(`version = ${h.version}`);
+			S("event", h.event);
 			S("updated_at", h.updated_at);
 			S("updated_by", h.updated_by);
 			S("change_summary", h.change_summary);
@@ -339,9 +473,7 @@ export function serializeTask(item: Task): string {
 	return L.join("\n") + "\n";
 }
 
-/** Lenient dispatch parse: a well-shaped {name} object, else null.
- *  dispatched_by / dispatch_msg_id are lenient (missing on pre-existing
- *  files → "") — the dispatcher-notifications are best-effort. */
+/** Lenient dispatch parse: a well-shaped {name} object, else null. */
 function parseDispatch(raw: unknown): TaskDispatch | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	const a = raw as Record<string, unknown>;
@@ -353,10 +485,7 @@ function parseDispatch(raw: unknown): TaskDispatch | null {
 	};
 }
 
-/** Lenient execution-session parse: a well-shaped {session_id} object, else
- *  null (absent on pre-existing files and before the worker starts).
- *  session_file is lenient (missing → "") — a worker without a resolvable
- *  transcript still records its session id. */
+/** Lenient execution-session parse: a well-shaped {session_id} object, else null. */
 function parseExecutionSession(raw: unknown): TaskExecutionSession | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	const a = raw as Record<string, unknown>;
@@ -368,12 +497,13 @@ function parseExecutionSession(raw: unknown): TaskExecutionSession | null {
 }
 
 /**
- * Parse the TOML file form. Returns null when the structure is unusable:
- * not an object, missing/empty id or title, unknown status, missing/invalid
- * kind, non-array deps, non-integer version. Description, timestamps and
- * history are lenient (defaults); history entries that fail the shape check
- * are dropped (the trace is advisory — a stray hand edit must not block
- * reading the item).
+ * Parse the metadata TOML file form. Returns null when the structure is
+ * unusable: not an object, missing/empty id or title, unknown status,
+ * missing/invalid kind, non-array deps, non-integer version. Bodies are NOT
+ * stored in the metadata (they live in the .description.md / .report.md true
+ * copies) — description / completion_report are initialized empty and loaded
+ * by readTask. Timestamps, hashes and history are lenient; history entries
+ * that fail the shape check are dropped.
  */
 export function parseTask(raw: string): Task | null {
 	let data: unknown;
@@ -400,37 +530,52 @@ export function parseTask(raw: string): Task | null {
 	return {
 		id: d.id,
 		title: d.title,
-		description: typeof d.description === "string" ? d.description : "",
+		description: "",
 		deps: d.deps,
 		subgraph_deps: Array.isArray(d.subgraph_deps) ? d.subgraph_deps : [],
 		status: d.status as TaskStatus,
 		kind: d.kind as TaskKind,
 		version: d.version,
+		description_sha256: typeof d.description_sha256 === "string" ? d.description_sha256 : null,
+		report_sha256: typeof d.report_sha256 === "string" ? d.report_sha256 : null,
 		created_at: typeof d.created_at === "string" ? d.created_at : "",
 		updated_at: typeof d.updated_at === "string" ? d.updated_at : "",
 		updated_by: typeof d.updated_by === "string" ? d.updated_by : "unknown",
 		dispatched_to: parseDispatch(d.dispatched_to),
 		execution_session: parseExecutionSession(d.execution_session),
-		completion_report:
-			typeof d.completion_report === "string" && d.completion_report.trim() ? d.completion_report : null,
+		completion_report: null,
 		history: Array.isArray(d.history)
-			? d.history.filter((h): h is TaskHistoryEntry => {
-					if (typeof h !== "object" || h === null) return false;
-					const e = h as Record<string, unknown>;
-					return (
-						typeof e.version === "number" &&
-						Number.isInteger(e.version) &&
-						typeof e.updated_at === "string" &&
-						typeof e.updated_by === "string" &&
-						typeof e.change_summary === "string"
-					);
-				})
+			? d.history
+					.filter((h): h is Record<string, unknown> => typeof h === "object" && h !== null)
+					.map((e) => ({
+						changed_items: Array.isArray(e.changed_items)
+							? e.changed_items.filter((x): x is string => typeof x === "string")
+							: [],
+						version:
+							typeof e.version === "number" && Number.isInteger(e.version) ? e.version : 0,
+						event: typeof e.event === "string" ? e.event : "",
+						updated_at: typeof e.updated_at === "string" ? e.updated_at : "",
+						updated_by: typeof e.updated_by === "string" ? e.updated_by : "unknown",
+						change_summary: typeof e.change_summary === "string" ? e.change_summary : "",
+					}))
 			: [],
 	};
 }
 
 // ---------------------------------------------------------------------------
-// Read / write
+// Atomic writes
+// ---------------------------------------------------------------------------
+
+/** Atomically write one file (tmp + rename), creating parent directories. */
+function atomicWriteFile(path: string, content: string): void {
+	mkdirSync(join(path, ".."), { recursive: true });
+	const tmp = `${path}.tmp`;
+	writeFileSync(tmp, content, "utf-8");
+	renameSync(tmp, path);
+}
+
+// ---------------------------------------------------------------------------
+// Read
 // ---------------------------------------------------------------------------
 
 /**
@@ -445,8 +590,47 @@ function tryReadTaskFile(cwd: string, id: string): Task | null {
 }
 
 /**
+ * Load the body true copies into a parsed record. The sha256 of each file is
+ * recomputed and compared against the stored hash — a mismatch or a missing
+ * true file yields an integrity warning (transient field) naming the file.
+ * There is NO fallback body: bodies live only in the true copy files.
+ */
+function loadBodies(cwd: string, item: Task): Task {
+	const warnings: string[] = [];
+	const descPath = taskDescriptionPath(cwd, item.id);
+	if (existsSync(descPath)) {
+		const pf = parseBodyFile(readFileSync(descPath, "utf-8"));
+		item.description = pf.body;
+		if (item.description_sha256 !== null && item.description_sha256 !== pf.hash) {
+			warnings.push(
+				`${item.id}.description.md hash mismatch — stored ${item.description_sha256.slice(0, 8)}…, file ${pf.hash.slice(0, 8)}… (true copy modified outside a commit; restore from history or re-commit)`,
+			);
+		}
+	} else if (item.description_sha256 !== null) {
+		warnings.push(`${item.id}.description.md is missing — the true copy was deleted`);
+	}
+	const reportPath = taskReportPath(cwd, item.id);
+	if (existsSync(reportPath)) {
+		const pf = parseBodyFile(readFileSync(reportPath, "utf-8"));
+		item.completion_report = pf.body.trim() ? pf.body : null;
+		item.report_for_version = pf.for_version;
+		if (item.report_sha256 !== null && item.report_sha256 !== pf.hash) {
+			warnings.push(
+				`${item.id}.report.md hash mismatch — stored ${item.report_sha256.slice(0, 8)}…, file ${pf.hash.slice(0, 8)}… (true copy modified outside a commit; restore from history or re-commit)`,
+			);
+		}
+	} else if (item.report_sha256 !== null) {
+		warnings.push(`${item.id}.report.md is missing — the true copy was deleted`);
+	}
+	if (warnings.length > 0) item.integrity_warnings = warnings;
+	return item;
+}
+
+/**
  * Read a task. Returns null when the item does not exist; throws with
- * the list of available ids when the file is corrupted.
+ * the list of available ids when the file is corrupted. Body true copies are
+ * loaded (frontmatter stripped); integrity warnings are set when a body hash
+ * mismatch or a missing body file is found.
  */
 export function readTask(cwd: string, id: string): Task | null {
 	const clean = sanitizeTaskId(id);
@@ -459,17 +643,17 @@ export function readTask(cwd: string, id: string): Task | null {
 			`tasks: task "${clean}" is corrupted (malformed TOML or missing fields) — available tasks: ${available}`,
 		);
 	}
-	return item;
+	return loadBodies(cwd, item);
 }
 
 /**
- * Read the archived full-content snapshot of a past version from
- * history/<id>.v<N>.toml. Returns null when the TASK does not exist (same
- * contract as readTask, so callers reuse their found/not-found paths).
- * Throws for: non-positive-integer version; version >= current (read the
- * live record instead); no snapshot for the version (the item was created
- * before snapshotting, or the snapshot is gone); a corrupted snapshot — each
- * error names the archived versions that do exist.
+ * Read the archived snapshot of a past version from history/<id>.v<N>/ —
+ * three files (metadata.toml + description.md + report.md), the exact true
+ * state at the moment the version was replaced. Returns null when the TASK
+ * does not exist (same contract as readTask). Throws for: non-positive
+ * version; version >= current (read the live record instead); a version
+ * without a snapshot (never committed / snapshot gone); a corrupted snapshot
+ * — errors name the archived versions that do exist.
  */
 export function readTaskVersion(cwd: string, id: string, version: number): Task | null {
 	const clean = sanitizeTaskId(id);
@@ -485,104 +669,143 @@ export function readTaskVersion(cwd: string, id: string, version: number): Task 
 				(archived.length > 0 ? ` — archived versions: ${archived.join(", ")}` : ""),
 		);
 	}
-	const p = taskVersionTomlPath(cwd, clean, version);
-	if (!existsSync(p)) {
+	const dir = taskVersionDir(cwd, clean, version);
+	if (!existsSync(dir)) {
 		const archived = archivedVersions(cwd, clean);
 		throw new Error(
 			`tasks: "${clean}" has no snapshot for version ${version} — snapshots start at the first change made after this feature shipped` +
 				(archived.length > 0 ? ` — archived versions: ${archived.join(", ")}` : ""),
 		);
 	}
-	const item = parseTask(readFileSync(p, "utf-8"));
+	const metaPath = versionMetadataPath(cwd, clean, version);
+	if (!existsSync(metaPath)) {
+		throw new Error(
+			`tasks: snapshot for "${clean}" v${version} is missing metadata.toml — archived versions: ${archivedVersions(cwd, clean).join(", ") || "(none)"}`,
+		);
+	}
+	const item = parseTask(readFileSync(metaPath, "utf-8"));
 	if (!item) {
 		throw new Error(
 			`tasks: snapshot for "${clean}" v${version} is corrupted (malformed TOML or missing fields) — archived versions: ${archivedVersions(cwd, clean).join(", ") || "(none)"}`,
 		);
 	}
+	const descPath = versionDescriptionPath(cwd, clean, version);
+	if (existsSync(descPath)) {
+		item.description = parseBodyFile(readFileSync(descPath, "utf-8")).body;
+	}
+	const reportPath = versionReportPath(cwd, clean, version);
+	if (existsSync(reportPath)) {
+		const pf = parseBodyFile(readFileSync(reportPath, "utf-8"));
+		item.completion_report = pf.body.trim() ? pf.body : null;
+		item.report_for_version = pf.for_version;
+	}
 	return item;
-}
-
-/** Atomically write the .toml file (tmp + rename). */
-function atomicWriteTask(cwd: string, id: string, item: Task): void {
-	const tomlPath = taskTomlPath(cwd, id);
-	const tmp = `${tomlPath}.tmp`;
-	writeFileSync(tmp, serializeTask(item), "utf-8");
-	renameSync(tmp, tomlPath);
-}
-
-// ---------------------------------------------------------------------------
-// Version snapshots (history/)
-// ---------------------------------------------------------------------------
-
-/** Directory holding archived full-content snapshots (history/<id>.v<N>.toml). */
-function taskHistoryDir(cwd: string): string {
-	return join(tasksDir(cwd), "history");
-}
-
-/** Path of the archived snapshot for one version of one item. */
-function taskVersionTomlPath(cwd: string, id: string, version: number): string {
-	return join(taskHistoryDir(cwd), `${id}.v${version}.toml`);
-}
-
-/**
- * Archive the old version's FULL content before it is replaced (atomic,
- * no cap — full retention). The snapshot is self-contained: it keeps the
- * history chain it carried at the time, so it round-trips through parseTask
- * unchanged. Written BEFORE the main file is rewritten — the old version must
- * be durable before the new one becomes visible.
- */
-function writeTaskSnapshot(cwd: string, existing: Task): void {
-	const p = taskVersionTomlPath(cwd, existing.id, existing.version);
-	const tmp = `${p}.tmp`;
-	mkdirSync(taskHistoryDir(cwd), { recursive: true });
-	writeFileSync(tmp, serializeTask(existing), "utf-8");
-	renameSync(tmp, p);
 }
 
 /** Sorted list of archived version numbers for one id (readdir-based truth). */
 function archivedVersions(cwd: string, id: string): number[] {
 	const dir = taskHistoryDir(cwd);
 	if (!existsSync(dir)) return [];
-	return readdirSync(dir)
-		.filter((f) => f.startsWith(`${id}.v`) && f.endsWith(".toml"))
-		.map((f) => Number(f.slice(`${id}.v`.length, -".toml".length)))
+	return readdirSync(dir, { withFileTypes: true })
+		.filter((e) => e.isDirectory() && e.name.startsWith(`${id}.v`))
+		.map((e) => Number(e.name.slice(`${id}.v`.length)))
 		.filter((n) => Number.isInteger(n) && n >= 1)
 		.sort((a, b) => a - b);
 }
 
 /**
- * Build the next version of a task: the replaced version's FULL content is
- * first archived to history/<id>.v<N>.toml (see writeTaskSnapshot), then
- * version+1 with the old version's trace entry (summaries only, single-lined)
- * pushed into history (cap HISTORY_CAP), timestamps and author updated.
- * Shared by updateTask, setTaskStatus and setCompletionReport — all three
- * validate before calling (legal transitions, deps existence, no cycles), so
- * snapshots are written only for successful mutations. A snapshot failure
- * aborts the mutation: the main file is untouched.
+ * Archive the current true state as version N's snapshot — three files under
+ * history/<id>.v<N>/, written BEFORE the live record changes (the old version
+ * must be durable before the new one becomes visible). The snapshot metadata
+ * carries the sha256 of its own body files, so every version is independently
+ * verifiable.
  */
-function bump(
-	cwd: string,
-	existing: Task,
-	patch: Partial<Pick<Task, "title" | "description" | "deps" | "subgraph_deps" | "kind" | "status" | "dispatched_to" | "execution_session" | "completion_report">>,
-	summary: string,
-	updatedBy: string,
-	now: string,
-): Task {
-	writeTaskSnapshot(cwd, existing);
-	const entry: TaskHistoryEntry = {
-		version: existing.version,
-		updated_at: existing.updated_at,
-		updated_by: existing.updated_by,
-		change_summary: summary.replace(/\s+/g, " ").trim(),
+function writeTaskSnapshot(cwd: string, item: Task): void {
+	const descContent = renderBodyFile({ version: item.version }, item.description);
+	const reportContent = renderBodyFile({ for_version: item.version }, item.completion_report ?? "");
+	const meta: Task = {
+		...item,
+		description: "",
+		completion_report: null,
+		description_sha256: sha256(descContent),
+		report_sha256: sha256(reportContent),
 	};
-	return {
-		...existing,
-		...patch,
-		version: existing.version + 1,
-		updated_at: now,
-		updated_by: updatedBy,
-		history: [entry, ...existing.history].slice(0, HISTORY_CAP),
-	};
+	delete (meta as Partial<Task>).integrity_warnings;
+	delete (meta as Partial<Task>).report_for_version;
+	atomicWriteFile(versionMetadataPath(cwd, item.id, item.version), serializeMetadata(meta));
+	atomicWriteFile(versionDescriptionPath(cwd, item.id, item.version), descContent);
+	atomicWriteFile(versionReportPath(cwd, item.id, item.version), reportContent);
+}
+
+/**
+ * Write the metadata toml + description.md true copy for a NEW record state.
+ * description_sha256 is recomputed from the description.md bytes just written;
+ * report_sha256 comes from the caller (the report.md file is NOT touched
+ * here — a plain content commit must not disturb an existing report anchor).
+ */
+function writeMetadataAndDescription(cwd: string, item: Task): void {
+	const descContent = renderBodyFile({ version: item.version }, item.description);
+	atomicWriteFile(taskTomlPath(cwd, item.id), serializeMetadata({ ...item, description_sha256: sha256(descContent) }));
+	atomicWriteFile(taskDescriptionPath(cwd, item.id), descContent);
+}
+
+/** Delete consumed draft files (best effort). */
+function consumeDrafts(paths: string[]): string[] {
+	const consumed: string[] = [];
+	for (const p of paths) {
+		try {
+			unlinkSync(p);
+			consumed.push(p);
+		} catch {
+			// best effort — a stray draft must not fail the commit
+		}
+	}
+	return consumed;
+}
+
+// ---------------------------------------------------------------------------
+// Draft metadata parsing (patch semantics)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a metadata DRAFT toml. Patch semantics: only the fields present in the
+ * draft change — title / deps / subgraph_deps / kind; absent fields keep their
+ * current value (update) or default (create). Machine-managed fields (status,
+ * version, history, timestamps, hashes, dispatched_to, execution_session) are
+ * ignored if present — they can only be changed by their dedicated tools. An
+ * `id` in the draft must resolve to the committed task id.
+ */
+function parseDraftToml(cwd: string, path: string, cleanId: string): {
+	title?: string;
+	deps?: string[];
+	subgraph_deps?: string[];
+	kind?: TaskKind;
+} {
+	let data: unknown;
+	try {
+		data = parse(readFileSync(path, "utf-8"));
+	} catch {
+		throw new Error(
+			`tasks: draft ${relative(cwd, path)} is malformed TOML — fix it and retry`,
+		);
+	}
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		throw new Error(`tasks: draft ${relative(cwd, path)} must be a TOML table`);
+	}
+	const d = data as Record<string, unknown>;
+	if (typeof d.id === "string" && sanitizeTaskId(d.id) !== cleanId) {
+		throw new Error(
+			`tasks: draft id "${d.id}" does not match task "${cleanId}" — fix the draft or the task id`,
+		);
+	}
+	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind } = {};
+	if (typeof d.title === "string") out.title = d.title;
+	if (Array.isArray(d.deps) && d.deps.every((x) => typeof x === "string")) out.deps = d.deps;
+	if (Array.isArray(d.subgraph_deps) && d.subgraph_deps.every((x) => typeof x === "string")) {
+		out.subgraph_deps = d.subgraph_deps;
+	}
+	if (typeof d.kind === "string") out.kind = d.kind as TaskKind;
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,10 +813,9 @@ function bump(
 // ---------------------------------------------------------------------------
 
 /**
- * Normalize a caller-provided dep list: sanitize each id (same rules as the
- * item id), deduplicate, sort — the stored array is deterministic regardless
- * of input order. Every dep must resolve to an existing item; a dep that is
- * the item's own id is a self-loop and rejected with the cycle error format.
+ * Normalize a caller-provided dep list: sanitize each id, deduplicate, sort.
+ * Every dep must resolve to an existing item; a dep that is the item's own id
+ * is a self-loop and rejected with the cycle error format.
  */
 function normalizeDeps(cwd: string, itemId: string, rawDeps: string[]): string[] {
 	const deps = [...new Set(rawDeps.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
@@ -615,9 +837,8 @@ function normalizeDeps(cwd: string, itemId: string, rawDeps: string[]): string[]
  * Normalize a caller-provided subgraph_deps (subgraph gate) list: sanitize each
  * id, deduplicate, sort. Every gate must resolve to an existing item.
  * The remaining gate constraints — not the module itself, not inside its own
- * subgraph — are checked by assertSubgraphDepOutsideSubgraph (needs the graph); cycles
- * that only arise BETWEEN gates (A gates B while B gates A) are caught by
- * assertNoCycle, which validates the expanded graph.
+ * subgraph — are checked by assertSubgraphDepOutsideSubgraph; cycles that only
+ * arise BETWEEN gates are caught by assertNoCycle.
  */
 function normalizeSubgraphDeps(cwd: string, rawGates: string[]): string[] {
 	const gates = [...new Set(rawGates.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
@@ -634,11 +855,8 @@ function normalizeSubgraphDeps(cwd: string, rawGates: string[]): string[] {
 
 /**
  * A gate on the module itself or on anything inside its own subgraph would
- * create a self-loop at expansion time (every subgraph node, the gate included,
- * would depend on the gate) — rejected here with the cycle teaching. The check
- * runs on an overlay of the item's NEW deps (deps define the subgraph; gates do
- * not extend it), so a deps change that moves a gate inside the subgraph is
- * caught on update too. Cross-gate cycles are left to assertNoCycle.
+ * create a self-loop at expansion time — rejected here with the cycle
+ * teaching. Cross-gate cycles are left to assertNoCycle.
  */
 function assertSubgraphDepOutsideSubgraph(cwd: string, itemId: string, deps: string[], gates: string[]): void {
 	if (gates.length === 0) return;
@@ -657,7 +875,7 @@ function assertSubgraphDepOutsideSubgraph(cwd: string, itemId: string, deps: str
 	}
 }
 
-/** All parseable items in the directory, sorted by id. */
+/** All parseable items in the directory (metadata only, no bodies), sorted by id. */
 function loadAllItems(cwd: string): Task[] {
 	const items: Task[] = [];
 	for (const summary of listTasks(cwd)) {
@@ -671,10 +889,8 @@ function loadAllItems(cwd: string): Task[] {
  * Reject writes that would close a cycle: build a DepGraph over the existing
  * items with the target item's (new) deps and subgraph_deps overlaid, then run
  * the library's cycle check and translate its error into the friendly form.
- * The graph is built with subgraph_deps expanded (see lib/tasks/graph), so this
- * also catches cycles that only arise between gates — e.g. A gates on B while
- * B gates on A — which the per-item subgraph check cannot see. The check runs
- * on the in-memory overlay — nothing is written by it.
+ * The graph is built with subgraph_deps expanded, so cross-gate cycles are
+ * caught too. The check runs on the in-memory overlay — nothing is written.
  */
 function assertNoCycle(cwd: string, itemId: string, deps: string[], moduleDeps: string[] = []): void {
 	const items = loadAllItems(cwd);
@@ -702,17 +918,10 @@ function assertNoCycle(cwd: string, itemId: string, deps: string[], moduleDeps: 
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Create / update / status
-// ---------------------------------------------------------------------------
-
 /**
  * Resolve the granularity kind: default "unit"; rejects unknown values and
  * the contradiction "unit with subgraph_deps". deps are ordering edges and
- * legal on ANY kind — a unit with deps waits for its prerequisites but is
- * still directly executable (no delegation). subgraph_deps (subgraph gates)
- * remain module-only — a gate is meaningless without a subgraph to gate, so
- * neither a plain unit nor a unit flipped from module may carry gates.
+ * legal on ANY kind; subgraph_deps (subgraph gates) remain module-only.
  */
 function resolveKind(raw: TaskKind | undefined, deps: string[], moduleDeps: string[] = []): TaskKind {
 	const kind = raw ?? "unit";
@@ -727,135 +936,234 @@ function resolveKind(raw: TaskKind | undefined, deps: string[], moduleDeps: stri
 	return kind;
 }
 
+// ---------------------------------------------------------------------------
+// Commit (create / content update) — task_commit
+// ---------------------------------------------------------------------------
+
+export type SubmitScope = "metadata" | "description" | "all";
+
+/** What a commit consumed / produced — for the shell's result text. */
+export interface CommitResult {
+	item: Task;
+	/** True when this commit CREATED the task (v1) rather than updating it. */
+	created: boolean;
+	/** The fields this commit changed (title | description | deps | subgraph_deps | kind; ["created"] on create). */
+	changed_items: string[];
+	/** Draft files consumed (deleted) by this commit, cwd-relative. */
+	consumed: string[];
+}
+
 /**
- * Create a task (v1, status "pending"). deps are normalized (sanitize +
- * dedupe + sort) and every dep must already exist; cycles (including
- * self-dependency) are rejected before anything is written. subgraph_deps
- * (subgraph gates, modules only) are normalized the same way: every gate must
- * exist, gates inside the module's own subgraph are rejected, and the expanded
- * graph stays cycle-free (cross-gate cycles included).
+ * THE single content write: creates or updates a task from the caller's
+ * drafts under draft/<cname>/. Patch semantics: the metadata draft carries
+ * only the fields to change (absent = keep / default); the description draft
+ * (frontmatter tolerated, stripped) is the new description body. Every
+ * successful commit is a new version (+1) and archives the replaced version
+ * as history/<id>.v<N>/ (three files) BEFORE writing the new true copies.
  *
- * A file already at the target path is an ERROR (update it instead) — except
- * a corrupted one, which this create silently overwrites (last-writer-wins
- * as repair, same as writePlan).
+ * Create (no existing task): the metadata draft is REQUIRED with id/title;
+ * deps/subgraph_deps/kind optional. expected_version must be 1 (v1).
+ * Update (existing task): expected_version is REQUIRED (= the version
+ * task_read returned) — a stale version rejects the write before anything is
+ * touched. Nothing changed (no draft, or drafts identical to the true copies)
+ * is rejected. Consumed drafts are deleted.
+ *
+ * Validation mirrors the old create/update tools: deps and gates must exist,
+ * gates must sit outside the module's own subgraph, the expanded graph must
+ * stay acyclic, kind must be legal and consistent with gates.
  */
-export function createTask(
-	cwd: string,
-	opts: {
-		id?: string;
-		title: string;
-		description?: string;
-		deps?: string[];
-		subgraph_deps?: string[];
-		kind?: TaskKind;
-		change_summary?: string;
-		updated_by?: string;
-	},
-): Task {
-	const id = resolveTaskId(cwd, opts.id);
-	const title = opts.title?.trim() ?? "";
-	if (!title) throw new Error("tasks: task title is required");
-
-	const dir = tasksDir(cwd);
-	mkdirSync(dir, { recursive: true });
-	if (tryReadTaskFile(cwd, id)) {
-		throw new Error(`tasks: task "${id}" already exists — update it instead`);
-	}
-
-	const deps = normalizeDeps(cwd, id, opts.deps ?? []);
-	const moduleDeps = normalizeSubgraphDeps(cwd, opts.subgraph_deps ?? []);
-	assertSubgraphDepOutsideSubgraph(cwd, id, deps, moduleDeps);
-	assertNoCycle(cwd, id, deps, moduleDeps);
-	const kind = resolveKind(opts.kind, deps, moduleDeps);
-
-	const now = new Date().toISOString();
-	const item: Task = {
-		id,
-		title,
-		description: opts.description ?? "",
-		deps,
-		subgraph_deps: moduleDeps,
-		status: "pending",
-		kind,
-		version: 1,
-		created_at: now,
-		updated_at: now,
-		updated_by: opts.updated_by ?? "unknown",
-		dispatched_to: null,
-		execution_session: null,
-		completion_report: null,
-		history: [],
-	};
-	atomicWriteTask(cwd, id, item);
-	return item;
-}
-
-/**
- * Optimistic-concurrency guard shared by all three write functions: when the
- * caller supplied an expected_version and the record has moved past it, throw
- * BEFORE anything is written — main file and snapshot both stay untouched.
- * Omitted expected_version = last-writer-wins as before.
- */
-function assertExpectedVersion(id: string, currentVersion: number, expectedVersion: number | undefined): void {
-	if (expectedVersion !== undefined && currentVersion !== expectedVersion) {
-		throw new Error(
-			`tasks: conflict on "${id}" — expected version ${expectedVersion}, current version ${currentVersion} (concurrent update); re-read the node and retry`,
-		);
-	}
-}
-
-/**
- * Update a task's metadata (title/description/deps/subgraph_deps). Version
- * bumps +1 with the old version's trace entry pushed into history. deps and
- * subgraph_deps are validated exactly like create (existence, gates outside the
- * subgraph, no cycles — cross-gate cycles included). Omitting subgraph_deps
- * keeps the current value; [] clears the gates.
- */
-export function updateTask(
+export function commitTask(
 	cwd: string,
 	id: string,
 	opts: {
-		title?: string;
-		description?: string;
-		deps?: string[];
-		subgraph_deps?: string[];
-		kind?: TaskKind;
+		scope: SubmitScope;
+		/** The committing agent's identity (--cname) — locates draft/<cname>/. */
+		cname: string;
 		change_summary?: string;
 		updated_by?: string;
-		/** Optimistic concurrency: the version the caller read — the write fails
-		 *  with a conflict error if the record has moved past it (re-read and
-		 *  retry). Omitted = last-writer-wins. */
-		expected_version?: number;
+		/** REQUIRED — for an update it is task_read's version; for a create it must be 1 (v1). */
+		expected_version: number;
 	},
-): Task {
+): CommitResult {
 	const clean = sanitizeTaskId(id);
-	const existing = readTask(cwd, clean);
-	if (!existing) {
-		throw new Error(`tasks: task "${clean}" does not exist — create it with task_create first`);
+	if (!clean) {
+		throw new Error(
+			`tasks: invalid task id "${id}" — use letters, digits, underscore, hyphen (e.g. "task-auth-login")`,
+		);
 	}
-	assertExpectedVersion(clean, existing.version, opts.expected_version);
+	const existing = readTask(cwd, clean);
+	const draftToml = taskDraftTomlPath(cwd, opts.cname, clean);
+	const draftDesc = taskDraftDescriptionPath(cwd, opts.cname, clean);
 
-	const title = opts.title !== undefined ? opts.title.trim() : existing.title;
-	if (!title) throw new Error("tasks: task title is required");
-	const deps = opts.deps !== undefined ? normalizeDeps(cwd, clean, opts.deps) : existing.deps;
-	const moduleDeps =
-		opts.subgraph_deps !== undefined ? normalizeSubgraphDeps(cwd, opts.subgraph_deps) : existing.subgraph_deps;
-	assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
-	assertNoCycle(cwd, clean, deps, moduleDeps);
-	const kind = resolveKind(opts.kind ?? existing.kind, deps, moduleDeps);
+	// expected_version is MANDATORY and must equal the version the item is at:
+	// 1 for a new item (creation always starts at v1), existing.version otherwise
+	// (optimistic concurrency — a stale value rejects the write before anything
+	// is touched). One unified check covers create and update.
+	if (opts.expected_version !== (existing ? existing.version : 1)) {
+		throw new Error(
+			existing
+				? `tasks: conflict on "${clean}" — expected version ${opts.expected_version}, current version ${existing.version} (concurrent commit); re-read the task and merge your changes into your draft, then retry`
+				: `tasks: creating "${clean}" must specify expected_version=1 (a new task is always created at v1)`,
+		);
+	}
+
+	// ── CREATE ────────────────────────────────────────────────────────────────
+	if (!existing) {
+		if (opts.scope === "description") {
+			throw new Error(
+				`tasks: cannot create "${clean}" with scope="description" — creation needs the metadata draft (id + title); use scope="all" or scope="metadata"`,
+			);
+		}
+		if (!existsSync(draftToml)) {
+			throw new Error(
+				`tasks: creating "${clean}" needs a metadata draft at ${relative(cwd, draftToml)} — write it first (id + title required; deps/subgraph_deps/kind optional), then task_commit`,
+			);
+		}
+		const draft = parseDraftToml(cwd, draftToml, clean);
+		const title = draft.title?.trim() ?? "";
+		if (!title) {
+			throw new Error(
+				`tasks: draft ${relative(cwd, draftToml)} is missing title — write title = '...' (required for creation)`,
+			);
+		}
+		const deps = normalizeDeps(cwd, clean, draft.deps ?? []);
+		const moduleDeps = normalizeSubgraphDeps(cwd, draft.subgraph_deps ?? []);
+		assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
+		assertNoCycle(cwd, clean, deps, moduleDeps);
+		const kind = resolveKind(draft.kind, deps, moduleDeps);
+		const description = existsSync(draftDesc)
+			? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
+			: "";
+		const now = new Date().toISOString();
+		const item: Task = {
+			id: clean,
+			title,
+			description,
+			deps,
+			subgraph_deps: moduleDeps,
+			status: "pending",
+			kind,
+			version: 1,
+			description_sha256: null,
+			report_sha256: null,
+			created_at: now,
+			updated_at: now,
+			updated_by: opts.updated_by ?? "unknown",
+			dispatched_to: null,
+			execution_session: null,
+			completion_report: null,
+			history: [],
+		};
+		// snapshot v1 (so every version is archivable), then the true copies.
+		writeTaskSnapshot(cwd, item);
+		writeMetadataAndDescription(cwd, item);
+		// empty report stub, uniform three-file layout.
+		const reportContent = renderBodyFile({ for_version: 1 }, "");
+		atomicWriteFile(taskReportPath(cwd, clean), reportContent);
+		// metadata must carry the report hash too — rewrite after the stub exists.
+		atomicWriteFile(
+			taskTomlPath(cwd, clean),
+			serializeMetadata({ ...item, description_sha256: sha256(renderBodyFile({ version: 1 }, description)), report_sha256: sha256(reportContent) }),
+		);
+		const consumed = consumeDrafts([draftToml, ...(existsSync(draftDesc) ? [draftDesc] : [])]);
+		return {
+			item: readTask(cwd, clean) ?? item,
+			created: true,
+			changed_items: ["created"],
+			consumed: consumed.map((p) => relative(cwd, p)),
+		};
+	}
+
+	// ── UPDATE ────────────────────────────────────────────────────────────────
+	const metaScope = opts.scope === "metadata" || opts.scope === "all";
+	const descScope = opts.scope === "description" || opts.scope === "all";
+	const draftPresent = existsSync(draftToml);
+
+	let title = existing.title;
+	let deps = existing.deps;
+	let moduleDeps = existing.subgraph_deps;
+	let kind = existing.kind;
+	if (metaScope && draftPresent) {
+		const patch = parseDraftToml(cwd, draftToml, clean);
+		if (patch.title !== undefined) {
+			if (!patch.title.trim()) {
+				throw new Error(`tasks: draft title for "${clean}" is empty — provide a non-empty title or omit the field`);
+			}
+			title = patch.title.trim();
+		}
+		if (patch.deps !== undefined) deps = normalizeDeps(cwd, clean, patch.deps);
+		if (patch.subgraph_deps !== undefined) moduleDeps = normalizeSubgraphDeps(cwd, patch.subgraph_deps);
+		if (patch.kind !== undefined) kind = patch.kind;
+		if (patch.deps !== undefined || patch.subgraph_deps !== undefined) {
+			assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
+			assertNoCycle(cwd, clean, deps, moduleDeps);
+		}
+		kind = resolveKind(kind, deps, moduleDeps);
+	}
+
+	const description = descScope && existsSync(draftDesc)
+		? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
+		: existing.description;
+
+	const changed: string[] = [];
+	if (title !== existing.title) changed.push("title");
+	if (deps.join("|") !== existing.deps.join("|")) changed.push("deps");
+	if (moduleDeps.join("|") !== existing.subgraph_deps.join("|")) changed.push("subgraph_deps");
+	if (kind !== existing.kind) changed.push("kind");
+	if (description !== existing.description) changed.push("description");
+	if (changed.length === 0) {
+		throw new Error(
+			`tasks: task_commit "${clean}": no changes to commit — draft content is identical to v${existing.version}; nothing to do`,
+		);
+	}
 
 	const now = new Date().toISOString();
-	const item = bump(
-		cwd,
-		existing,
-		{ title, description: opts.description ?? existing.description, deps, subgraph_deps: moduleDeps, kind },
-		opts.change_summary?.trim() || "updated",
-		opts.updated_by || "unknown",
-		now,
-	);
-	atomicWriteTask(cwd, clean, item);
-	return item;
+	const updatedBy = opts.updated_by ?? "unknown";
+	const newVersion = existing.version + 1;
+	const newItem: Task = {
+		...existing,
+		title,
+		deps,
+		subgraph_deps: moduleDeps,
+		kind,
+		description,
+		version: newVersion,
+		updated_at: now,
+		updated_by: updatedBy,
+		history: [
+			{
+				changed_items: changed,
+				version: newVersion,
+				event: "",
+				updated_at: now,
+				updated_by: updatedBy,
+				change_summary: opts.change_summary?.trim() || `updated: ${changed.join(", ")}`,
+			},
+			...existing.history,
+		].slice(0, HISTORY_CAP),
+	};
+	delete (newItem as Partial<Task>).integrity_warnings;
+	delete (newItem as Partial<Task>).report_for_version;
+
+	// old version durable before the new one becomes visible
+	writeTaskSnapshot(cwd, existing);
+	writeMetadataAndDescription(cwd, newItem);
+
+	const consumed = consumeDrafts([
+		...(metaScope && draftPresent ? [draftToml] : []),
+		...(descScope && existsSync(draftDesc) ? [draftDesc] : []),
+	]);
+	return {
+		item: readTask(cwd, clean) ?? newItem,
+		created: false,
+		changed_items: changed,
+		consumed: consumed.map((p) => relative(cwd, p)),
+	};
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle (status) — no version bump
+// ---------------------------------------------------------------------------
 
 /** Legal next statuses per current status (see the state machine in the header). */
 const LEGAL_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -878,15 +1186,22 @@ const TRANSITION_HINTS: Record<TaskStatus, string> = {
 };
 
 /**
- * Transition a task's status (version bump + history entry). Hard rules:
+ * Transition a task's status — a LIFECYCLE event: the version is NOT bumped
+ * and no snapshot is written; the transition appends a history entry
+ * (changed_items = ["status"], event = the action) and updates
+ * updated_at/updated_by. Hard rules:
  * - the transition must be legal (see the state machine in the header);
  * - a node can only be marked done when ALL deps are done/cancelled —
  *   otherwise the error lists the missing deps and teaches the remedies.
+ * - dispatched_to is recorded on dispatch, cleared on done/cancelled;
+ *   execution_session is recorded on active (start);
+ * - reopen (done → active) / undo (cancelled → pending) void the completion
+ *   report (the work restarts): the report true copy resets to an empty body
+ *   (for_version = the current description version) and the stored hash is
+ *   updated to match.
  *
  * Returns the stored item plus one computed (never persisted) result:
- * - unlocked: ids that marking this item done (or cancelled — cancelled also
- *   satisfies) newly makes ready — computed from the pre-write snapshot so
- *   "newly" is accurate (nodes already ready are excluded).
+ * unlocked — ids that marking this item done (or cancelled) newly makes ready.
  */
 export function setTaskStatus(
 	cwd: string,
@@ -899,18 +1214,15 @@ export function setTaskStatus(
 		dispatched_to?: TaskDispatch | null;
 		/** Record the worker's execution session when setting active (start). */
 		execution_session?: TaskExecutionSession | null;
-		/** Optimistic concurrency: the version the caller read — the write fails
-		 *  with a conflict error if the record has moved past it (re-read and
-		 *  retry). Omitted = last-writer-wins. */
-		expected_version?: number;
+		/** Lifecycle action name for the history entry (dispatch / start / complete / block / cancel / status). */
+		event?: string;
 	} = {},
 ): { item: Task; unlocked: string[] } {
 	const clean = sanitizeTaskId(id);
 	const existing = readTask(cwd, clean);
 	if (!existing) {
-		throw new Error(`tasks: task "${clean}" does not exist — create it with task_create first`);
+		throw new Error(`tasks: task "${clean}" does not exist — create it first (write a draft and task_commit)`);
 	}
-	assertExpectedVersion(clean, existing.version, opts.expected_version);
 	if (!LEGAL_TRANSITIONS[existing.status].includes(status)) {
 		throw new Error(
 			`tasks: cannot transition "${clean}" from "${existing.status}" to "${status}" — legal transitions: ${TRANSITION_HINTS[existing.status]}`,
@@ -927,8 +1239,8 @@ export function setTaskStatus(
 		);
 	}
 
-	// Snapshot BEFORE the write: the unlocked set is "what THIS change newly
-	// unlocks", which requires the pre-change state (id not yet satisfied).
+	// Snapshot the graph BEFORE the write: the unlocked set is "what THIS
+	// change newly unlocks", which requires the pre-change state.
 	const preItems = loadAllItems(cwd);
 	if (status === "done") {
 		const byId = new Map(preItems.map((i) => [i.id, i]));
@@ -949,12 +1261,8 @@ export function setTaskStatus(
 	const now = new Date().toISOString();
 	const patch: Partial<Pick<Task, "status" | "dispatched_to" | "execution_session" | "completion_report">> = { status };
 	if (status === "dispatched" && opts.dispatched_to) {
-		// normalize: dispatched_by / dispatch_msg_id default to "" — only
-		// task_dispatch knows the dispatcher and the delegation msg_id; a
-		// bare set_status dispatch has neither (no one to notify, no
-		// message to reply to)
 		patch.dispatched_to = {
-			...opts.dispatched_to,
+			name: opts.dispatched_to.name,
 			dispatched_by: opts.dispatched_to.dispatched_by ?? "",
 			dispatch_msg_id: opts.dispatched_to.dispatch_msg_id ?? "",
 		};
@@ -964,79 +1272,95 @@ export function setTaskStatus(
 	}
 	if (status === "active" && opts.execution_session) {
 		// start records the worker's execution session — kept on terminal
-		// states for retrospection (unlike dispatched_to, never cleared here);
-		// a reopen/undo keeps it until the next start overwrites it
+		// states for retrospection; a reopen/undo keeps it until the next start
 		patch.execution_session = {
 			session_id: opts.execution_session.session_id ?? "",
 			session_file: opts.execution_session.session_file ?? "",
 		};
 	}
-	// reopen (done → active) / undo (cancelled → pending) restart the work —
-	// the old completion report no longer applies, so it is voided
-	if (
+	// reopen / undo restart the work — the old completion report no longer applies
+	const reopenUndo =
 		(existing.status === "done" && status === "active") ||
-		(existing.status === "cancelled" && status === "pending")
-	) {
-		patch.completion_report = null;
-	}
-	const item = bump(
-		cwd,
-		existing,
-		patch,
-		opts.change_summary?.trim() || `status: ${status}`,
-		opts.updated_by || "unknown",
-		now,
-	);
-	atomicWriteTask(cwd, clean, item);
+		(existing.status === "cancelled" && status === "pending");
+	if (reopenUndo) patch.completion_report = null;
 
-	const unlocked =
-		status === "done" || status === "cancelled" ? unlockedBy(preItems, clean) : [];
-	return { item, unlocked };
+	// Void the report true copy BEFORE the metadata write so the stored hash
+	// matches the file bytes the reader will verify.
+	let reportVoidContent: string | null = null;
+	if (reopenUndo) {
+		reportVoidContent = renderBodyFile({ for_version: existing.version }, "");
+		atomicWriteFile(taskReportPath(cwd, clean), reportVoidContent);
+	}
+
+	const newItem: Task = {
+		...existing,
+		...patch,
+		report_sha256: reportVoidContent ? sha256(reportVoidContent) : existing.report_sha256,
+		updated_at: now,
+		updated_by: opts.updated_by || "unknown",
+		history: [
+			{
+				changed_items: ["status"],
+				version: existing.version,
+				event: opts.event ?? "",
+				updated_at: now,
+				updated_by: opts.updated_by || "unknown",
+				change_summary: opts.change_summary?.trim() || `status: ${status}`,
+			},
+			...existing.history,
+		].slice(0, HISTORY_CAP),
+	};
+	delete (newItem as Partial<Task>).integrity_warnings;
+	delete (newItem as Partial<Task>).report_for_version;
+	atomicWriteFile(taskTomlPath(cwd, clean), serializeMetadata(newItem));
+
+	const unlocked = status === "done" || status === "cancelled" ? unlockedBy(preItems, clean) : [];
+	return { item: readTask(cwd, clean) ?? newItem, unlocked };
 }
 
 // ---------------------------------------------------------------------------
-// Completion report
+// Completion report — task_submit_report (no version bump)
 // ---------------------------------------------------------------------------
 
 /**
- * Write the dispatched agent's completion report — the execution record of what
- * was actually done and how it deviates from the plan. The ONLY writer is the
- * agent the item is dispatched to (identity from the --cname CLI flag): this is
- * the worker's own record, separate from the manager's one-line change_summary
- * on task_complete. Version bumps +1 with the old version's trace entry (the
- * report's first line, single-lined) pushed into history; the previous report
- * is overwritten (an item completes once — on reopen/undo the report is
- * voided instead).
+ * Commit the worker's completion report FROM ITS REPORT DRAFT
+ * (draft/<cname>/<id>.report.md): the body (frontmatter tolerated, stripped)
+ * becomes the report true copy anchored to the CURRENT description version
+ * (for_version), so every report states which description contract it was
+ * written against. The version is NOT bumped and no snapshot is written.
  *
  * Rejects:
  * - the item does not exist;
- * - the report is empty;
- * - the caller is not the dispatched agent — including terminal states
- *   (done/cancelled clear dispatched_to, so writing after completion is
- *   naturally refused).
+ * - expected_version missing or stale (the description advanced past the
+ *   version the worker read — the contract moved; re-read before reporting);
+ * - the caller is not the dispatched agent (including terminal states);
+ * - the report draft is missing or empty.
  */
 export function setCompletionReport(
 	cwd: string,
 	id: string,
-	report: string,
 	updatedBy: string,
 	opts: {
-		/** Optimistic concurrency: the version the caller read — the write fails
-		 *  with a conflict error if the record has moved past it (re-read and
-		 *  retry). Omitted = last-writer-wins. */
-		expected_version?: number;
-	} = {},
+		/** The description version the worker read — REQUIRED; a stale version
+		 *  (description advanced past it) rejects the write. */
+		expected_version: number;
+		/** The worker's identity — locates draft/<cname>/. */
+		cname: string;
+	},
 ): Task {
 	const clean = sanitizeTaskId(id);
 	const existing = readTask(cwd, clean);
 	if (!existing) {
-		throw new Error(`tasks: task "${clean}" does not exist — create it with task_create first`);
+		throw new Error(`tasks: task "${clean}" does not exist — create it first`);
 	}
-	assertExpectedVersion(clean, existing.version, opts.expected_version);
-	const text = report?.trim() ?? "";
-	if (!text) {
+	if (opts.expected_version === undefined) {
 		throw new Error(
-			`tasks: completion report for "${clean}" is empty — write what you actually did (brief when it matches the plan, detailed when it deviates)`,
+			`tasks: task_submit_report on "${clean}" requires expected_version (= the description version you read) — re-read the task first`,
+		);
+	}
+	if (opts.expected_version !== existing.version) {
+		throw new Error(
+			`tasks: conflict on "${clean}" — you read description version ${opts.expected_version}, current version is ${existing.version} (the contract changed while you worked); re-read the task, re-check your work against the new description, then retry with the new version`,
 		);
 	}
 	if (!existing.dispatched_to || existing.dispatched_to.name !== updatedBy) {
@@ -1044,18 +1368,45 @@ export function setCompletionReport(
 			`tasks: cannot write the completion report for "${clean}" — it is dispatched to ${existing.dispatched_to ? existing.dispatched_to.name : "(no one)"}, not to you (${updatedBy}); only the dispatched agent records the completion report`,
 		);
 	}
+	const draftReport = taskDraftReportPath(cwd, opts.cname, clean);
+	if (!existsSync(draftReport)) {
+		throw new Error(
+			`tasks: write your report first to ${relative(cwd, draftReport)} with write/edit, then call task_submit_report`,
+		);
+	}
+	const body = parseBodyFile(readFileSync(draftReport, "utf-8")).body.trim();
+	if (!body) {
+		throw new Error(
+			`tasks: report draft ${relative(cwd, draftReport)} is empty — write what you actually did (brief when it matches the plan, detailed when it deviates)`,
+		);
+	}
 	const now = new Date().toISOString();
-	const item = bump(
-		cwd,
-		existing,
-		{ completion_report: text },
-		// history keeps one-line summaries only — the report's first line is its digest
-		text.split("\n")[0],
-		updatedBy,
-		now,
-	);
-	atomicWriteTask(cwd, clean, item);
-	return item;
+	const reportContent = renderBodyFile({ for_version: existing.version }, body);
+	const newItem: Task = {
+		...existing,
+		completion_report: body,
+		report_sha256: sha256(reportContent),
+		updated_at: now,
+		updated_by: updatedBy,
+		history: [
+			{
+				changed_items: ["report"],
+				version: existing.version,
+				event: "",
+				updated_at: now,
+				updated_by: updatedBy,
+				// history keeps one-line summaries only — the report's first line is its digest
+				change_summary: body.split("\n")[0].replace(/\s+/g, " ").trim(),
+			},
+			...existing.history,
+		].slice(0, HISTORY_CAP),
+	};
+	delete (newItem as Partial<Task>).integrity_warnings;
+	delete (newItem as Partial<Task>).report_for_version;
+	atomicWriteFile(taskTomlPath(cwd, clean), serializeMetadata(newItem));
+	atomicWriteFile(taskReportPath(cwd, clean), reportContent);
+	consumeDrafts([draftReport]);
+	return readTask(cwd, clean) ?? newItem;
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,7 +1447,3 @@ export function listTasks(cwd: string): TaskSummary[] {
 	out.sort((a, b) => a.id.localeCompare(b.id));
 	return out;
 }
-
-// (Dispatch records the agent NAME — the comms identity, which is the
-// address comms actually delivers to and which survives restarts. No session
-// file lookup at dispatch time.)

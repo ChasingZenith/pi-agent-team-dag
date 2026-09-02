@@ -10,7 +10,7 @@
  * Run: bun test tests/tasks-graph.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,8 +23,7 @@ import {
   validateGraph,
 } from "../extensions/lib/tasks/graph.ts";
 import {
-  createTask,
-  updateTask,
+  commitTask,
 } from "../extensions/lib/tasks/store.ts";
 import type { Task } from "../extensions/lib/tasks/store.ts";
 
@@ -576,24 +575,44 @@ describe("store integration — cycle rejection", () => {
   });
   /** cwd is fully overridden by PI_TASKS_DIR — any value works. */
   const CWD = "/virtual/cwd";
+  const ME = "tester";
+
+  function writeDraft(rel: string, content: string): void {
+    const p = join(tmp, rel);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, content, "utf-8");
+  }
+  /** Create via the real public API: metadata draft → commitTask. */
+  function createTask(id: string, opts: { deps?: string[]; kind?: string } = {}): void {
+    const lines = [`id = '${id}'`, `title = '${id}'`];
+    if (opts.kind) lines.push(`kind = '${opts.kind}'`);
+    if (opts.deps) lines.push(`deps = [ ${opts.deps.map((d) => `'${d}'`).join(", ")} ]`);
+    writeDraft(`draft/${ME}/${id}.toml`, lines.join("\n"));
+    commitTask(CWD, id, { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+  }
+  /** Rewire deps via a metadata draft → commitTask (v1 → v2). */
+  function updateDeps(id: string, deps: string[]): void {
+    writeDraft(`draft/${ME}/${id}.toml`, `deps = [ ${deps.map((d) => `'${d}'`).join(", ")} ]`);
+    commitTask(CWD, id, { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 });
+  }
 
   it("rejects a self-dependency with the cycle path in the error", () => {
-    expect(() => createTask(CWD, { id: "task-a", title: "A", deps: ["task-a"] }))
+    expect(() => createTask("task-a", { deps: ["task-a"] }))
       .toThrow(/would create a dependency cycle: task-a → task-a/);
   });
 
   it("rejects a 2-cycle with the cycle path in the error", () => {
-    createTask(CWD, { id: "task-a", title: "A" });
-    createTask(CWD, { id: "task-b", title: "B", kind: "module", deps: ["task-a"] });
-    expect(() => updateTask(CWD, "task-a", { deps: ["task-b"] }))
+    createTask("task-a");
+    createTask("task-b", { kind: "module", deps: ["task-a"] });
+    expect(() => updateDeps("task-a", ["task-b"]))
       .toThrow(/would create a dependency cycle: task-a → task-b → task-a/);
   });
 
   it("rejects a 3-cycle with the cycle path in the error", () => {
-    createTask(CWD, { id: "task-a", title: "A" });
-    createTask(CWD, { id: "task-b", title: "B", kind: "module", deps: ["task-a"] });
-    createTask(CWD, { id: "task-c", title: "C", kind: "module", deps: ["task-b"] });
-    expect(() => updateTask(CWD, "task-a", { deps: ["task-c"] }))
+    createTask("task-a");
+    createTask("task-b", { kind: "module", deps: ["task-a"] });
+    createTask("task-c", { kind: "module", deps: ["task-b"] });
+    expect(() => updateDeps("task-a", ["task-c"]))
       .toThrow(/would create a dependency cycle: task-a → task-c → task-b → task-a/);
   });
 });

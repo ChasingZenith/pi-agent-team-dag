@@ -5,7 +5,7 @@ description: "Use when reality contradicts task description or execution is bloc
 
 # Reality Beats the Plan
 
-Execution validates the plan. A task description represents a feed-forward prediction that may prove inaccurate during actual implementation. When reality contradicts your task's assumptions or requirements, do not force an invalid approach and do not fabricate results: stop the affected part, complete what you safely can, and report immediately via `task_submit_report`.
+Execution validates the plan. A task description represents a feed-forward prediction that may prove inaccurate during actual implementation. When reality contradicts your task's assumptions or requirements, do not force an invalid approach and do not fabricate results: stop the affected part, complete what you safely can, and report immediately.
 
 ## The 5 Issue Types
 
@@ -25,11 +25,11 @@ When execution strays from the plan, categorize your findings into one of the fo
 1. **Stop the Blocked Part**: Immediately halt work on the impacted sub-path. Do not force an invalid approach through or simulate missing outputs.
 2. **Finish Safe Work**: Complete any sub-tasks, validations, or deliverables within your scope that do not depend on the failed premise.
 3. **Apply Premise-Safe Adjustments**: Make small, local technical adjustments within your assigned item that do not violate its core interfaces or affect external tasks.
-4. **Report Immediately**: Submit your report right away via `task_submit_report`. Do not wait or hold off for full completion when blocked.
+4. **Report Immediately**: Submit your report right away. Do not wait or hold off for full completion when blocked.
 
 ## How to Report
 
-Submit your report using `task_submit_report`. Your report must be precise and actionable so the manager can update the task dependence graph accordingly. Structure your submission with the following fields:
+Submit your report using `task_checkout` + write/edit the content + `task_submit_report`. Your report must be precise and actionable so the manager can update the task dependence graph accordingly. Structure your submission with the following fields:
 
 * **Issue Category**: Specify which of the 5 issue types was encountered (*Insufficient Information*, *Contract Negotiation*, *Execution Gap*, *Granularity Miss*, or *Assumption Failure*).
 * **Failed Premise / Trigger**: The specific assumption, dependency, or instruction that failed or requires clarification.

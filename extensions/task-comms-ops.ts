@@ -220,7 +220,10 @@ export default function (pi: ExtensionAPI) {
 				`When you begin work, declare it: task_start(id="${p.task_id}") — it moves the item from dispatched to active.\n` +
 				`Each dispatch is one task; complete every task you receive.` +
 				(extra ? `\n\n${extra}` : "") +
-				`\n\nWhen you finish (or when reality stops part of the work), reply with task_submit_report(id="${p.task_id}", report=...) — it writes the completion record on the node and automatically replies to this dispatch message.`;
+				`\n\nWhen you finish (or when reality stops part of the work), do it in two steps: ` +
+				`(1) task_checkout(id="${p.task_id}", scope="report") — this tool call creates an empty file where you should write the report; ` +
+				`(2) write/edit the draft body, then reply with ` +
+				`task_submit_report(id="${p.task_id}", expected_version=${item.version}) — it commits your report (anchored to description version ${item.version}), replies to this dispatch message, and stops the reminder. `;
 			const sendResult = await sendMessage(p.agent, body, REMIND_S);
 			// dispatched_to records the agent NAME — the comms identity, which is
 			// exactly what the send just addressed (stable across restarts).
@@ -231,6 +234,7 @@ export default function (pi: ExtensionAPI) {
 				dispatched_to: { name: p.agent, dispatched_by: idt.name, dispatch_msg_id: sendResult.msg_id },
 				change_summary: `dispatched to ${p.agent}`,
 				updated_by: idt.name,
+				event: "dispatch",
 			});
 			audit("task_dispatch", {
 				item_id: r.item.id,
@@ -238,6 +242,7 @@ export default function (pi: ExtensionAPI) {
 				msg_id: sendResult.msg_id,
 				target_status: sendResult.target_status,
 			});
+			const idNote = store.sanitizedIdNote(p.task_id);
 			return {
 				content: [
 					{
@@ -245,7 +250,8 @@ export default function (pi: ExtensionAPI) {
 						text:
 							`task_dispatch: "${r.item.id}" → ${p.agent} (msg ${sendResult.msg_id.slice(-8)}, target ${sendResult.target_status})\n` +
 							`  status: dispatched, dispatched_to: ${p.agent}\n` +
-							` reminders fire every ${REMIND_S} s.`,
+							` reminders fire every ${REMIND_S} s.` +
+							(idNote ? `\n${idNote}` : ""),
 					},
 				],
 				details: {
@@ -277,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 		name: "task_start",
 		label: "Task Start",
 		description:
-			"The worker's start declaration: moves your item from dispatched to active. Call it when you begin " +
+			"The worker's start declaration: moves task status from dispatched to active. Call it when you begin " +
 			"work — after task_read, before execution. Only the dispatched worker can start its item (the tool " +
 			"verifies it is dispatched AND dispatched_to is your agent name); the dispatcher is notified " +
 			"automatically that you have started, via an injected inbound turn that wakes it. The tool also " +
@@ -319,6 +325,7 @@ export default function (pi: ExtensionAPI) {
 			const r = store.setTaskStatus(cwd, p.id, "active", {
 				change_summary: `started by ${me}`,
 				updated_by: me,
+				event: "start",
 				execution_session: {
 					session_id: sessionId,
 					session_file: sessionFile ? relative(cwd, sessionFile) : "",
@@ -349,6 +356,8 @@ export default function (pi: ExtensionAPI) {
 				notified: dispatcher,
 			});
 			await syncProfile({ current_task: r.item.title });
+			const idNote = store.sanitizedIdNote(p.id);
+			if (idNote) lines.push(idNote);
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
@@ -379,24 +388,25 @@ export default function (pi: ExtensionAPI) {
 		name: "task_submit_report",
 		label: "Submit Report",
 		description:
-			"Write your completion record to the task you were dispatched to. " +
-        "Report what you actually did: briefly confirm when execution closely matched the plan; otherwise, " +
-        "document every deviation in detail, including failed assumptions, changes in approach, verification " +
-        "differences, and newly uncovered work. Only the dispatched worker may write the record—the tool verifies " +
-        "that dispatched_to matches your agent name. The tool then automatically replies to your dispatch message. " +
-        "This stops the dispatcher's reminder and wakes the dispatcher via an injected inbound turn." +
+			"Two-step worker report flow. Step 1: run task_checkout(id, scope=\"report\") — it creates YOUR report draft as an EMPTY scaffold. Step 2: write/edit the draft body — report what you actually did: briefly confirm " +
+        "when execution closely matched the plan; otherwise document every deviation in detail, including failed " +
+        "assumptions, changes in approach, verification differences, and newly uncovered work — then call this tool. " +
+        "It verifies that dispatched_to matches your agent name, commits the report anchored to the description version " +
+        "you read (expected_version — a stale version is rejected: the contract changed while you worked), " +
+        "consumes the draft, and automatically replies to your dispatch message. " +
+        "This stops the dispatcher's reminder and wakes the dispatcher via an injected inbound turn. " +
         "This tool is the designated way to reply to a dispatch message.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the task you were dispatched (must be dispatched to you).",
 			}),
-			report: Type.String({
+			expected_version: Type.Number({
 				description:
-					"Your completion record: what you did, how you verified it, and every deviation from the plan. Brief when it matches the plan; detailed when it deviates.",
+					"REQUIRED: the description version you read (task_read's version; the dispatch header carries it). The commit is rejected if the description has advanced past it — the contract changed while you worked; re-read, re-check your work, and retry with the new version. The report is anchored to this version.",
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate) {
-			const p = params as { id: string; report: string };
+			const p = params as { id: string; expected_version: number };
 			if (!p.id || !p.id.trim()) {
 				throw new Error("tasks: task_submit_report requires an id");
 			}
@@ -410,14 +420,17 @@ export default function (pi: ExtensionAPI) {
 					`tasks: cannot write the completion report for "${p.id}" — it is dispatched to ${target.dispatched_to ? target.dispatched_to.name : "(no one)"}, not to you (${me}); only the dispatched agent records the completion report`,
 				);
 			}
-			const item = store.setCompletionReport(cwd, p.id, p.report, me);
+			const item = store.setCompletionReport(cwd, p.id, me, {
+				expected_version: p.expected_version,
+				cname: me,
+			});
 			// Reply to the dispatch message recorded on the dispatch — the
 			// dispatcher's reminder for the delegation stops and the notice
 			// lands as its reply. Best effort: a failed reply must not fail the
 			// record write (the worker can still notify via comms_send).
 			const { dispatched_by, dispatch_msg_id } = target.dispatched_to;
 			const lines = [
-				`task_submit_report: "${item.id}" v${item.version} — completion report written (by ${item.updated_by})`,
+				`task_submit_report: "${item.id}" — completion report committed (for description v${item.version}, by ${item.updated_by}; version unchanged)`,
 			];
 			let repliedTo = "";
 			if (dispatch_msg_id && dispatched_by) {
@@ -432,14 +445,18 @@ export default function (pi: ExtensionAPI) {
 			audit("task_submit_report", {
 				item_id: item.id,
 				version: item.version,
+				for_version: item.version,
 				replied_to: repliedTo,
 			});
 			await syncProfile({ current_task: undefined });
+			const idNote = store.sanitizedIdNote(p.id);
+			if (idNote) lines.push(idNote);
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],
 				details: {
 					id: item.id,
 					version: item.version,
+					for_version: item.version,
 					updated_at: item.updated_at,
 					updated_by: item.updated_by,
 					replied_to: repliedTo || null,
@@ -467,7 +484,7 @@ export default function (pi: ExtensionAPI) {
 		status: TaskStatus,
 		description: string,
 		summaryParam: string,
-		changeSummary: (p: Record<string, unknown>) => string,
+		changeSummary: (p: { change_summary?: string }) => string,
 	) {
 		return {
 			name,
@@ -486,9 +503,10 @@ export default function (pi: ExtensionAPI) {
 				if (!item) throw notFoundError(cwd, p.id);
 
 				const summary = changeSummary(p);
-				const r = store.setTaskStatus(cwd, p.id, status, {
+			const r = store.setTaskStatus(cwd, p.id, status, {
 					change_summary: summary,
 					updated_by: idt.name,
+					event: name.replace("task_", ""),
 				});
 				audit(name, {
 					item_id: r.item.id,
@@ -554,7 +572,7 @@ export default function (pi: ExtensionAPI) {
 		"blocked",
 		"Mark a task blocked — reality is blocking progress (failed assumption, unavailable resource, blocked dep). " +
 		"The item leaves the ready set, its dependents stay locked, and dependents with a dispatchee are notified. " +
-		"To unblock: fix the graph (task_update) and set the item back to pending/active.",
+		"To unblock: fix the graph (metadata draft + task_commit) and set the item back to pending/active.",
 		"Why the task is blocked — the failed assumption / blocker, in one line.",
 		(p) => p.change_summary?.trim() || `blocked`,
 	));

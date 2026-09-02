@@ -9,14 +9,10 @@
  * Run: bun test tests/task-comms-ops-core.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createTask,
-  setTaskStatus,
-  readTask,
-} from "../extensions/lib/tasks/store";
+import { commitTask, readTask, setTaskStatus } from "../extensions/lib/tasks/store";
 import { dispatcheesOf, waitingDispatchees } from "../extensions/lib/task-comms-ops/core";
 
 let CWD = "";
@@ -31,21 +27,33 @@ afterEach(() => {
   rmSync(CWD, { recursive: true, force: true });
 });
 
+const ME = "tester";
+/** Create a task through the real public API: metadata draft → commitTask. */
+function createTask(id: string, opts: { kind?: string; deps?: string[] } = {}): void {
+  const dir = join(process.env.PI_TASKS_DIR!, "draft", ME);
+  mkdirSync(dir, { recursive: true });
+  const lines = [`id = '${id}'`, `title = '${id}'`];
+  if (opts.kind) lines.push(`kind = '${opts.kind}'`);
+  if (opts.deps) lines.push(`deps = [ ${opts.deps.map((d) => `'${d}'`).join(", ")} ]`);
+  writeFileSync(join(dir, `${id}.toml`), lines.join("\n"));
+  commitTask(CWD, id, { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+}
+
 // ━━ waitingDispatchees ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 describe("waitingDispatchees — who to notify when an item's status changes", () => {
   function item(id: string, deps: string[], dispatched?: string) {
-    return createTask(CWD, { id, title: id, deps });
+    return createTask(id, { deps });
   }
 
   it("returns only dependents dispatched to an agent", () => {
     const a = item("a");
-    const b = createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
-    const c = createTask(CWD, { id: "c", title: "c", kind: "module", deps: ["a"] });
+    const b = createTask("b", { kind: "module", deps: ["a"] });
+    const c = createTask("c", { kind: "module", deps: ["a"] });
     setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
     setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c" } });
     // Undispatched dependents: d depends on a but nobody owns it.
-    createTask(CWD, { id: "d", title: "d", kind: "module", deps: ["a"] });
+    createTask("d", { kind: "module", deps: ["a"] });
     void a;
 
     const items = ["a", "b", "c", "d"].map((id) => readTask(CWD, id)!);
@@ -55,7 +63,7 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
 
   it("returns nothing when no dependent is dispatched", () => {
     item("a");
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
+    createTask("b", { kind: "module", deps: ["a"] });
 
     const items = ["a", "b"].map((id) => readTask(CWD, id)!);
     expect(waitingDispatchees(items, "a")).toEqual([]);
@@ -63,8 +71,8 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
 
   it("ignores items that do not depend on the changed item", () => {
     item("a");
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
-    const unrelated = createTask(CWD, { id: "x", title: "x" });
+    createTask("b", { kind: "module", deps: ["a"] });
+    const unrelated = createTask("x");
     setTaskStatus(CWD, "x", "dispatched", { dispatched_to: { name: "worker-x" } });
     void unrelated;
 
@@ -75,8 +83,8 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
 
   it("notifies direct dependents only — no transitive reach-through", () => {
     item("a");
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
-    createTask(CWD, { id: "c", title: "c", kind: "module", deps: ["b"] });
+    createTask("b", { kind: "module", deps: ["a"] });
+    createTask("c", { kind: "module", deps: ["b"] });
     setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c" } });
 
     // c depends on b, not on a — a's change does not notify c's dispatchee.
@@ -92,8 +100,8 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
 
 describe("dispatcheesOf — who to notify when items get unlocked (done/cancelled)", () => {
   it("returns the dispatchees of the given items themselves", () => {
-    createTask(CWD, { id: "a", title: "a" });
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
+    createTask("a");
+    createTask("b", { kind: "module", deps: ["a"] });
     setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
 
     const items = ["a", "b"].map((id) => readTask(CWD, id)!);
@@ -101,17 +109,17 @@ describe("dispatcheesOf — who to notify when items get unlocked (done/cancelle
   });
 
   it("skips undispatched and unknown ids", () => {
-    createTask(CWD, { id: "a", title: "a" });
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
+    createTask("a");
+    createTask("b", { kind: "module", deps: ["a"] });
 
     const items = ["a", "b"].map((id) => readTask(CWD, id)!);
     expect(dispatcheesOf(items, ["b", "ghost"])).toEqual([]);
   });
 
   it("dedupes when several unlocked items share one dispatchee", () => {
-    createTask(CWD, { id: "a", title: "a" });
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
-    createTask(CWD, { id: "c", title: "c", kind: "module", deps: ["a"] });
+    createTask("a");
+    createTask("b", { kind: "module", deps: ["a"] });
+    createTask("c", { kind: "module", deps: ["a"] });
     setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
     setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-b" } });
 
@@ -123,9 +131,9 @@ describe("dispatcheesOf — who to notify when items get unlocked (done/cancelle
     // Graph a → b → c. Completing a unlocks b; the one to notify is worker-b
     // (b's own dispatchee), not worker-c (dispatchee of a task that depends on b
     // and is still locked). Regression guard for the flipped-direction bug.
-    createTask(CWD, { id: "a", title: "a" });
-    createTask(CWD, { id: "b", title: "b", kind: "module", deps: ["a"] });
-    createTask(CWD, { id: "c", title: "c", kind: "module", deps: ["b"] });
+    createTask("a");
+    createTask("b", { kind: "module", deps: ["a"] });
+    createTask("c", { kind: "module", deps: ["b"] });
     setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
     setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c" } });
 

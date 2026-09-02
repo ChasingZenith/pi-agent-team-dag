@@ -34,19 +34,19 @@ export function availableIds(cwd: string): string {
 
 export function notFoundError(cwd: string, id: string): Error {
 	return new Error(
-		`tasks: "${id}" not found — create it first with task_create. Available items: ${availableIds(cwd)}`,
+		`tasks: "${id}" not found — is the id correct? Or create it first: write a draft (.pi/tasks/draft/<your-name>/<id>.toml with id + title) and task_commit. Available items: ${availableIds(cwd)}`,
 	);
 }
 
 export function missingDepsError(cwd: string, missing: string[]): Error {
 	return new Error(
-		`tasks: dep(s) [${missing.join(", ")}] do not exist — deps must already exist: create the child items first (task_create), then link them via deps. Available items: ${availableIds(cwd)}`,
+		`tasks: dep(s) [${missing.join(", ")}] do not exist — deps must already exist: create the child items first (draft + task_commit), then link them via deps. Available items: ${availableIds(cwd)}`,
 	);
 }
 
 export function missingSubgraphDepsError(cwd: string, missing: string[]): Error {
 	return new Error(
-		`tasks: subgraph_deps gate(s) [${missing.join(", ")}] do not exist — gates must already exist: create them first (task_create), then gate the module's subgraph on them. Available items: ${availableIds(cwd)}`,
+		`tasks: subgraph_deps gate(s) [${missing.join(", ")}] do not exist — gates must already exist: create them first (draft + task_commit), then gate the module's subgraph on them. Available items: ${availableIds(cwd)}`,
 	);
 }
 

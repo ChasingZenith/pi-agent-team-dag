@@ -15,7 +15,7 @@
  *
  * Exits on its own when done (no stop flag, no long-lived identities).
  */
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import * as registry from "../../extensions/lib/comms/registry.ts";
@@ -26,7 +26,7 @@ import {
   ensureStream,
   getKvHistory,
 } from "../../extensions/lib/comms/nats.ts";
-import { createTask, listTasks } from "../../extensions/lib/tasks/store.ts";
+import { commitTask, listTasks } from "../../extensions/lib/tasks/store.ts";
 import { resolveToken, waitFor, sleep, kvRead } from "./helpers.ts";
 
 const ROOT = process.cwd();
@@ -85,14 +85,12 @@ async function main(): Promise<void> {
   registry.startWatch(SUBNET);
   await sleep(2_000);
 
-  // Seed a task into the scratch dir
-  const seed = createTask(ROOT, {
-    id: "item-d1",
-    title: "goal",
-    description: "assumptions: A1 …",
-    change_summary: "created",
-    updated_by: "d-harness",
-  });
+  // Seed a task into the scratch dir (draft + commit — the file-driven flow)
+  const draftDir = join(TASKS_DIR, "draft", "d-harness");
+  mkdirSync(draftDir, { recursive: true });
+  writeFileSync(join(draftDir, "item-d1.toml"), "id = 'item-d1'\ntitle = 'goal'");
+  writeFileSync(join(draftDir, "item-d1.description.md"), "assumptions: A1 …");
+  const seed = commitTask(ROOT, "item-d1", { scope: "all", cname: "d-harness", updated_by: "d-harness", expected_version: 1 }).item;
   check("D-0a", seed.version === 1 && listTasks(ROOT).length === 1, `task seeded v${seed.version} at ${TASKS_DIR}`);
 
   // ━━ D-1: no-reminder send (remind_s omitted, i.e. 0) — delivered, NOT reminded ━━

@@ -1,17 +1,17 @@
 ---
 name: task-lifecycle-reporting
-description: "Defines the protocol for reading task context and managing an assigned item's execution lifecycle using task_read, task_start, and task_submit_report."
+description: "Defines the protocol for reading task context and managing an assigned item's execution lifecycle using task_read, task_start, and the two-step task_checkout + task_submit_report report flow."
 ---
 
 # Task Lifecycle Reporting
 
 As an agent executing a dispatched item, you interact with the task dependence graph through reading your assigned node and submitting lifecycle updates.
 
-Your execution workflow consists of three core tool operations: reading task requirements, declaring execution start, and submitting final or blocked reports.
+Your execution workflow consists of four core operations: reading task requirements, declaring execution start, and submitting final or blocked reports in two steps (draft, then commit).
 
 ## 1. Inspecting Task Context (`task_read`)
 
-For the task id dispatched to you, read the task instructions with `task_read(id="<task_id>", fields="description")` to understand its scope and requirements. A plain `task_read(id="<task_id>")` returns the metadata and graph context (deps, dependents, readiness, change history) without the long bodies; `fields="report"` loads the completion report of a task (e.g. a review node); `fields="full"` returns everything.
+For the task id dispatched to you, read the task instructions with `task_read`.
 
 ## 2. Declaring Start (`task_start`)
 
@@ -20,12 +20,16 @@ It confirms that work is underway and let other agents know.
 
 ---
 
-## 3. Submitting Reports (`task_submit_report`)
+## 3. Submitting Reports
 
-When execution completes, or when reality prevents full completion, submit a detailed report to close your active work on the task.
+When execution completes, or when reality prevents full completion, submit a detailed report to close your active work on the task, in two steps:
 
-* **Tool**: `task_submit_report(id="<task_id>", report="<structured_report_text>")`
+1. **Draft** — `task_checkout(id="<task_id>", scope="report")` creates YOUR report draft (an empty file you own; the old report is never copied).
+2. **Write** — fill the draft with `write`/`edit`: what you did, how you verified it, and every deviation from the plan (brief when it matches, detailed when it deviates — per the `reality-beats-plan` skill).
+3. **Commit** — `task_submit_report(id="<task_id>", expected_version=<n>)`, where `<n>` is the description version you read (task_read returns it; the dispatch header carries it). The tool verifies you are the dispatched agent, commits the report anchored to that version, consumes the draft, and automatically replies to the dispatcher.
 * **Purpose**: Records your execution findings permanently on the task node and automatically replies to the dispatcher.
-* **When to Call**: 
-  - **On Completion**: When all task deliverables and acceptance criteria are satisfied.
-  - **On Blocker / Reality Gap**: Immediately when an assumption fails, execution hits an unforeseen barrier, or a dependency is missing (per the `reality-beats-plan` skill). Do not hold off or wait for full completion when blocked.
+**When to call**:
+- **On Completion**: When all task deliverables and acceptance criteria are satisfied.
+- **On Blocker / Reality Gap**: Immediately when an assumption fails, execution hits an unforeseen barrier, or a dependency is missing (per the `reality-beats-plan` skill). Do not hold off or wait for full completion when blocked.
+
+**If `expected_version` is stale** (the description advanced while you worked): the commit is rejected — re-read the task, re-check your work against the new description, then retry with the new version.

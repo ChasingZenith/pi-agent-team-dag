@@ -10,7 +10,7 @@
 
 | 动作域 | 角色 | 工具 |
 |--------|------|------|
-| 图作者：子图生成 / 嵌入 / 子图门 / 重构——每层 planner 只写本层骨架 | Planner | `task_create` + `task_update` |
+| 图作者：子图生成 / 嵌入 / 子图门 / 重构——每层 planner 只写本层骨架 | Planner | 草稿文件 + `task_commit`（见 docs/6 §5） |
 | 执行：代码 / 命令 / 文件 | Worker | read/write/edit/bash |
 | 审查：对照验收标准验证交付物 | **review 节点**，由 experts-reviewer 执行 | task_read + read/bash |
 | 驱动：就绪集辨识 / 派发 / 状态推进 / 仲裁 | Coordinator | task-comms-ops 高级工具 |
@@ -25,7 +25,7 @@
 
 - **高级接口驱动**：多步协调动作（找 agent → 派发；标 done → 通知等待方）封装为**单动作工具**（见 §3）——LLM 负责内容（委托消息、判断、仲裁决策），代码负责动作（找 agent、写图、通知）
 - **全部委托**：不读文件、不写代码、不执行命令——一切通过 specialist 完成
-- **图操作归 planner（小调整除外）**：coordinator 无 `task_create`/`task_set_status`，新增节点与状态推进经 task-comms-ops 工具，小调整直接用 `task_update`（改 title / description / deps，见 §3）
+- **图操作归 planner（小调整除外）**：coordinator 无 `task_commit`/`task_set_status` 的常规图写，新增节点与状态推进经 task-comms-ops 工具，小调整直接改草稿 + `task_commit`（改 title / description / deps，见 §3）
 - **闭环工作流**：实际反馈 → 调整图 → 全局同步
 - **递归**：复杂子目标可 spawn 子 Coordinator（父级把子图交给它）
 
@@ -36,7 +36,7 @@
 ## 2. 工作流 — 图驱动闭环
 
 ```
-用户需求 → Requirements Clarifier（需求明确：与用户确认 → task_create 建 module → 派发给 Coordinator）
+用户需求 → Requirements Clarifier（需求明确：与用户确认 → 写草稿 + task_commit 建 module → 派发给 Coordinator）
     │
     ▼
 Coordinator（顶层）拥有目标节点（经 TP spawn：role=coordinator，task_dispatch 派发后 task_start 接管）
@@ -69,13 +69,13 @@ Worker / Reviewer 执行
     ▼
     │ ③ Review（差距分类）——先分类再处理：worker 完成通知到达，先 task_read(id=..., fields="report") 读节点上的完成记录（completion report——comms 只是指针，无需重读 description）
     │    执行差距（worker 没做到）→ 重新派发（不改图）
-    │    粒度错判（上报显示任务可拆、超出单次派发）→ task_update(kind="module") 翻转 → 按 module 路由（①）⬅️
-    │    假设不成立（现实与图前提冲突）→ Adjust：task_update 小调整 / 大重构走 module 路径（下放子 coordinator，由其委托 planner）/ task_block ⬅️
+    │    粒度错判（上报显示任务可拆、超出单次派发）→ 草稿改 kind="module" + task_commit 翻转 → 按 module 路由（①）⬅️
+    │    假设不成立（现实与图前提冲突）→ Adjust：草稿 + task_commit 小调整 / 大重构走 module 路径（下放子 coordinator，由其委托 planner）/ task_block ⬅️
     │    信息不足 → comms_send 找 agent 补充调查（TP 定角色——scout / consultor）
     │    交付验证 → review 节点（planner 规划、reviewer 执行）→ 通过则 task_complete，不过则返工
     ▼
     │ ④ Adjust（修正图）
-    │    task_update（改 description / deps / title，change_summary 记录偏差）
+    │    草稿 + task_commit（改 description / deps / title，change_summary 记录偏差）
     │    task_block（受阻项标记 blocked——不再进入就绪集，依赖方保持锁定）
     │    task_complete（标 done：store 校验 deps 满足，未满足报错列缺失；解锁方自动通知）
     │    task_cancel（取消：对依赖方视为满足——移除作用域 = 取消而非删除）
@@ -96,7 +96,7 @@ Worker / Reviewer 执行
 
 ### 2.1 委托消息格式
 
-Coordinator 发给 worker / reviewer / planner 的委托消息（`task_dispatch` 的 `message` 参数）是**指针而非复述**：Objective / Output / Context / Assumptions 都写在任务的 description 里，对方 `task_read` 自行读取即可，不要重复 plan 内容。**dispatch header 由工具保证**：`task_dispatch` 始终在消息开头放置常量协议头——命令式 `Complete task <id>` + task_read 指引 + `task_start` 开工声明 + 完成规则（每条 dispatch 是一条任务，收到的都要完成）——并在**消息末尾**放置回复 guide（回应方式：`task_submit_report` 写节点、工具自动回复这条委托消息）——所以接收方永远知道做什么、读哪个任务、如何回应，且能同时持有多个委派。受阻上报（reality-beats-plan skill）写在各执行角色的角色模板里，消息中**无须复述**。**不要重申对方角色**——角色在 TP 选人时已定，名字即角色（如 `worker-3`），且 spawn 时角色模板已注入其身份。消息只放 plan 里没有的补充信息：
+Coordinator 发给 worker / reviewer / planner 的委托消息（`task_dispatch` 的 `message` 参数）是**指针而非复述**：Objective / Output / Context / Assumptions 都写在任务的 description 里，对方 `task_read` 自行读取即可，不要重复 plan 内容。**dispatch header 由工具保证**：`task_dispatch` 始终在消息开头放置常量协议头——命令式 `Complete task <id>` + task_read 指引 + `task_start` 开工声明 + 完成规则（每条 dispatch 是一条任务，收到的都要完成）——并在**消息末尾**放置回复 guide（回应方式：`task_checkout(id, scope="report")` 生成草稿 → `write/edit` 正文 → `task_submit_report` 写节点、工具自动回复这条委托消息）——所以接收方永远知道做什么、读哪个任务、如何回应，且能同时持有多个委派。受阻上报（reality-beats-plan skill）写在各执行角色的角色模板里，消息中**无须复述**。**不要重申对方角色**——角色在 TP 选人时已定，名字即角色（如 `worker-3`），且 spawn 时角色模板已注入其身份。消息只放 plan 里没有的补充信息：
 
 - **协作对象（可选）** — 遇到相关问题时可以找的 peer
 - **其他补充（可选）** — coordinator 知道但 plan 没写的上下文、需要特别点名的假设编号
@@ -111,7 +111,7 @@ Each dispatch is one task; complete every task you receive.
 Collaborate: reach out via comms_send if you need input from another agent.
 A2 的接口契约以 login-api 的 description 为准——实现前先 task_read 确认。
 
-When you finish (or when reality stops part of the work), reply with task_submit_report(id="login-api", report=...) — it writes the completion record on the node and automatically replies to this dispatch message.
+When you finish (or when reality stops part of the work): (1) task_checkout(id="login-api", scope="report") creates your report draft, (2) write/edit the draft body, then reply with task_submit_report(id="login-api", expected_version=<the version you read>) — it commits your report (anchored to that description version) and automatically replies to this dispatch message.
 ```
 
 ---
@@ -126,7 +126,7 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 |------|------|-----------|
 | `task_dispatch` | `task_id, agent, message` | 发送委托消息（带提醒，含常量开工指令）+ `set_status(dispatched, dispatched_to=<agent>)` 一步完成；`dispatched_to` 记 **agent 名字**（comms 身份，跨重启稳定），派发者与委托消息 msg_id 记入 `dispatched_to`（`dispatched_by` / `dispatch_msg_id`） |
 | `task_start` | `id` | **worker 侧工具**：开工声明——把派发给自己的任务从 dispatched 转 active（校验 `dispatched_to.name` 为调用者）+ **把自己的 pi 执行会话写入节点**（`execution_session`：session id + JSONL 转录文件路径，后续据此回溯该任务实际如何完成）+ 自动通知派发者（无提醒，告知已开工）+ 自动把任务标题写入 comms profile 的 `current_task`（与 `comms_update_profile` 同一实现，peers 实时可见） |
-| `task_submit_report` | `id, report` | **worker 侧工具**：把完成情况写入节点 `completion_report`（校验 `dispatched_to.name` 为调用者）+ 自动**回复**委托消息——回复目标与 msg_id 单一定义在节点记录（`dispatched_by` / `dispatch_msg_id`），工具自动发 `comms_send(target=派发者, reply_to_msg_id=委托消息 msg_id)`，**调用者无须传 target / reply_to_msg_id**，这就是 worker 回应 dispatch 消息的方式（一行完成通知，停掉派发者的 reminder）+ 清空 comms profile 的 `current_task`（汇报完即可复用） |
+| `task_submit_report` | `id, expected_version` | **worker 侧工具**：读**自己的报告草稿**（先由 `task_checkout(id, scope="report")` 生成空白草稿、write/edit 写正文）→ 校验 `dispatched_to.name` 为调用者 + `expected_version`（description 契约未漂移，锚定 `for_version`）→ 提交节点 + 自动**回复**委托消息（回复目标与 msg_id 单一定义在节点记录 `dispatched_by` / `dispatch_msg_id`，调用者无须传 target / reply_to_msg_id，一行完成通知停掉 reminder）+ 清空 `current_task` |
 | `task_complete` | `id, change_summary?` | 标 done（store 校验 deps 满足，未满足报错列缺失）+ 自动通知解锁项的等待方（无提醒） |
 | `task_block` | `id, change_summary?` | 标 blocked（现实受阻，受阻原因写入 change_summary）+ 自动通知依赖项的已派发负责人 |
 | `task_cancel` | `id, change_summary?` | 标 cancelled（移除作用域；对依赖方视为满足，取消原因写入 change_summary）+ 自动通知解锁等待方 |
@@ -135,7 +135,7 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 
 只读查询（参数与语义见 docs/6 §5）：`task_read`（读节点全文与就绪性）、`task_list`（按状态过滤列表）、`task_ready_set`（就绪集——派发前必查；**按 kind 分桶**：unit 执行 / module 待驱动；`for=<id>` 限定某节点及其依赖闭包，自身就绪也列出；就绪集内两两无依赖 → 可并行派发）、`task_render`（整图渲染，评审与汇报）。
 
-图写：coordinator 的小调整与接口仲裁直接用 `task_update`（`id, title?/description?/deps?/kind?, change_summary?`，写时校验 deps 存在性与无环；`kind` 可翻转 unit → module——执行暴露需细化时）；子图生成（`task_create` + `task_update` 链接父节点 deps）归 planner（由下放的子 coordinator 委托）。
+图写：coordinator 的小调整与接口仲裁直接改草稿 + `task_commit`（metadata 草稿只写要改的字段 `title?/description?/deps?/kind?` + `change_summary`，提交时校验 deps 存在性与无环；`kind` 可翻转 unit → module——执行暴露需细化时）；子图生成（写草稿 + `task_commit` 建节点、链接父节点 deps）归 planner（由下放的子 coordinator 委托）。
 
 ### comms 通信工具
 
@@ -189,7 +189,7 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 - **子 Coordinator 拥有父级交给它的 task 节点及子图**，可在其下继续委托规划（planner）、继续 spawn 更深的子 Coordinator——深度不限
 - 委托方式与 specialist 相同：`comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <id> — the node needs a sub-Coordinator to own it and drive its subgraph")` → TP 定角色（coordinator）→ `task_dispatch` 交付节点
 - 约束：子 Coordinator 服从父 Coordinator 的图（尊重 deps 与契约）、重要变更上报父 Coordinator、局部改动不得静默改变全局依赖
-- **协议各层一致**：遇阻上报（reality-beats-plan skill)、调整（task_update / task_block）、同步（comms 无提醒公告）在每一层是同一套
+- **协议各层一致**：遇阻上报（reality-beats-plan skill)、调整（草稿 + task_commit / task_block）、同步（comms 无提醒公告）在每一层是同一套
 - **分层规划**：一层一次委托——每个 Coordinator 只委托一个 planner 编写本层骨架（子模块 / 子单元 / 审查节点 / 门）；子模块内部子图在其启动时由下一层规划，深度不限；未展开 = 正常待定，不是规划缺失
 - 反模式：不要为一次派发就能完成的工作建层；**优先最浅结构**，只有子目标真正需要独立循环时才加深
 
@@ -202,7 +202,7 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 1. **提问澄清**：先钉 objective（用户真正要什么——destination 先定，范围随之），再宽度扇出：objective / acceptance criteria（成功如何验证）/ non-goals（明确不做）/ constraints（期限、技术、资源）/ risks（已知风险）
 2. **落地到项目**：读当前项目现状（read/grep/find/ls），让需求反映现实而非想象
 3. **确认**：把写好的需求交回用户确认，迭代直到一致
-4. **交接并退出**：`task_create` 建 module（需求全文入 description）→ 经 TP spawn Coordinator（`role=coordinator`）→ `task_dispatch` 派发（Coordinator 以 `task_start` 接管节点）→ 派发确认后退出
+4. **交接并退出**：写草稿 + `task_commit` 建 module（需求全文入 description 草稿）→ 经 TP spawn Coordinator（`role=coordinator`）→ `task_dispatch` 派发（Coordinator 以 `task_start` 接管节点）→ 派发确认后退出
 
 目标可能是远期总体目标——分解与推进是 Coordinator 的事，需求明确者不规划、不分解、不执行。
 
@@ -220,7 +220,7 @@ auth-system                        ← 目标节点（顶层 Coordinator 拥有�
 
 **新披露的边缘**（上报揭示的、图未覆盖的决策）也按这个闭环归类，判据：能否**精确陈述**问题（而非能否立即回答）——能精确陈述 → 建议建节点（即使受阻）；不能 → 记入模块 description 的 `## Not yet specified`（迷雾区，不预切片）；超出目的地 → 取消并记入 `## Out of scope`（出界永不毕业，仅当目的地重画时以新 effort 回归）。
 
-**与图衔接**：Coordinator 收到上报后 `task_block(id, change_summary=...)` 标记受阻项（原因写入 change_summary）——blocked 项不再进入就绪集、依赖方保持锁定（见 docs/6 §2.4）；解除阻塞后按现实调整图（task_update 改 deps / description）并把节点恢复 pending（重新进入就绪集）/ dispatched（直接重新派发）/ active。
+**与图衔接**：Coordinator 收到上报后 `task_block(id, change_summary=...)` 标记受阻项（原因写入 change_summary）——blocked 项不再进入就绪集、依赖方保持锁定（见 docs/6 §2.4）；解除阻塞后按现实调整图（草稿 + task_commit 改 deps / description）并把节点恢复 pending（重新进入就绪集）/ dispatched（直接重新派发）/ active。
 
 ---
 
@@ -244,7 +244,7 @@ extensions/lib/role-context/roles/
 │   └── coordinator.md                  ← Coordinator 角色模板（图调度者，无共享协议文件）
 └── specialist/
     ├── requirements-clarifier.md       ← 入口角色（需求明确 → 建 module → 派发给 Coordinator）
-    ├── planner.md                      ← 图的作者（task_create + task_update：子图生成 + 嵌入 + 子图门；一层一次委托）
+    ├── planner.md                      ← 图的作者（草稿 + task_commit：子图生成 + 嵌入 + 子图门；一层一次委托）
     └── worker / scout / web-searcher / experts-reviewer / consultor
 
 .pi/skills/reality-beats-plan.md        ← 遇阻上报统一协议（含新披露边缘三分类）
