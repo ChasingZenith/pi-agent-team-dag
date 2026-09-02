@@ -328,7 +328,7 @@ describe("tasks extension shell", () => {
     expect(rr.details.ready.map((i: any) => i.id).sort()).toEqual(["task-m", "task-u"]);
     // grouped by kind in the rendered buckets
     expect(rr.content[0].text).toMatch(/Ready for execution \(unit\):[\s\S]*task-u/);
-    expect(rr.content[0].text).toMatch(/Ready \(module — may need delegation\):[\s\S]*task-m/);
+    expect(rr.content[0].text).toMatch(/Ready \(module — delegate to sub-Coordinator\):[\s\S]*task-m/);
   });
 
   it("commit rejects an invalid kind from the draft", async () => {

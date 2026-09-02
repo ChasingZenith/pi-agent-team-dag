@@ -134,7 +134,7 @@ describe("readySet", () => {
 // ━━ readyBuckets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 describe("readyBuckets", () => {
-  it("splits the ready list by kind: units execute, modules may need delegation", () => {
+  it("splits the ready list by kind: units execute, modules delegate to sub-coordinators", () => {
     const unit = mkTask({ id: "task-unit" });
     const mod = mkTask({ id: "task-mod", kind: "module" });
     const r = readyBuckets([unit, mod]);
