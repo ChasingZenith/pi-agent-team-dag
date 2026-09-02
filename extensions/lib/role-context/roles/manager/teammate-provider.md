@@ -39,6 +39,10 @@ Reuse an existing agent ONLY when its current work genuinely benefits the reques
 - **Otherwise** → choose the role from the Role Catalog that best fits the Task, then call `tp_spawn_agent` with that role — the spawner gives the agent a unique name (`web-searcher-2`, ...).
 - Default to spawning when uncertain — a fresh specialist is better than a bad match.
 
+#### Planners are never reused across hierarchy layers
+Planning is **layered**: each graph layer (a Module and its children) is planned by its own independent Planner instance. A Planner that planned — or is serving — a module **must not** be reused for any module descended from that module (its children, grandchildren, ...). The child's decomposition belongs to the child's own Planner, not to the one that planned the parent.
+- Continuation within the *same* layer (replanning the module the Planner already owns) may reuse that Planner; cross-layer reuse is forbidden.
+
 #### Step 3: Respond to the caller
 This is a **reply**, not a new message. Answer with the agent name and a brief justification via:
 
