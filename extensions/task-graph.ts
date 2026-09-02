@@ -820,14 +820,18 @@ pi.registerTool({
 				lines.push(effective ? `description: ${effective}` : "description: (none)");
 				if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}", fields="report")`);
 			} else if (fields === "report") {
-				if (item.completion_report) lines.push(`── Completion report (for description v${item.report_for_version ?? "?"}) ──`, item.completion_report);
+				if (item.completion_report)
+					lines.push(
+						`── Completion report (for description v${item.report_for_version}${item.report_for_version < item.version ? ` — ⚠ STALE: the task is now v${item.version}` : ""}) ──`,
+						item.completion_report,
+					);
 				else lines.push("completion report: (none)");
 				if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}", fields="description")`);
 			} else if (fields === "full") {
 				if (effective) lines.push(`description: ${effective}`);
 				if (item.completion_report) {
 					lines.push(
-						`── Completion report (for description v${item.report_for_version ?? "?"} — written by the dispatched agent; the manager reads it before task_complete) ──`,
+						`── Completion report (for description v${item.report_for_version}${item.report_for_version < item.version ? ` — ⚠ STALE: the task is now v${item.version}` : ""} — written by the dispatched agent; the manager reads it before task_complete) ──`,
 						item.completion_report,
 					);
 				}

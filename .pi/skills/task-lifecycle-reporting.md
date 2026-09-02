@@ -26,10 +26,10 @@ When execution completes, or when reality prevents full completion, submit a det
 
 1. **Draft** — `task_checkout(id="<task_id>", scope="report")` creates YOUR report draft (an empty file you own; the old report is never copied).
 2. **Write** — fill the draft with `write`/`edit`: what you did, how you verified it, and every deviation from the plan (brief when it matches, detailed when it deviates — per the `reality-beats-plan` skill).
-3. **Commit** — `task_submit_report(id="<task_id>", expected_version=<n>)`, where `<n>` is the description version you read (task_read returns it; the dispatch header carries it). The tool verifies you are the dispatched agent, commits the report anchored to that version, consumes the draft, and automatically replies to the dispatcher.
+3. **Commit** — `task_submit_report(id="<task_id>", expected_version=<n>)`, where `<n>` is the description version you read (task_read returns it; the dispatch header carries it). The tool verifies you are the dispatched agent, commits the report anchored to that exact version, consumes the draft, and automatically replies to the dispatcher.
 * **Purpose**: Records your execution findings permanently on the task node and automatically replies to the dispatcher.
 **When to call**:
 - **On Completion**: When all task deliverables and acceptance criteria are satisfied.
 - **On Blocker / Reality Gap**: Immediately when an assumption fails, execution hits an unforeseen barrier, or a dependency is missing (per the `reality-beats-plan` skill). Do not hold off or wait for full completion when blocked.
 
-**If `expected_version` is stale** (the description advanced while you worked): the commit is rejected — re-read the task, re-check your work against the new description, then retry with the new version.
+**If `expected_version` is behind the current version** (the description advanced while you worked): that is *not* an error — you legitimately executed the contract you read. The report is **accepted** and anchored to the version you actually worked against (`for_version`), and flagged `⚠ stale` so the **manager** judges whether executing the older contract still satisfies the new description. Only a version *ahead* of the current one (never readable) is rejected. Don't discard your work; record it against the version you read and let the reader decide.

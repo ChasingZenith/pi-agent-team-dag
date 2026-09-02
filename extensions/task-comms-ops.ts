@@ -402,8 +402,8 @@ export default function (pi: ExtensionAPI) {
         "when execution closely matched the plan; otherwise document every deviation in detail, including failed " +
         "assumptions, changes in approach, verification differences, and newly uncovered work — then call this tool. " +
         "It verifies that dispatched_to matches your agent name, commits the report anchored to the description version " +
-        "you read (expected_version — a stale version is rejected: the contract changed while you worked), " +
-        "consumes the draft, and automatically replies to your dispatch message. " +
+        "you read (expected_version — the exact contract you worked against; a report against an older version is accepted but " +
+        "flagged stale for the manager to judge), consumes the draft, and automatically replies to your dispatch message. " + +
         "This stops the dispatcher's reminder and wakes the dispatcher via an injected inbound turn. " +
         "This tool is the designated way to reply to a dispatch message.",
 		parameters: Type.Object({
@@ -412,7 +412,10 @@ export default function (pi: ExtensionAPI) {
 			}),
 			expected_version: Type.Number({
 				description:
-					"REQUIRED: the description version you read (task_read's version; the dispatch header carries it). The commit is rejected if the description has advanced past it — the contract changed while you worked; re-read, re-check your work, and retry with the new version. The report is anchored to this version.",
+					"REQUIRED: the description version you read (task_read's version; the dispatch header carries it). A report at a " +
+					"version AHEAD of the current one is rejected (never readable). A version BEHIND the current one is accepted and anchored " +
+					"there — the report is flagged stale so the manager decides whether executing the older contract still satisfies the new " +
+					"description. The report is always anchored to this version.",
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate) {
@@ -439,9 +442,15 @@ export default function (pi: ExtensionAPI) {
 			// lands as its reply. Best effort: a failed reply must not fail the
 			// record write (the worker can still notify via comms_send).
 			const { dispatched_by, dispatch_msg_id } = target.dispatched_to;
+			const stale = item.report_for_version < item.version;
 			const lines = [
-				`task_submit_report: "${item.id}" — completion report committed (for description v${item.version}, by ${item.updated_by}; version unchanged)`,
+				`task_submit_report: "${item.id}" — completion report committed (for description v${item.report_for_version}, by ${item.updated_by}; version unchanged)`,
 			];
+			if (stale) {
+				lines.push(
+					`  ⚠ stale: the report is anchored to description v${item.report_for_version}, but the task is now v${item.version} — the manager must decide whether this old-contract work still satisfies the new description`,
+				);
+			}
 			let repliedTo = "";
 			if (dispatch_msg_id && dispatched_by) {
 				try {
@@ -455,7 +464,8 @@ export default function (pi: ExtensionAPI) {
 			audit("task_submit_report", {
 				item_id: item.id,
 				version: item.version,
-				for_version: item.version,
+				for_version: item.report_for_version,
+				stale,
 				replied_to: repliedTo,
 			});
 			await syncProfile({ current_task: undefined });
@@ -466,7 +476,8 @@ export default function (pi: ExtensionAPI) {
 				details: {
 					id: item.id,
 					version: item.version,
-					for_version: item.version,
+					for_version: item.report_for_version,
+					stale,
 					updated_at: item.updated_at,
 					updated_by: item.updated_by,
 					replied_to: repliedTo || null,

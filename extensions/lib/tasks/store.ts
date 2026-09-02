@@ -68,9 +68,12 @@
  * completion reports do NOT bump the version — they append a history entry
  * (changed_items) and update updated_at/by. Snapshots are written only on
  * version bumps. `expected_version` (optimistic concurrency) is MANDATORY on
- * every commit (create requires 1; updates require task_read's version) and on
- * reports — a stale version rejects the write before anything is touched; the
- * caller re-reads and re-bases.
+ * every commit (create requires 1; updates require task_read's version). On
+ * reports the version read is the MANDATORY anchor: a report is always written
+ * against the exact description version the worker read (for_version), and if
+ * that is older than the current version the report is still recorded but
+ * flagged stale (report_for_version < version) so the reader judges whether
+ * the old-contract work still satisfies the new contract.
  *
  * State machine — done/cancelled are terminal except reopen/undo; cancelled
  * counts as satisfied everywhere (dependents), so cancelling resolves a stuck
@@ -205,8 +208,11 @@ export interface Task {
 	/** ── transient (never serialized) ── */
 	/** Integrity problems found while loading the true copies (hash mismatch / missing file). */
 	integrity_warnings?: string[];
-	/** The description version the current report is anchored to (report.md frontmatter). */
-	report_for_version?: number;
+	/** The description version the current report is anchored to (report.md frontmatter).
+	 *  Always set: a committed report always carries its anchor (the version the worker
+	 *  read), and a report against an older contract keeps that older anchor —
+	 *  report_for_version < version flags the staleness for the reader. */
+	report_for_version: number;
 }
 
 /** One row of the task listing. */
@@ -552,6 +558,7 @@ export function parseTask(raw: string): Task | null {
 		status: d.status as TaskStatus,
 		kind: d.kind as TaskKind,
 		version: d.version,
+		report_for_version: d.version,
 		description_sha256: typeof d.description_sha256 === "string" ? d.description_sha256 : null,
 		report_sha256: typeof d.report_sha256 === "string" ? d.report_sha256 : null,
 		created_at: typeof d.created_at === "string" ? d.created_at : "",
@@ -629,7 +636,7 @@ function loadBodies(cwd: string, item: Task): Task {
 	if (existsSync(reportPath)) {
 		const pf = parseBodyFile(readFileSync(reportPath, "utf-8"));
 		item.completion_report = pf.body.trim() ? pf.body : null;
-		item.report_for_version = pf.for_version;
+		item.report_for_version = pf.for_version ?? item.version;
 		if (item.report_sha256 !== null && item.report_sha256 !== pf.hash) {
 			warnings.push(
 				`${item.id}.report.md hash mismatch — stored ${item.report_sha256.slice(0, 8)}…, file ${pf.hash.slice(0, 8)}… (true copy modified outside a commit; restore from history or re-commit)`,
@@ -638,6 +645,9 @@ function loadBodies(cwd: string, item: Task): Task {
 	} else if (item.report_sha256 !== null) {
 		warnings.push(`${item.id}.report.md is missing — the true copy was deleted`);
 	}
+	// the report anchor is mandatory: a missing / un-anchored true copy falls
+	// back to the current version (an un-anchored report is treated as current).
+	if (item.report_for_version === undefined) item.report_for_version = item.version;
 	if (warnings.length > 0) item.integrity_warnings = warnings;
 	return item;
 }
@@ -759,8 +769,9 @@ export function readTaskVersion(cwd: string, id: string, version: number): Task 
 	if (existsSync(reportPath)) {
 		const pf = parseBodyFile(readFileSync(reportPath, "utf-8"));
 		item.completion_report = pf.body.trim() ? pf.body : null;
-		item.report_for_version = pf.for_version;
+		item.report_for_version = pf.for_version ?? item.version;
 	}
+	if (item.report_for_version === undefined) item.report_for_version = item.version;
 	return item;
 }
 
@@ -1173,6 +1184,7 @@ export function commitTask(
 			dispatched_to: null,
 			execution_session: null,
 			completion_report: null,
+			report_for_version: 1,
 			history: [],
 		};
 		// snapshot v1 (so every version is archivable), then the true copies.
@@ -1455,14 +1467,22 @@ export function setTaskStatus(
 /**
  * Commit the worker's completion report FROM ITS REPORT DRAFT
  * (draft/<cname>/<id>.report.md): the body (frontmatter tolerated, stripped)
- * becomes the report true copy anchored to the CURRENT description version
- * (for_version), so every report states which description contract it was
- * written against. The version is NOT bumped and no snapshot is written.
+ * becomes the report true copy anchored to the description version the worker
+ * READ (for_version = expected_version, NOT the current version), so every
+ * report states which contract it was actually written against — after a
+ * replan the anchor makes the staleness visible (report_for_version < version)
+ * instead of silently rebasing to the new contract. The version is NOT bumped
+ * and no snapshot is written.
+ *
+ * A STALE expected_version (older than current) is ACCEPTED — the worker
+ * legitimately executed the older contract; the report is anchored there and
+ * flagged (history line + report_for_version < version) for the reader to
+ * judge whether the old-contract work still satisfies the new description.
  *
  * Rejects:
  * - the item does not exist;
- * - expected_version missing or stale (the description advanced past the
- *   version the worker read — the contract moved; re-read before reporting);
+ * - expected_version missing / invalid / ahead of the current version (a
+ *   version ahead is never readable);
  * - the caller is not the dispatched agent (including terminal states);
  * - the report draft is missing or empty.
  */
@@ -1488,16 +1508,28 @@ export function setCompletionReport(
 			`tasks: cannot write a completion report for "${clean}" — it is a shared information node (kind = "info"), pure content that is never dispatched and never completes`,
 		);
 	}
+	// expected_version is MANDATORY and is the report's anchor: the exact
+	// description version the worker read. A STALE version (older than current)
+	// is VALID — the worker genuinely executed that contract, so the report is
+	// anchored there (for_version = expected_version) and the returned item
+	// flags the gap (report_for_version < version) for the reader to judge.
+	// Only a version AHEAD of current (never readable) is an error.
 	if (opts.expected_version === undefined) {
 		throw new Error(
 			`tasks: task_submit_report on "${clean}" requires expected_version (= the description version you read) — re-read the task first`,
 		);
 	}
-	if (opts.expected_version !== existing.version) {
+	if (!Number.isInteger(opts.expected_version) || opts.expected_version < 1) {
 		throw new Error(
-			`tasks: conflict on "${clean}" — you read description version ${opts.expected_version}, current version is ${existing.version} (the contract changed while you worked); re-read the task, re-check your work against the new description, then retry with the new version`,
+			`tasks: task_submit_report on "${clean}" has an invalid expected_version ${opts.expected_version} — it must be the positive description version you read`,
 		);
 	}
+	if (opts.expected_version > existing.version) {
+		throw new Error(
+			`tasks: task_submit_report on "${clean}" — expected_version ${opts.expected_version} is ahead of the current version ${existing.version} (that version is not readable); re-read the task and pass the version task_read returned`,
+		);
+	}
+	const stale = opts.expected_version < existing.version;
 	if (!existing.dispatched_to || existing.dispatched_to.name !== updatedBy) {
 		throw new Error(
 			`tasks: cannot write the completion report for "${clean}" — it is dispatched to ${existing.dispatched_to ? existing.dispatched_to.name : "(no one)"}, not to you (${updatedBy}); only the dispatched agent records the completion report`,
@@ -1516,7 +1548,8 @@ export function setCompletionReport(
 		);
 	}
 	const now = new Date().toISOString();
-	const reportContent = renderBodyFile({ for_version: existing.version }, body);
+	const reportContent = renderBodyFile({ for_version: opts.expected_version }, body);
+	const summary = body.split("\n")[0].replace(/\s+/g, " ").trim();
 	const newItem: Task = {
 		...existing,
 		completion_report: body,
@@ -1530,8 +1563,10 @@ export function setCompletionReport(
 				event: "",
 				updated_at: now,
 				updated_by: updatedBy,
-				// history keeps one-line summaries only — the report's first line is its digest
-				change_summary: body.split("\n")[0].replace(/\s+/g, " ").trim(),
+				// history keeps one-line summaries only — the report's first line is its digest; a stale anchor is flagged here
+				change_summary: stale
+					? `[report against v${opts.expected_version}, current v${existing.version}] ${summary}`
+					: summary,
 			},
 			...existing.history,
 		].slice(0, HISTORY_CAP),

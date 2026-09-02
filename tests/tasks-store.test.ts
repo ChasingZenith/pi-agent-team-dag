@@ -430,13 +430,29 @@ describe("setCompletionReport — the worker's record", () => {
     ).toThrow(/requires expected_version/);
   });
 
-  it("a stale expected_version (description advanced) rejects — the contract moved", () => {
+  it("a stale expected_version (description advanced) is ACCEPTED and anchored to the read version", () => {
     dispatched("task-c");
     commitDescription("task-c", "contract changed", 1); // → v2
     draft(`draft/${ME}/task-c.report.md`, "report for old contract");
+    const reported = setCompletionReport(CWD, "task-c", "worker-1", { expected_version: 1, cname: ME });
+    // the report stands and is anchored to the version the worker actually read
+    expect(reported.completion_report).toBe("report for old contract");
+    expect(reported.version).toBe(2); // the description version is unchanged
+    expect(reported.report_for_version).toBe(1); // anchored to the read version, not current
+    // report.md carries the for_version anchor of the read version
+    const raw = readFileSync(taskReportPath(CWD, "task-c"), "utf-8");
+    expect(raw).toContain("---\nfor_version: 1\n---\n\nreport for old contract");
+    // the staleness is flagged in history for the reader
+    expect(reported.history[0].change_summary).toContain("[report against v1, current v2]");
+    expect(reported.report_for_version).toBeLessThan(reported.version);
+  });
+
+  it("rejects an expected_version ahead of the current version (never readable)", () => {
+    dispatched("task-fwd");
+    draft(`draft/${ME}/task-fwd.report.md`, "should not happen");
     expect(() =>
-      setCompletionReport(CWD, "task-c", "worker-1", { expected_version: 1, cname: ME }),
-    ).toThrow(/contract changed while you worked/);
+      setCompletionReport(CWD, "task-fwd", "worker-1", { expected_version: 5, cname: ME }),
+    ).toThrow(/ahead of the current version/);
   });
 
   it("rejects a report from an agent that is not the dispatchee", () => {
