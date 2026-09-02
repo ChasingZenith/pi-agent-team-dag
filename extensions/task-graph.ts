@@ -336,7 +336,7 @@ export default function (pi: ExtensionAPI) {
 			"For METADATA changes to an existing task, use scope=\"metadata\" — it scaffolds a metadata draft carrying " +
 			"the CURRENT title / deps / subgraph_deps / info_refs / kind as COMMENTED templates; uncomment-and-edit " +
 			"only the field(s) you want to change (patch semantics), then task_commit(id, expected_version, scope=\"metadata\"). " +
-			"Creating a NEW task: task_checkout(id=<new-id>, version=0) scaffolds the metadata draft (with `id`) and the empty description draft — fill both with write/edit, then task_commit(id=<new-id>, expected_version=1). " +
+			"Creating a NEW task: task_checkout(id=<new-id>, version=0) scaffolds the metadata draft (with `id`) and the empty description draft — the scaffold format is fixed and self-evident (you read the resulting draft before filling it), so fill both with write/edit, then task_commit(id=<new-id>, expected_version=1). " +
 			"Checking out a HISTORICAL version of an existing task's description: pass version=<n> (n < current).",
 		parameters: Type.Object({
 			id: Type.String({
