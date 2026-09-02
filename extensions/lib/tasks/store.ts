@@ -15,6 +15,14 @@
  * inside the gated module's own subgraph (that would be a cycle), and the
  * expanded graph stays DAG-checked.
  *
+ * A THIRD kind — `info` (shared information node) — is NOT a DAG node at
+ * all: pure content with no deps, no subgraph gate, no status lifecycle. It
+ * exists to let many tasks share ONE copy of repeated requirements: a task
+ * holds `info_refs` (content references, not graph edges) pointing at info
+ * nodes whose description bodies are injected into the task's description at
+ * READ time (injectedInfo / effectiveDescription). Info nodes are excluded
+ * from the ready set, orphans, and status transitions; they never dispatch.
+ *
  * THREE-FILE LAYOUT — every task is THREE true-copy files (metadata, body,
  * report) plus per-agent DRAFTS and per-version SNAPSHOTS:
  *
@@ -55,7 +63,7 @@
  * of a true copy) — the record stays readable, the warning names the file.
  *
  * VERSION SEMANTICS — `version` counts CONTENT revisions: +1 on every change
- * to title / description / deps / subgraph_deps / kind (i.e. every successful
+ * to title / description / deps / subgraph_deps / kind / info_refs (i.e. every successful
  * task_commit). Lifecycle events (status transitions, dispatch, start) and
  * completion reports do NOT bump the version — they append a history entry
  * (changed_items) and update updated_at/by. Snapshots are written only on
@@ -115,9 +123,9 @@ const STATUSES: readonly TaskStatus[] = ["pending", "dispatched", "active", "don
  * difference is executability. subgraph_deps (subgraph gates) stay
  * module-only — a gate is meaningless without a subgraph to gate.
  */
-export type TaskKind = "module" | "unit";
+export type TaskKind = "module" | "unit" | "info";
 
-const KINDS: readonly TaskKind[] = ["module", "unit"];
+const KINDS: readonly TaskKind[] = ["module", "unit", "info"];
 
 /**
  * One change's trace entry. `changed_items` names WHAT changed in this write
@@ -130,7 +138,7 @@ const KINDS: readonly TaskKind[] = ["module", "unit"];
  * a status transition, else "".
  */
 export interface TaskHistoryEntry {
-	/** The items this write changed: title | description | deps | subgraph_deps | kind | status | report. */
+	/** The items this write changed: title | description | deps | subgraph_deps | kind | info_refs | status | report. */
 	changed_items: string[];
 	/** The description version this entry relates to. */
 	version: number;
@@ -173,9 +181,13 @@ export interface Task {
 	deps: string[];
 	/** Subgraph gates (modules only, deduplicated, sorted). */
 	subgraph_deps: string[];
+	/** Info refs (content references only — NOT graph edges): ids of `info` nodes
+	 *  whose shared description body is injected into THIS item's description at
+	 *  read time. Deduplicated, sorted. No dispatch/ready-set impact. */
+	info_refs: string[];
 	status: TaskStatus;
 	kind: TaskKind;
-	/** Content revision — +1 on every change to title/description/deps/subgraph_deps/kind. */
+	/** Content revision — +1 on every change to title/description/deps/subgraph_deps/kind/info_refs. */
 	version: number;
 	/** sha256 of the true description.md bytes (frontmatter included). */
 	description_sha256: string | null;
@@ -212,6 +224,8 @@ export interface TaskSummary {
 	depCount: number;
 	/** Subgraph gate ids declared by this item (modules only). */
 	subgraph_deps: string[];
+	/** Info refs (content references, not graph edges). */
+	info_refs: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +450,7 @@ export function serializeMetadata(item: Task): string {
 	S("title", item.title);
 	L.push(`deps = ${tomlArray(item.deps)}`);
 	L.push(`subgraph_deps = ${tomlArray(item.subgraph_deps)}`);
+	L.push(`info_refs = ${tomlArray(item.info_refs)}`);
 	S("status", item.status);
 	S("kind", item.kind);
 	L.push(`version = ${item.version}`);
@@ -533,6 +548,7 @@ export function parseTask(raw: string): Task | null {
 		description: "",
 		deps: d.deps,
 		subgraph_deps: Array.isArray(d.subgraph_deps) ? d.subgraph_deps : [],
+		info_refs: Array.isArray(d.info_refs) ? d.info_refs.filter((x): x is string => typeof x === "string") : [],
 		status: d.status as TaskStatus,
 		kind: d.kind as TaskKind,
 		version: d.version,
@@ -644,6 +660,52 @@ export function readTask(cwd: string, id: string): Task | null {
 		);
 	}
 	return loadBodies(cwd, item);
+}
+
+/**
+ * The read-time expansion of a task's `info_refs`: the shared description
+ * bodies of every referenced info node, in the refs' (sorted) order, each
+ * prefixed with a header naming the info node — so a worker reading a task
+ * sees the shared requirements written ONCE, then the task's own specific
+ * description below. Returns an empty string when the item has no info_refs.
+ *
+ * This is a CONTENT expansion only (never a graph edge): info nodes carry no
+ * status lifecycle, are never dispatched, and do not affect the ready set.
+ * A ref target that vanished is reported inline (tolerant of hand-edits).
+ * The item's OWN description is NOT included here — the caller appends it.
+ */
+export function injectedInfo(cwd: string, item: Task): string {
+	if (item.info_refs.length === 0) return "";
+	const parts: string[] = [];
+	for (const ref of item.info_refs) {
+		const src = readTask(cwd, ref);
+		if (!src) {
+			parts.push(`── shared information: "${ref}" — (missing) ──`);
+			continue;
+		}
+		const srcBody = src.description.trim();
+		parts.push(
+			`── shared information: "${ref}" (${src.title}) ──` +
+				(srcBody ? `\n${srcBody}` : "\n(empty)"),
+		);
+	}
+	return parts.join("\n\n");
+}
+
+/**
+ * A task's EFFECTIVE description for reading: the injected shared info
+ * content (info_refs) followed by the item's own description body. This is
+ * what a worker sees when they read the task — the shared requirements are
+ * pulled in automatically, so they are written (and updated) in ONE place.
+ * Editing (task_checkout) deliberately uses the raw own-description, so a
+ * worker edits only the task-specific part and the shared content stays
+ * referenced, not duplicated.
+ */
+export function effectiveDescription(cwd: string, item: Task): string {
+	const own = item.description;
+	const info = injectedInfo(cwd, item);
+	if (!info) return own;
+	return info + "\n\n" + (own.trim() ? own : "(no task-specific description)");
 }
 
 /**
@@ -780,6 +842,7 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 	deps?: string[];
 	subgraph_deps?: string[];
 	kind?: TaskKind;
+	info_refs?: string[];
 } {
 	let data: unknown;
 	try {
@@ -798,11 +861,14 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 			`tasks: draft id "${d.id}" does not match task "${cleanId}" — fix the draft or the task id`,
 		);
 	}
-	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind } = {};
+	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind; info_refs?: string[] } = {};
 	if (typeof d.title === "string") out.title = d.title;
 	if (Array.isArray(d.deps) && d.deps.every((x) => typeof x === "string")) out.deps = d.deps;
 	if (Array.isArray(d.subgraph_deps) && d.subgraph_deps.every((x) => typeof x === "string")) {
 		out.subgraph_deps = d.subgraph_deps;
+	}
+	if (Array.isArray(d.info_refs) && d.info_refs.every((x) => typeof x === "string")) {
+		out.info_refs = d.info_refs;
 	}
 	if (typeof d.kind === "string") out.kind = d.kind as TaskKind;
 	return out;
@@ -851,6 +917,37 @@ function normalizeSubgraphDeps(cwd: string, rawGates: string[]): string[] {
 		}
 	}
 	return gates;
+}
+
+/**
+ * Normalize a caller-provided info_refs list: sanitize each id, deduplicate,
+ * sort. Every ref must resolve to an existing item of kind "info" — an info
+ * ref is a CONTENT reference (its shared description is injected at read
+ * time), so it may not point at a task or module. A ref to the item's own id
+ * is rejected as a self-reference.
+ */
+function normalizeInfoRefs(cwd: string, itemId: string, rawRefs: string[]): string[] {
+	const refs = [...new Set(rawRefs.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	for (const ref of refs) {
+		if (ref === itemId) {
+			throw new Error(
+				`tasks: info_ref "${ref}" is the item's own id — an info ref must point at a shared information node, not at itself`,
+			);
+		}
+		const target = tryReadTaskFile(cwd, ref);
+		if (!target) {
+			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
+			throw new Error(
+				`tasks: info_ref "${ref}" does not exist — create the shared information node first (kind = "info") — available tasks: ${available}`,
+			);
+		}
+		if (target.kind !== "info") {
+			throw new Error(
+				`tasks: info_ref "${ref}" is not a shared information node (kind = "${target.kind}") — an info_ref must point at a node with kind = "info"; create one for the shared requirements, then reference it`,
+			);
+		}
+	}
+	return refs;
 }
 
 /**
@@ -923,7 +1020,12 @@ function assertNoCycle(cwd: string, itemId: string, deps: string[], moduleDeps: 
  * the contradiction "unit with subgraph_deps". deps are ordering edges and
  * legal on ANY kind; subgraph_deps (subgraph gates) remain module-only.
  */
-function resolveKind(raw: TaskKind | undefined, deps: string[], moduleDeps: string[] = []): TaskKind {
+function resolveKind(
+	raw: TaskKind | undefined,
+	deps: string[],
+	moduleDeps: string[] = [],
+	infoRefs: string[] = [],
+): TaskKind {
 	const kind = raw ?? "unit";
 	if (!(KINDS as readonly string[]).includes(kind)) {
 		throw new Error(`tasks: invalid kind "${String(kind)}" — one of: ${KINDS.join(" | ")}`);
@@ -932,6 +1034,23 @@ function resolveKind(raw: TaskKind | undefined, deps: string[], moduleDeps: stri
 		throw new Error(
 			`tasks: kind "unit" cannot declare subgraph_deps — a subgraph_deps gates the module's whole subgraph, and a unit has no subgraph; use kind "module"`,
 		);
+	}
+	if (kind === "info") {
+		if (deps.length > 0) {
+			throw new Error(
+				`tasks: kind "info" cannot declare deps — a shared information node is pure content, it takes no dependency edges and never joins the DAG`,
+			);
+		}
+		if (moduleDeps.length > 0) {
+			throw new Error(
+				`tasks: kind "info" cannot declare subgraph_deps — a shared information node gates nothing`,
+			);
+		}
+		if (infoRefs.length > 0) {
+			throw new Error(
+				`tasks: kind "info" cannot declare info_refs — a shared information node references no other information; it is itself the source`,
+			);
+		}
 	}
 	return kind;
 }
@@ -947,7 +1066,7 @@ export interface CommitResult {
 	item: Task;
 	/** True when this commit CREATED the task (v1) rather than updating it. */
 	created: boolean;
-	/** The fields this commit changed (title | description | deps | subgraph_deps | kind; ["created"] on create). */
+	/** The fields this commit changed (title | description | deps | subgraph_deps | kind | info_refs; ["created"] on create). */
 	changed_items: string[];
 	/** Draft files consumed (deleted) by this commit, cwd-relative. */
 	consumed: string[];
@@ -1028,9 +1147,10 @@ export function commitTask(
 		}
 		const deps = normalizeDeps(cwd, clean, draft.deps ?? []);
 		const moduleDeps = normalizeSubgraphDeps(cwd, draft.subgraph_deps ?? []);
+		const infoRefs = normalizeInfoRefs(cwd, clean, draft.info_refs ?? []);
 		assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
 		assertNoCycle(cwd, clean, deps, moduleDeps);
-		const kind = resolveKind(draft.kind, deps, moduleDeps);
+		const kind = resolveKind(draft.kind, deps, moduleDeps, infoRefs);
 		const description = existsSync(draftDesc)
 			? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
 			: "";
@@ -1041,6 +1161,7 @@ export function commitTask(
 			description,
 			deps,
 			subgraph_deps: moduleDeps,
+			info_refs: infoRefs,
 			status: "pending",
 			kind,
 			version: 1,
@@ -1082,6 +1203,7 @@ export function commitTask(
 	let title = existing.title;
 	let deps = existing.deps;
 	let moduleDeps = existing.subgraph_deps;
+	let infoRefs = existing.info_refs;
 	let kind = existing.kind;
 	if (metaScope && draftPresent) {
 		const patch = parseDraftToml(cwd, draftToml, clean);
@@ -1093,12 +1215,13 @@ export function commitTask(
 		}
 		if (patch.deps !== undefined) deps = normalizeDeps(cwd, clean, patch.deps);
 		if (patch.subgraph_deps !== undefined) moduleDeps = normalizeSubgraphDeps(cwd, patch.subgraph_deps);
+		if (patch.info_refs !== undefined) infoRefs = normalizeInfoRefs(cwd, clean, patch.info_refs);
 		if (patch.kind !== undefined) kind = patch.kind;
 		if (patch.deps !== undefined || patch.subgraph_deps !== undefined) {
 			assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
 			assertNoCycle(cwd, clean, deps, moduleDeps);
 		}
-		kind = resolveKind(kind, deps, moduleDeps);
+		kind = resolveKind(kind, deps, moduleDeps, infoRefs);
 	}
 
 	const description = descScope && existsSync(draftDesc)
@@ -1109,6 +1232,7 @@ export function commitTask(
 	if (title !== existing.title) changed.push("title");
 	if (deps.join("|") !== existing.deps.join("|")) changed.push("deps");
 	if (moduleDeps.join("|") !== existing.subgraph_deps.join("|")) changed.push("subgraph_deps");
+	if (infoRefs.join("|") !== existing.info_refs.join("|")) changed.push("info_refs");
 	if (kind !== existing.kind) changed.push("kind");
 	if (description !== existing.description) changed.push("description");
 	if (changed.length === 0) {
@@ -1125,6 +1249,7 @@ export function commitTask(
 		title,
 		deps,
 		subgraph_deps: moduleDeps,
+		info_refs: infoRefs,
 		kind,
 		description,
 		version: newVersion,
@@ -1222,6 +1347,11 @@ export function setTaskStatus(
 	const existing = readTask(cwd, clean);
 	if (!existing) {
 		throw new Error(`tasks: task "${clean}" does not exist — create it first (write a draft and task_commit)`);
+	}
+	if (existing.kind === "info") {
+		throw new Error(
+			`tasks: cannot change the status of "${clean}" — it is a shared information node (kind = "info"), pure content with no lifecycle; it never dispatches, never blocks, and never completes`,
+		);
 	}
 	if (!LEGAL_TRANSITIONS[existing.status].includes(status)) {
 		throw new Error(
@@ -1353,6 +1483,11 @@ export function setCompletionReport(
 	if (!existing) {
 		throw new Error(`tasks: task "${clean}" does not exist — create it first`);
 	}
+	if (existing.kind === "info") {
+		throw new Error(
+			`tasks: cannot write a completion report for "${clean}" — it is a shared information node (kind = "info"), pure content that is never dispatched and never completes`,
+		);
+	}
 	if (opts.expected_version === undefined) {
 		throw new Error(
 			`tasks: task_submit_report on "${clean}" requires expected_version (= the description version you read) — re-read the task first`,
@@ -1439,6 +1574,7 @@ export function listTasks(cwd: string): TaskSummary[] {
 				dispatched_to: item.dispatched_to,
 				depCount: item.deps.length,
 				subgraph_deps: item.subgraph_deps,
+				info_refs: item.info_refs,
 			});
 		} catch {
 			// corrupted — skip in the listing

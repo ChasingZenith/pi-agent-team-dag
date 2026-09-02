@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   commitTask,
+  effectiveDescription,
   HISTORY_CAP,
   listTasks,
   parseTask,
@@ -604,5 +605,106 @@ describe("listTasks / parseTask", () => {
   it("taskDraft*Path helpers sanitize the agent name", () => {
     expect(taskDraftTomlPath(CWD, "Researcher-1!", "x").endsWith(join("draft", "researcher-1", "x.toml"))).toBe(true);
     expect(taskDraftDescriptionPath(CWD, "??", "x").includes("unknown")).toBe(true);
+  });
+});
+
+// ━━ shared information nodes (kind = "info") ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe("shared information nodes (kind = info)", () => {
+  it("creates an info node with a description body", () => {
+    const item = createTask({
+      id: "site-audit-common",
+      kind: "info",
+      description: "Requirements for auditing any site.\n- check https\n- check headers",
+    });
+    expect(item.kind).toBe("info");
+    expect(item.deps).toEqual([]);
+    expect(item.info_refs).toEqual([]);
+    expect(item.description).toContain("check https");
+  });
+
+  it("info nodes cannot declare deps or subgraph_deps", () => {
+    createTask({ id: "task-a" }); // ensure the dep/gate targets exist so existence check passes first
+    expect(() =>
+      createTask({ id: "bad-info", kind: "info", deps: ["task-a"] }),
+    ).toThrow(/kind "info" cannot declare deps/);
+    expect(() =>
+      createTask({ id: "bad-info2", kind: "info", subgraph_deps: ["task-a"] }),
+    ).toThrow(/kind "info" cannot declare subgraph_deps/);
+  });
+
+  it("info nodes cannot be marked dispatched/done/blocked (no lifecycle)", () => {
+    createTask({ id: "audit-info", kind: "info" });
+    expect(() => setTaskStatus(CWD, "audit-info", "done", { updated_by: ME })).toThrow(
+      /shared information node \(kind = "info"\), pure content with no lifecycle/,
+    );
+    expect(() => setTaskStatus(CWD, "audit-info", "blocked", { updated_by: ME })).toThrow(
+      /no lifecycle/,
+    );
+  });
+
+  it("info nodes cannot receive a completion report", () => {
+    createTask({ id: "audit-info", kind: "info" });
+    draft(`draft/${ME}/audit-info.report.md`, "done");
+    expect(() =>
+      setCompletionReport(CWD, "audit-info", ME, { expected_version: 1, cname: ME }),
+    ).toThrow(/never dispatched and never completes/);
+  });
+
+  it("info_refs inject shared content at read time; editing keeps the own body only", () => {
+    createTask({ id: "common-reqs", kind: "info", description: "COMMON: audit every site\n- must be public" });
+    const site = createTask({ id: "site-a", description: "SITE-A specific: use login" });
+    // add info_ref to site-a
+    draft(`draft/${ME}/site-a.toml`, `info_refs = [ 'common-reqs' ]`);
+    const updated = commitTask(CWD, "site-a", {
+      scope: "metadata",
+      cname: ME,
+      updated_by: ME,
+      expected_version: 1,
+    }).item;
+    expect(updated.info_refs).toEqual(["common-reqs"]);
+    // effective description = injected shared info + own body
+    const eff = effectiveDescription(CWD, updated);
+    expect(eff).toContain("COMMON: audit every site");
+    expect(eff).toContain("SITE-A specific: use login");
+    // raw own body is NOT polluted by the shared content
+    expect(updated.description).toBe("SITE-A specific: use login");
+  });
+
+  it("info_refs must be a separate kind=info node; tasks and modules are rejected", () => {
+    createTask({ id: "site-a" });
+    createTask({ id: "common-reqs" }); // kind defaults to unit
+    expect(() => {
+      draft(`draft/${ME}/site-a.toml`, `info_refs = [ 'common-reqs' ]`);
+      commitTask(CWD, "site-a", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 });
+    }).toThrow(/not a shared information node/);
+  });
+
+  it("info_refs must already exist", () => {
+    createTask({ id: "site-a" });
+    expect(() => {
+      draft(`draft/${ME}/site-a.toml`, `info_refs = [ 'missing-info' ]`);
+      commitTask(CWD, "site-a", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 });
+    }).toThrow(/does not exist/);
+  });
+
+  it("an info node cannot reference another info node (it is itself the source)", () => {
+    createTask({ id: "other", kind: "info" });
+    createTask({ id: "src-info", kind: "info" });
+    draft(`draft/${ME}/src-info.toml`, `info_refs = [ 'other' ]`);
+    expect(() =>
+      commitTask(CWD, "src-info", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/kind "info" cannot declare info_refs/);
+  });
+
+  it("info_refs appears in the listing summary", () => {
+    createTask({ id: "common-reqs", kind: "info", description: "shared" });
+    createTask({ id: "site-a", description: "own" });
+    draft(`draft/${ME}/site-a.toml`, `info_refs = [ 'common-reqs' ]`);
+    commitTask(CWD, "site-a", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 });
+    const summary = listTasks(CWD).find((s) => s.id === "site-a")!;
+    expect(summary.info_refs).toEqual(["common-reqs"]);
+    const infoSummary = listTasks(CWD).find((s) => s.id === "common-reqs")!;
+    expect(infoSummary.kind).toBe("info");
   });
 });

@@ -36,6 +36,7 @@ function mkTask(partial: Partial<Task> & Pick<Task, "id">): Task {
     description: "",
     deps: [],
     subgraph_deps: [],
+    info_refs: [],
     status: "pending",
     kind: "unit",
     version: 1,
@@ -558,6 +559,53 @@ describe("renderGraph", () => {
     const out = renderGraph([testing, case1, coding], { showReady: true });
     // the gate itself is ready (no deps) — but everything gated stays out
     expect(out.endsWith("Ready: task-coding\n")).toBe(true);
+  });
+});
+
+// ━━ shared information nodes (kind = "info") won't join the graph ━━━━━━━━━━━━
+
+describe("shared information nodes (kind = info)", () => {
+  it("info nodes never appear in the ready set — even when pending with no deps", () => {
+    const info = mkTask({ id: "common-reqs", kind: "info", status: "pending" });
+    const site = mkTask({ id: "site-a", info_refs: ["common-reqs"] });
+    const r = readySet([info, site]);
+    // only the real task is ready (info_refs is content, not a dependency edge)
+    expect(r.ready.map((i) => i.id)).toEqual(["site-a"]);
+    expect(r.notReady).toEqual([]);
+  });
+
+  it("info nodes are never routed to an execution bucket", () => {
+    const info = mkTask({ id: "common-reqs", kind: "info" });
+    const site = mkTask({ id: "site-a" });
+    const b = readyBuckets([info, site]);
+    expect(b.execute.map((i) => i.id)).toEqual(["site-a"]);
+    expect(b.modules).toEqual([]);
+  });
+
+  it("info nodes are not reported as orphans (they are content sources)", () => {
+    const m = mkTask({ id: "mod", kind: "module", deps: ["site-a"] });
+    const site = mkTask({ id: "site-a" });
+    const info = mkTask({ id: "common-reqs", kind: "info" });
+    expect(orphanItems([m, site, info]).map((i) => i.id)).toEqual([]);
+  });
+
+  it("renderGraph shows info nodes in a separate section, not in the DAG tree", () => {
+    const info = mkTask({ id: "common-reqs", kind: "info", title: "Common" });
+    const site = mkTask({ id: "site-a", title: "Site A" });
+    const out = renderGraph([info, site]);
+    expect(out).toContain("── Shared information (1) ──");
+    expect(out).toContain("  § common-reqs Common");
+    expect(out).not.toContain("◻ common-reqs Common"); // never a tree node
+    expect(out).toContain("◻ site-a Site A");
+    // the info node is excluded from the status counts
+    expect(out.endsWith("pending: 1\n")).toBe(true);
+  });
+
+  it("renderGraph shows info_refs on a task's line", () => {
+    const info = mkTask({ id: "common-reqs", kind: "info", title: "Common" });
+    const site = mkTask({ id: "site-a", title: "Site A", info_refs: ["common-reqs"] });
+    const out = renderGraph([info, site]);
+    expect(out).toContain("site-a Site A (deps:0, info_refs: common-reqs)");
   });
 });
 

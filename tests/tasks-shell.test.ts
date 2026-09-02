@@ -78,10 +78,11 @@ function writeDraft(rel: string, content: string): void {
 }
 
 /** Create a task through the real flow: metadata draft (+ description draft) → task_commit. */
-function commitCreate(commit: any, id: string, title: string, opts: { kind?: string; deps?: string[]; description?: string } = {}) {
+function commitCreate(commit: any, id: string, title: string, opts: { kind?: string; deps?: string[]; info_refs?: string[]; description?: string } = {}) {
   const lines = [`id = '${id}'`, `title = '${title}'`];
   if (opts.kind) lines.push(`kind = '${opts.kind}'`);
   if (opts.deps) lines.push(`deps = [ ${opts.deps.map((d) => `'${d}'`).join(", ")} ]`);
+  if (opts.info_refs) lines.push(`info_refs = [ ${opts.info_refs.map((d) => `'${d}'`).join(", ")} ]`);
   writeDraft(`draft/${ME}/${id}.toml`, lines.join("\n"));
   if (opts.description !== undefined) writeDraft(`draft/${ME}/${id}.description.md`, opts.description);
   return commit.execute("c", { id, expected_version: 1 }, undefined, undefined);
@@ -532,5 +533,49 @@ describe("tasks extension shell", () => {
     const dirty = await read.execute("c3", { id: "Task A!" }, undefined, undefined);
     expect(dirty.details.item.id).toBe("task-a");
     expect(dirty.content[0].text).toContain('id "Task A!" was normalized to "task-a"');
+  });
+
+  it("shared info (kind=info) is injected into a task's description at read time", async () => {
+    const { pi, tools } = makeFakePi();
+    tasksExtension(pi);
+    const commit = tools.find((t) => t.name === "task_commit");
+    const read = tools.find((t) => t.name === "task_read");
+
+    await commitCreate(commit, "site-audit-common", "Common audit requirements", {
+      kind: "info",
+      description: "COMMON: check https, headers, robots.txt for any site",
+    });
+    const site = await commitCreate(commit, "site-100", "Audit site 100", {
+      info_refs: ["site-audit-common"],
+      description: "SITE-100 only: paid plan",
+    });
+    expect(site.details.info_refs).toEqual(["site-audit-common"]);
+
+    // reading the task's description injects the shared content + own body
+    const r = await read.execute("c4", { id: "site-100", fields: "description" }, undefined, undefined);
+    const desc = r.content[0].text;
+    expect(desc).toContain("COMMON: check https, headers, robots.txt");
+    expect(desc).toContain("SITE-100 only: paid plan");
+    // the shared info node is listed in the metadata graph context
+    expect(desc).toContain("info_refs: site-audit-common");
+
+    // the info node itself lists no lifecycle/ready semantics
+    const info = await read.execute("c5", { id: "site-audit-common" }, undefined, undefined);
+    expect(info.content[0].text).toContain("ready: none — shared information");
+  });
+
+  it("info node never becomes ready (not dispatchable), excluded from ready set", async () => {
+    const { pi, tools } = makeFakePi();
+    tasksExtension(pi);
+    const commit = tools.find((t) => t.name === "task_commit");
+    const ready = tools.find((t) => t.name === "task_ready_set");
+
+    await commitCreate(commit, "site-audit-common", "Common", { kind: "info" });
+    await commitCreate(commit, "site-100", "Audit 100");
+    const r = await ready.execute("c6", {}, undefined, undefined);
+    const text = r.content[0].text;
+    // only the real task is ready; the shared info node is never dispatchable
+    expect(text).toContain("site-100");
+    expect(text).not.toContain("site-audit-common");
   });
 });

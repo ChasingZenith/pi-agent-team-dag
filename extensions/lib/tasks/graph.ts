@@ -17,7 +17,9 @@
  *
  * Semantics: cancelled counts as satisfied everywhere; the ready set is
  * pending items with all effective deps (deps + gates) satisfied —
- * dispatchable in parallel. Cycles / dangling deps only arise from
+ * dispatchable in parallel. Info nodes (kind = "info") are pure shared
+ * content, never in the ready set nor dispatchable, and are excluded from
+ * orphan detection. Cycles / dangling deps only arise from
  * hand-edited or corrupted files; all functions guard against them (never
  * hang, never crash the read path).
  */
@@ -127,6 +129,7 @@ export function readySet(items: Task[]): ReadySetResult {
 	const ready: Task[] = [];
 	const notReady: Array<{ item: Task; missing: string[] }> = [];
 	for (const item of items) {
+		if (item.kind === "info") continue; // shared info: pure content, never dispatchable
 		if (item.status !== "pending") continue;
 		const gates = extra.get(item.id);
 		const effDeps = gates && gates.length > 0 ? [...item.deps, ...gates] : item.deps;
@@ -156,6 +159,7 @@ export function readyBuckets(ready: Task[]): { execute: Task[]; modules: Task[] 
 	const execute: Task[] = [];
 	const modules: Task[] = [];
 	for (const item of ready) {
+		if (item.kind === "info") continue; // shared info never dispatches
 		if (item.kind === "module") modules.push(item);
 		else execute.push(item);
 	}
@@ -286,6 +290,7 @@ export function orphanItems(items: Task[]): Task[] {
 	}
 	return items
 		.filter((i) => i.status !== "done" && i.status !== "cancelled")
+		.filter((i) => i.kind !== "info") // shared info nodes are sources, not loose tasks
 		.filter((i) => !referenced.has(i.id) && !inSubgraph.has(i.id))
 		.sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -340,12 +345,15 @@ const STATUS_ORDER: TaskStatus[] = ["pending", "dispatched", "active", "done", "
  * parent — this is a forest, not a deduped graph.
  *
  * Footer: with opts.showReady a "Ready: <ids>" line; otherwise per-status
- * counts (nonzero only).
+ * counts (nonzero only). Info nodes (kind = "info") are rendered as a
+ * separate "Shared information" section after the tree — they are pure
+ * content, not DAG nodes — and are excluded from the status counts.
  */
 export function renderGraph(items: Task[], opts?: { showReady?: boolean }): string {
 	const byId = new Map(items.map((i) => [i.id, i]));
 	const dependedOn = new Set(items.flatMap((i) => i.deps));
 	const roots = items
+		.filter((i) => i.kind !== "info") // shared info renders as a separate section, not in the DAG tree
 		.filter((i) => !dependedOn.has(i.id))
 		.sort((a, b) => a.id.localeCompare(b.id));
 
@@ -360,8 +368,12 @@ export function renderGraph(items: Task[], opts?: { showReady?: boolean }): stri
 			item.subgraph_deps && item.subgraph_deps.length > 0
 				? `, subgraph_deps: ${item.subgraph_deps.join(", ")}`
 				: "";
+		const infoMark =
+			item.info_refs && item.info_refs.length > 0
+				? `, info_refs: ${item.info_refs.join(", ")}`
+				: "";
 		lines.push(
-			`${"  ".repeat(depth)}${glyph} ${item.id}${title}${kindMark} (deps:${item.deps.length}${gateMark})`,
+			`${"  ".repeat(depth)}${glyph} ${item.id}${title}${kindMark} (deps:${item.deps.length}${gateMark}${infoMark})`,
 		);
 		if (inCycle) return;
 		path.add(item.id);
@@ -371,7 +383,18 @@ export function renderGraph(items: Task[], opts?: { showReady?: boolean }): stri
 		}
 		path.delete(item.id);
 	};
+	const infoNodes = items.filter((i) => i.kind === "info").sort((a, b) => a.id.localeCompare(b.id));
+
 	for (const root of roots) renderNode(root, 0);
+
+	if (infoNodes.length > 0) {
+		lines.push("");
+		lines.push(`── Shared information (${infoNodes.length}) ──`);
+		for (const n of infoNodes) {
+			const title = n.title ? ` ${n.title}` : "";
+			lines.push(`  § ${n.id}${title} (referenced by ${[...items].filter((i) => i.info_refs?.includes(n.id)).length})`);
+		}
+	}
 
 	lines.push("");
 	if (opts?.showReady) {
@@ -380,6 +403,7 @@ export function renderGraph(items: Task[], opts?: { showReady?: boolean }): stri
 	} else {
 		const counts = new Map<TaskStatus, number>();
 		for (const item of items) {
+			if (item.kind === "info") continue; // shared info has no lifecycle, excluded from counts
 			counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
 		}
 		const parts = STATUS_ORDER.filter((s) => (counts.get(s) ?? 0) > 0)

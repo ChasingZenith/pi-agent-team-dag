@@ -17,7 +17,17 @@
 
 ### 2.1 task
 
-图上节点为 task ——任何粒度（从「实现整个认证系统」到「改一个 typo」）、任何角色视角下都是同一个实体，不规定基础单位。节点通过 `kind` 字段声明粒度（见 §3.2）：`unit`（可直接执行——可有顺序依赖 deps、无聚合子图）或 `module`（聚合——可能有子图、可能需要下放）。
+图上节点为 task ——任何粒度（从「实现整个认证系统」到「改一个 typo」）、任何角色视角下都是同一个实体，不规定基础单位。节点通过 `kind` 字段声明类型（见 §3.2）：`unit`（可直接执行——可有顺序依赖 deps、无聚合子图）、`module`（聚合——可能有子图、可能需要下放），或 `info`（共享信息节点——见 §2.1.1）。
+
+#### 2.1.1 共享信息节点（kind = info）
+
+多个 task 常需要**同一份信息**（例如「对 100 个网站做相同的审计」——共同要求写一遍，各站点只写差异）。`info` 节点就是为此存在：它**不是 task**，而是纯内容源，用于消除重复要求。
+
+- **不参与任何图语义**：`info` 节点没有 deps、没有子图门、不进就绪集、不派发、不做状态迁移（pending/active/done…完全无关），也不 be 编辑/完成记录。它对图的推进零影响——纯内容，随时可取用。
+- **内容注入**：普通 task 通过 `info_refs = [<info id>]`（本章元数据字段，见 §3.2）引用一个或多个 `info` 节点；**读取该 task 的 description 时，被引用 `info` 节点的正文会自动注入**（`── shared information: "<id>" (<title>) ──` 段在 task 自己的正文之前）。因此共享要求**写一遍、更新一遍**，所有引用它的 task 自动带上最新内容——只在各自正文里写差异。
+- **`info_refs` 是内容引用，不是图边**：它不影响就绪集/依赖/完成状态——引用 `info` 的 task 仍是就绪即派发（共享信息不 block、不排先后）。
+- **checkout 编辑分离**：`task_checkout` 拷的是 task **自己的正文**（不注入共享内容），所以编辑不会把共享内容重复进 task——共享内容始终保持引用、不复制；`task_read(fields="description")` 返回的才是注入后的有效描述。
+- **校验**（提交时）：`info_refs` 必须指向已存在的 `kind="info"` 节点；`info` 节点本身不能声明 deps / subgraph_deps / info_refs（它是源头）；`info` 节点无状态迁移，标 done/cancelled/report 都被拒。
 
 ### 2.2 DAG (task graph)
 
@@ -110,8 +120,9 @@
 | `title` | string | 一句话标题 |
 | `deps` | string[] | 依赖边：前置依赖 id 列表——任何粒度皆可声明；unit 的 deps 是纯顺序依赖（等待前置完成，仍直接执行） |
 | `subgraph_deps` | string[] | 子图门（仅 module）（语义见 §2.7，校验见 §4） |
-| `status` | string | `pending` / `dispatched` / `active` / `done` / `blocked` / `cancelled`（见 §2.4） |
-| `kind` | string | `unit`（默认）/ `module`；unit 不能声明 `subgraph_deps` |
+| `info_refs` | string[] | 共享信息引用（内容引用，**不是图边**）：所引用 `info` 节点（kind=`"info"`）的正文在此 task 读 description 时自动注入（见 §2.1.1）；unit / module 皆可声明，`info` 节点自身不可声明 |
+| `status` | string | `pending` / `dispatched` / `active` / `done` / `blocked` / `cancelled`（见 §2.4）；`info` 节点无状态语义，状态迁移被拒 |
+| `kind` | string | `unit`（默认）/ `module` / `info`（共享信息节点）；unit 不能声明 `subgraph_deps`；info 不能声明 deps / subgraph_deps / info_refs |
 | `version` | number | 内容修订号（§3.1）；`task_read` 返回，`task_commit` / `task_submit_report` 携带 `expected_version` 做乐观并发校验（必填，见 §3.4） |
 | `description_sha256` / `report_sha256` | string | 真本 description.md / report.md 的 sha256（含 frontmatter 全文），提交时写入，读取时校验（见 §3.5） |
 | `history` | array | 变更追踪，**只存摘要**（每条：`changed_items`（本次改了什么）+ 关联的 `version` + `event`（lifecycle 动作）+ `updated_by` + `updated_at` + `change_summary`），cap 10，最新在前——防上下文膨胀；被替换版本的完整内容见 `history/<id>.v<N>/` 快照 |
@@ -133,7 +144,7 @@ version: 3                              for_version: 3
 
 - frontmatter 由机器在提交时生成/重建；`task_checkout` 给出的草稿**只含正文、不带 frontmatter**（description 拷自真本但剥离 frontmatter；report 是空白脚手架），提交时统一剥离并重写。
 - **`for_version` 锚定报告针对的 description 版本**：description 变更后旧报告保留、`for_version` 不变——与新版本对照即可看出它针对旧契约（陈旧可见）。reopen/undo 时报告被清空（工作重启）。
-- **草稿 metadata toml 是 PATCH**：只写要改的字段（`title / deps / subgraph_deps / kind`），缺席字段保持现值（已有任务）/ 默认值（新建）；`status / version / history / 时间戳 / hash` 在草稿中一律被忽略（机器管理——状态走生命周期工具）。
+- **草稿 metadata toml 是 PATCH**：只写要改的字段（`title / deps / subgraph_deps / kind / info_refs`），缺席字段保持现值（已有任务）/ 默认值（新建）；`status / version / history / 时间戳 / hash` 在草稿中一律被忽略（机器管理——状态走生命周期工具）。
 
 ### 3.3 示例
 
@@ -200,13 +211,13 @@ change_summary = '重写接口契约'
 
 | 工具 | 参数 | 作用 |
 |------|------|------|
-| `task_commit` | `id`, `expected_version`(必填), `scope?`(`metadata`\|`description`\|`all`，默认 `all`), `change_summary?` | **唯一的内容写入/版本函数**：读调用者草稿（`draft/<cname>/`）→ 校验（deps 存在/无环/门约束/kind）→ 归档被替换版本（`history/<id>.v<N>/` 3 文件）→ 写新真本（metadata + description.md；report.md 不动）→ version+1 → history 摘要 + 审计 + broadcast → **删除已消费草稿**。创建：草稿 toml 含 id/title（必填）+ 可选 deps/subgraph_deps/kind → v1（`expected_version` 必须为 1）。更新：metadata 草稿是 patch（只写要改的字段）；`expected_version` **必填**（= `task_read` 返回的版本），版本已越过 → 冲突拒绝（重读、合并草稿、重试）。无变化拒绝。版本只在 title/description/deps/subgraph_deps/kind 变化时 +1 |
+| `task_commit` | `id`, `expected_version`(必填), `scope?`(`metadata`\|`description`\|`all`，默认 `all`), `change_summary?` | **唯一的内容写入/版本函数**：读调用者草稿（`draft/<cname>/`）→ 校验（deps 存在/无环/门约束/kind/info_refs）→ 归档被替换版本（`history/<id>.v<N>/` 3 文件）→ 写新真本（metadata + description.md；report.md 不动）→ version+1 → history 摘要 + 审计 + broadcast → **删除已消费草稿**。创建：草稿 toml 含 id/title（必填）+ 可选 deps/subgraph_deps/kind/info_refs → v1（`expected_version` 必须为 1）。`kind="info"` 建共享信息节点（纯内容、裸 description）；`info_refs` 引用 `info` 节点注入共享要求（见 §2.1.1）。更新：metadata 草稿是 patch（只写要改的字段）；`expected_version` **必填**（= `task_read` 返回的版本），版本已越过 → 冲突拒绝（重读、合并草稿、重试）。无变化拒绝。版本只在 title/description/deps/subgraph_deps/kind/info_refs 变化时 +1 |
 | `task_checkout` | `id`, `scope?`(`description`\|`report`，默认 `description`), `version?` | 初始化自己的草稿（改内容的 Step 1，只给正文、不带 frontmatter）。**创建新任务**：`version=0`（id 尚不存在）→ 脚手架化 metadata 草稿（含 `id`）+ 空 description 草稿，填好后 `task_commit(id, expected_version=1)` 建 v1。**已存在任务**：省略 version = 当前版本，把真本 `description.md` 的**正文**（剥离 frontmatter）复制到 `draft/<cname>/<id>.description.md`；`version=<n>`（n<当前）→ 把 `history/<id>.v<n>/` 该历史快照的正文复制进草稿（`scope="description"` 时）。`scope="report"`：在 `draft/<cname>/<id>.report.md` 创建**空白草稿**（不带 frontmatter，不复制旧报告），之后 `write/edit` 正文 → `task_submit_report`（提交时补上 `for_version` = 当前 description 版本，见 docs/5 §3）。已有草稿时拒绝覆盖（需手动清除后重建） |
 | `task_set_status` | `id`, `status`, `dispatched_to?`, `change_summary?` | 状态迁移（见 §2.4）；返回 `unlocked`（见 §2.6）；`dispatched_to` 记录负责人——仅设置 `dispatched` 时有效，done/cancelled 自动清除。**生命周期事件：不 bump 版本**，只追加 history 摘要（`changed_items=["status"]` + `event`） |
-| `task_read` | `id`, `version?`, `fields?` | 一律返回元数据 + 图上下文（身份行、title/kind、deps、`subgraph_deps`、dispatched_to、execution_session、依赖方、缺失 deps（含门）、就绪性、变更历史）+ 正文字数（`description (vN): N chars` / `completion report (for description vN): N chars`）+ 你自己的未提交草稿数 + **完整性警告**（存储细节不外泄，读与编辑分离：编辑走 `task_checkout` + write/edit + `task_commit`/`task_submit_report`）；长正文按需加载——`fields="description"` / `fields="report"` / `fields="full"`；省略的正文报告字数；`version=<n>` 读历史快照（同样受 `fields` 约束） |
-| `task_list` | 无参 | 扁平表列出全部节点：id、title、状态 + 图告警（环 / 悬空依赖 / 游离任务）+ 状态计数；module 行尾带 `[module]` 标记、带门节点行尾 `subgraph_deps: <ids>` |
+| `task_read` | `id`, `version?`, `fields?` | 一律返回元数据 + 图上下文（身份行、title/kind、deps、`subgraph_deps`、`info_refs`、dispatched_to、execution_session、依赖方、缺失 deps（含门）、就绪性、变更历史）+ 正文字数（`description (vN): N chars` / `completion report (for description vN): N chars`）+ 你自己的未提交草稿数 + **完整性警告**（存储细节不外泄，读与编辑分离：编辑走 `task_checkout` + write/edit + `task_commit`/`task_submit_report`）；长正文按需加载——`fields="description"` / `fields="report"` / `fields="full"`；省略的正文报告字数；`version=<n>` 读历史快照（同样受 `fields` 约束）。description 返回的是**有效描述**：被引用 `info` 节点正文注入 + task 自身正文（见 §2.1.1）；`kind="info"` 节点显示 `ready: none — shared information`，无生命周期 |
+| `task_list` | 无参 | 扁平表列出全部节点：id、title、状态 + 图告警（环 / 悬空依赖 / 游离任务）+ 状态计数；module 行尾带 `[module]` 标记、带门节点行尾 `subgraph_deps: <ids>`、带共享引用节点行尾 `info_refs: <ids>`；`info` 节点带 `[info]` 标记并单列 `shared info` 计数（不计入状态计数） |
 | `task_ready_set` | `for?` | 查询就绪集（见 §2.5，**按 kind 分桶**：unit 执行 / module 待驱动）+ 每个未就绪 pending 项及其缺失 deps + 进度计数；`for=<id>` 缩到该节点及其依赖闭包 |
-| `task_render` | 无参 | 整图渲染为缩进树（glyph 反映节点状态） |
+| `task_render` | 无参 | 整图渲染为缩进树（glyph 反映节点状态）；`info` 节点单列在 `── Shared information (N) ──` 段（不进 DAG 树），普通节点行尾带 `subgraph_deps: <ids>` / `info_refs: <ids>` |
 
 worker 的报告工具——`task_checkout(id, scope="report")`（生成空白报告草稿）与 `task_submit_report`（提交报告：读草稿 → 校验 `dispatched_to` 身份 + `expected_version`（description 契约未漂移）→ 以 `for_version` 锚定当前版本提交 → 自动回复委托消息）——见 docs/5 §3，不属于本扩展。
 

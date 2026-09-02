@@ -14,11 +14,19 @@
  * dispatch list managers delegate from (task_ready_set); marking done unlocks
  * dependents that became newly ready (dispatch them in parallel).
  *
+ * A THIRD kind — "info" (shared information node) — is NOT a DAG node:
+ * pure content with no deps/gate/status lifecycle, never in the ready set,
+ * never dispatched. Tasks reference it via info_refs (content references,
+ * not graph edges): the info node's description body is injected into the
+ * task's description at read time (task_read fields=description). This is how
+ * repeated requirements are written ONCE and shared by many tasks — e.g. the
+ * same audit applied to 100 sites.
+ *
  * CONTENT IS FILE-DRIVEN: the plan is edited as FILES. Each task is three
  * true copies (metadata toml + description.md + report.md) plus per-agent
  * drafts under .pi/tasks/draft/<cname>/. Agents write/edit DRAFTS and
  * task_commit is the single content write: it validates (deps existence, cycles, kind), forms a
- * new version (+1 on any change to title/description/deps/subgraph_deps/kind),
+ * new version (+1 on any change to title/description/deps/subgraph_deps/kind/info_refs),
  * and rewrites the true copies, consuming the drafts it used. task_checkout
  * initializes the caller's draft BODY-ONLY (frontmatter is never handed to
  * the draft; commit re-adds it). Lifecycle events (status
@@ -141,8 +149,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"The single content write: commits YOUR drafts into the true copies and forms a new version. " +
 			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then commit here — task_commit is the only way content becomes a version. " +
-			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
-			"Clear gates from a module by putting subgraph_deps = [] in the draft. " ,
+			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind / info_refs; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
+			"Clear gates from a module by putting subgraph_deps = [] in the draft. " +
+			"info_refs = [<ids>] references shared information nodes (kind = \"info\") whose description is injected into this task at read time — write common requirements ONCE, reference them from many tasks (e.g. the same audit applied to 100 sites).",
 		parameters: Type.Object({
 			id: Type.String({
 				description:
@@ -219,6 +228,7 @@ export default function (pi: ExtensionAPI) {
 					kind: r.item.kind,
 					deps: r.item.deps,
 					subgraph_deps: r.item.subgraph_deps,
+					info_refs: r.item.info_refs,
 					version: r.item.version,
 					created: r.created,
 					changed_items: r.changed_items,
@@ -329,7 +339,7 @@ export default function (pi: ExtensionAPI) {
 				writes.push(
 					{
 						path: metaPath,
-						content: `id = "${cleanId}"\n# title = "..."    # REQUIRED for creation\n# deps = []\n# subgraph_deps = []\n# kind = "unit"     # or "module"\n`,
+						content: `id = "${cleanId}"\n# title = "..."    # REQUIRED for creation\n# deps = []\n# subgraph_deps = []\n# info_refs = []    # ids of shared info nodes (kind = \"info\") to inject\n# kind = "unit"     # or "module", or "info" (shared information: pure content)\n`,
 						label: "metadata",
 					},
 					{ path: dst, content: "", label: "description" },
@@ -601,6 +611,9 @@ pi.registerTool({
 				if (snap.subgraph_deps.length > 0) {
 					lines.push(`subgraph_deps: ${snap.subgraph_deps.join(", ")} (subgraph gates — whole subgraph waits for these)`);
 				}
+				if (snap.info_refs.length > 0) {
+					lines.push(`info_refs: ${snap.info_refs.join(", ")} (shared information injected into this item's description)`);
+				}
 				if (snap.dispatched_to) {
 					lines.push(`dispatched_to: ${snap.dispatched_to.name}`);
 				}
@@ -685,13 +698,17 @@ pi.registerTool({
 			if (item.subgraph_deps.length > 0) {
 				lines.push(`subgraph_deps: ${item.subgraph_deps.join(", ")} (subgraph gates — the whole subgraph waits for these)`);
 			}
+			if (item.info_refs.length > 0) {
+				lines.push(`info_refs: ${item.info_refs.join(", ")} (shared information injected into this item's description)`);
+			}
 			const descLen = item.description?.length ?? 0;
 			const reportLen = item.completion_report?.length ?? 0;
+			const isInfo = item.kind === "info";
 			lines.push(
 				`dispatched_to: ${item.dispatched_to ? item.dispatched_to.name : "(none)"}`,
 				`execution_session: ${item.execution_session ? `${item.execution_session.session_id}` : "(none — the worker records it at task_start)"}`,
 				`dependents: ${dependents.length > 0 ? dependents.join(", ") : "(none)"}`,
-				readyLine,
+				isInfo ? "ready: none — shared information (pure content, never dispatched)" : readyLine,
 				`description (v${item.version}): ${descLen} chars`,
 				`completion report (for description v${item.report_for_version ?? "?"}): ${reportLen} chars`,
 			);
@@ -704,16 +721,21 @@ pi.registerTool({
 			if (item.integrity_warnings && item.integrity_warnings.length > 0) {
 				for (const w of item.integrity_warnings) lines.push(`⚠ integrity: ${w}`);
 			}
-			// Long bodies — loaded on demand.
+			// Long bodies — loaded on demand. The description is the EFFECTIVE one:
+			// shared info (info_refs) injected, then the item's own body — so a
+			// worker reading a task sees shared requirements written once plus
+			// the task-specific part. (Editing via task_checkout uses the raw
+			// own-description, keeping shared content referenced, not copied.)
+			const effective = store.effectiveDescription(cwd, item);
 			if (fields === "description") {
-				lines.push(item.description ? `description: ${item.description}` : "description: (none)");
+				lines.push(effective ? `description: ${effective}` : "description: (none)");
 				if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}", fields="report")`);
 			} else if (fields === "report") {
 				if (item.completion_report) lines.push(`── Completion report (for description v${item.report_for_version ?? "?"}) ──`, item.completion_report);
 				else lines.push("completion report: (none)");
 				if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}", fields="description")`);
 			} else if (fields === "full") {
-				if (item.description) lines.push(`description: ${item.description}`);
+				if (effective) lines.push(`description: ${effective}`);
 				if (item.completion_report) {
 					lines.push(
 						`── Completion report (for description v${item.report_for_version ?? "?"} — written by the dispatched agent; the manager reads it before task_complete) ──`,
@@ -816,7 +838,11 @@ pi.registerTool({
 				blocked: 0,
 				cancelled: 0,
 			};
-			for (const i of itemsArr) counts[i.status]++;
+			let infoCount = 0;
+			for (const i of itemsArr) {
+				if (i.kind === "info") infoCount++;
+				else counts[i.status]++;
+			}
 
 			const row = (s: (typeof summaries)[number]) => {
 				const glyph = STATUS_GLYPH[s.status] ?? "◻";
@@ -830,7 +856,9 @@ pi.registerTool({
 				if (s.dispatched_to) parts.push(`dispatched: ${s.dispatched_to.name}`);
 				if (readyIds.has(s.id)) parts.push("ready");
 				if (s.kind === "module") parts.push("[module]");
+				if (s.kind === "info") parts.push("[info]");
 				if (s.subgraph_deps.length > 0) parts.push(`subgraph_deps: ${s.subgraph_deps.join(", ")}`);
+				if (s.info_refs.length > 0) parts.push(`info_refs: ${s.info_refs.join(", ")}`);
 				return `  ${parts.join(" · ")}`;
 			};
 			const warningLines: string[] = [];
@@ -840,7 +868,8 @@ pi.registerTool({
 				warningLines.push(`  ⚠ orphan: ${o.id} (${o.status}) — no dependents, outside every module subgraph`);
 			const header =
 				`task_list: ${summaries.length} item(s) — ${counts.done} done · ${counts.blocked} blocked · ` +
-				`${counts.pending} pending · ${counts.dispatched} dispatched`;
+				`${counts.pending} pending · ${counts.dispatched} dispatched` +
+				(infoCount > 0 ? ` · ${infoCount} shared info` : ``);
 			const body = summaries.map(row).join("\n");
 			const text =
 				header +
@@ -908,9 +937,10 @@ pi.registerTool({
 			}
 			const { ready, notReady } = graph.readySet(scope);
 			const { execute, modules } = graph.readyBuckets(ready);
+			const taskScope = scope.filter((i) => i.kind !== "info"); // shared info counts out
 			const progress: Record<string, number> = {
 				done: 0,
-				total: scope.length,
+				total: taskScope.length,
 				blocked: 0,
 				dispatched: 0,
 				active: 0,
@@ -918,7 +948,7 @@ pi.registerTool({
 				cancelled: 0,
 				ready: ready.length,
 			};
-			for (const i of scope) {
+			for (const i of taskScope) {
 				if (i.status === "done") progress.done++;
 				else if (i.status === "blocked") progress.blocked++;
 				else if (i.status === "dispatched") progress.dispatched++;
