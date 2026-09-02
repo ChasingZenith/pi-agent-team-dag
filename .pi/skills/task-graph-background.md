@@ -1,42 +1,36 @@
 ---
 name: task-graph-background
-description: Manages directed acyclic graph (DAG) execution workflows, including Unit vs. Module task typing, explicit dependency links, and sub-graph gating logic.
+description: Manages directed acyclic graph (DAG) execution workflows, including Unit / Module / info task typing, explicit dependency links, and sub-graph gating logic.
 ---
 
 # Task Dependence Graph
 
-Workflows are modeled as a Directed Acyclic Graph (DAG) consisting of two distinct task types, explicit execution edges, and dynamic gating rules.
+Workflows are modeled as a Directed Acyclic Graph (DAG) over a single task entity at any granularity, with two graph relationships (`deps` and `subgraph_deps`), plus a non-graph `info` kind.
 
 ## 1. Task Types
 
-- **Unit**: A concrete, directly executable work item assigned to a single agent.
-  - *Constraint*: Units are atomic leaves in the graph. Units **cannot** carry `deps` (dependencies) or `subgraph_deps` (gates).
-- **Module**: A higher-level objective that encompasses sub-goals or multiple execution phases.
-  - *Constraint*: Modules act as containers/interfaces. They do not specify atomic inner details up front; their subgraphs are decomposed layer-by-layer as execution progresses. Modules **can** carry `deps` and `subgraph_deps`.
+- Unit: A concrete work item scoped to be resolvable by a single agent within a 400k token budget.
+  - Constraint: Units carry `deps` — the unit waits for its prerequisites to finish before it starts.
+- Module: A higher-level objective that encompasses sub-goals or multiple execution phases.
+  - Constraint: Modules act as containers/interfaces. They do not specify atomic inner details up front; their subgraphs are decomposed layer-by-layer as execution progresses. A module's `deps` are its children (the sub-goals it decomposes into), and it finishes only when all of them reach a terminal state; it can additionally carry `subgraph_deps`.
+- Info: A shared information node — NOT a DAG node. Pure content with no deps, no subgraph gate, no status lifecycle; never in the ready set, never dispatched, excluded from orphans. Tasks reference it via `info_refs` (content references, not graph edges): the info node's description body is injected into the referencing task's description at read time — write common requirements ONCE and share them across many tasks.
 
 ## 2. Dependency Edge Types
 
-### A. Ordering Dependencies (`deps`)
-- Directed ordering edges where `A -> B` indicates that task A must be completed (or cancelled) before task B can start (`A` is listed in `B.deps`).
-- **Module Parent Completion Rule**: A parent module's `deps` are its children. A module task is considered finished only when all of its child tasks in `deps` reach a terminal state.
+## 2. Dependency Edge Types
 
-### B. Subgraph Gates (`subgraph_deps`)
-- **Modules only**. A gating mechanism, not a direct ordering edge between individual nodes.
-- Setting `B.subgraph_deps = [A]` causes **B's entire transitive subgraph** (B itself, its children, grandchildren, and all downstream nodes) to wait for task A to finish before execution starts.
-- **Dynamic Expansion**: Gates are stored once on the parent module and expanded automatically at read time. Any child/grandchild node added under module B later automatically inherits the gate without manual enumeration into every sub-node's `deps`.
-- **Validation Constraint**: A gate cannot reference a node that resides inside the gated module's own subgraph.
+Both `deps` and `subgraph_deps` express the same precedence relationship — `A` completed (or cancelled) before `B` can start — with the difference being the scope of `B` the edge gates, and how `deps` on a module is additionally read.
+
+### A. `deps` — precedence to a single node
+- `B.deps = [A]` means A must be done (or cancelled) before B itself can start. This is the node-level precedence edge — a unit waits for its prerequisites.
+- Subtask containment on modules: a module's `deps` are also its children (the sub-goals it decomposes into). A module is finished only when all of its children in `deps` reach a terminal state. So on a module, `deps` carries a containment (subtask) meaning in addition to the precedence meaning.
+
+### B. `subgraph_deps` — precedence to an entire subgraph
+- Modules only. `B.subgraph_deps = [A]` gates A-before-B's whole transitive subgraph — B itself plus all its children, grandchildren, and downstream nodes wait for A to finish before any of them starts. It is the same precedence idea, just applied to the whole subtree instead of one node.
+- Dynamic Expansion: the gate is stored once on the parent module and expanded automatically at read time — any child/grandchild later added under B inherits the gate without being enumerated into each node's own `deps`.
+- Validation Constraint: a gate cannot reference a node inside the gated module's own subgraph (that would gate B against itself).
 
 ## 3. Graph Integrity Rules
 
-1. **Strict Acyclicity**: The store validates every write against the live graph. Any `task_commit` that would form a cycle (evaluating expanded gates alongside standard `deps`) is rejected with a cycle path trace in the error.
-2. **Bottom-Up Creation**: Dependencies and gates must exist in the system *before* referencing them (`deps` and `subgraph_deps` targets must be created first).
-
-## 4. Graph Operations & Tools
-
-The full operational guidance for every graph tool lives in each tool's own description, shown at call time: `task_commit`, `task_checkout`, `task_set_status`, `task_read`, `task_list`, `task_ready_set`, `task_render`. Key flows:
-
-- **Node Creation / Subgraph Embedding**: `task_checkout` to prepare a draft → edit it as a file → `task_commit` (metadata PATCH: only present fields change; `status` / `version` / `history` are machine-managed). Clear gates by putting `subgraph_deps = []` in the draft.
-- **Description editing**: `task_checkout(scope="description")` → edit → `task_commit(scope="description")`.
-- **Worker reports**: `task_checkout(scope="report")` + `task_submit_report` — see the `task-lifecycle-reporting` skill. A report is anchored to the exact description version the worker executed; if that is older than the current version the report is **accepted but flagged stale** (the worker must not be forced to re-base work it legitimately did against an older contract). The stale flag is a **read-time** cue: when reviewing the node, `report_for_version < version` tells you the report was written against an OLDER plan, so its findings may seed a correction (revise the description, re-dispatch) rather than validate the current contract.
-- **Completion judgment**: before `task_complete`, read the completion report's anchor (`report_for_version`). If it is *behind* the current version, the work was done against an **older plan** — decide whether the old-contract work still satisfies the current description, or whether the stale report uncovers new findings that belong in a correction (revise the description, re-dispatch) before closing. `task_complete` prints a ⚠ stale warning and sets `details.stale_report` when this applies.
-- **Read & Execution**: `task_read` (metadata + graph context by default, long bodies on demand via `fields`), `task_list`, `task_ready_set` (ready set / missing deps), `task_render` (graph tree), and lifecycle `task_set_status` — status transitions do NOT bump the version (versions count content commits only).
+1. Strict Acyclicity: The store validates every write against the live graph. Any `task_commit` that would form a cycle (evaluating expanded gates alongside standard `deps`) is rejected with a cycle path trace in the error.
+2. Bottom-Up Creation: Dependencies and gates must exist in the system before referencing them (`deps` and `subgraph_deps` targets must be created first).

@@ -1003,7 +1003,7 @@ pi.registerTool({
 		label: "Task Ready Set",
 		description:
 			"The dispatch query for managers: the READY SET — pending items with all deps satisfied, dispatchable " +
-			"in parallel, grouped by granularity kind (unit — directly executable; module — may need delegation) — " +
+			"in parallel, grouped by granularity kind (unit — a concrete work item a single agent can resolve within a 400k token budget; module — may need decomposition or delegation) — " +
 			"plus each pending item that is not ready with its missing deps, and overall progress (done/total, " +
 			"blocked count). Run it before delegating the next batch of work. " +
 			"Optional for=<item id> scopes the query to that item's subgraph — the item itself plus its dependency " +

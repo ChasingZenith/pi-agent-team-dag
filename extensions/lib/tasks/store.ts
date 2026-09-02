@@ -119,11 +119,10 @@ export type TaskStatus = "pending" | "dispatched" | "active" | "done" | "blocked
 const STATUSES: readonly TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled"];
 
 /**
- * Granularity kind: "unit" (directly executable, no children) or "module"
- * (aggregation — may have a subgraph below it and need delegation). Review
- * nodes are modules too: their deps are the implementation children they
- * verify. Both kinds carry deps (ordering edges — see Task.deps); the
- * difference is executability. subgraph_deps (subgraph gates) stay
+ * Granularity kind: "unit" (a concrete work item a single agent can resolve within a
+ * 400k token budget) or "module" (aggregation — may have a subgraph below it and need
+ * delegation). Both kinds carry deps (precedence edges — see Task.deps); the difference is
+ * granularity/executability, not dependency freedom. subgraph_deps (subgraph gates) stay
  * module-only — a gate is meaningless without a subgraph to gate.
  */
 export type TaskKind = "module" | "unit" | "info";
@@ -1065,7 +1064,7 @@ function assertNoCycle(cwd: string, itemId: string, deps: string[], moduleDeps: 
 
 /**
  * Resolve the granularity kind: default "unit"; rejects unknown values and
- * the contradiction "unit with subgraph_deps". deps are ordering edges and
+ * the contradiction "unit with subgraph_deps". deps are precedence edges and
  * legal on ANY kind; subgraph_deps (subgraph gates) remain module-only.
  */
 function resolveKind(

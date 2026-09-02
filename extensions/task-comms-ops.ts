@@ -582,7 +582,13 @@ export default function (pi: ExtensionAPI) {
 		"done",
 		"Mark a task done. Rejected while any dep is unsatisfied (the error lists the missing deps) — complete " +
 		"bottom-up, children first. Returns the newly unlocked dependents (dispatch each as its agent name arrives) and " +
-		"automatically notifies their dispatched agents.",
+		"automatically notifies their dispatched agents. " +
+		"Before completing, read the completion report's anchor (task_read fields=\"report\" shows report_for_version). " +
+		"If report_for_version is BEHIND the current version, a NEW plan replaced the one the worker executed — judge which case applies: " +
+		"(1) the report shows the CURRENT plan's assumptions can't be met — DO NOT complete; mark it blocked (task_block) and hand it " +
+		"to a planner to replan; " +
+		"(2) the old description / report don't materially conflict with the current plan — re-dispatch to the original or another " +
+		"worker to redo against the current plan.",
 		"Why this task is complete — goes into the item's change history.",
 		(p) => p.change_summary?.trim() || `completed`,
 	));
@@ -593,7 +599,9 @@ export default function (pi: ExtensionAPI) {
 		"blocked",
 		"Mark a task blocked — reality is blocking progress (failed assumption, unavailable resource, blocked dep). " +
 		"The item leaves the ready set, its dependents stay locked, and dependents with a dispatchee are notified. " +
-		"To unblock: fix the graph (metadata draft + task_commit) and set the item back to pending/active.",
+		"Also use this when a stale completion report shows the CURRENT plan's assumptions can't be met — instead of " +
+		"task_complete, mark it blocked and hand it to a planner to replan. " +
+		"To unblock after a replan: fix the graph (metadata draft + task_commit) and set the item back to pending/active.",
 		"Why the task is blocked — the failed assumption / blocker, in one line.",
 		(p) => p.change_summary?.trim() || `blocked`,
 	));

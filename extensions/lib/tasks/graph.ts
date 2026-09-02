@@ -148,12 +148,8 @@ export function readySet(items: Task[]): ReadySetResult {
 }
 
 /**
- * Split the ready set by granularity kind: units are directly executable —
- * dispatch them to workers. Modules may need decomposition or delegation
- * (review nodes land here too: they are modules whose deps are the
- * implementation children they verify) — the manager decides each one's
- * driver. Feed it the ready list from readySet (already sorted by id);
- * the buckets keep that order.
+ * Split the ready set by granularity kind: units, module. Feed it the ready list
+ *  from readySet (already sorted by id); the buckets keep that order.
  */
 export function readyBuckets(ready: Task[]): { execute: Task[]; modules: Task[] } {
 	const execute: Task[] = [];
