@@ -165,6 +165,39 @@ export default function (pi: ExtensionAPI) {
 		].filter((p) => existsSync(p)).length;
 	}
 
+	/**
+	 * Full-graph health check — the SAME check task_list runs, extracted so any
+	 * tool can surface structure problems next to its own result: every cycle,
+	 * every dangling dep (dep or subgraph gate id with no item), and every
+	 * free-floating orphan item (work that has come loose from the plan).
+	 *
+	 * Returns `text` — the COMPLETE warning block, header ("⚠ graph warnings:")
+	 * included, exactly as task_list renders it; empty ("") when the graph is
+	 * healthy — so a caller appends it after its own result only when non-empty.
+	 * Also returns the individual warning `lines` and the structured `warnings`
+	 * for a details block.
+	 */
+	function graphWarnings(): {
+		text: string;
+		lines: string[];
+		warnings: { cycles: string[][]; dangling: Array<{ id: string; dep: string }>; orphans: Task[] };
+	} {
+		const byId = loadAllItems(cwd);
+		const itemsArr = [...byId.values()];
+		const { cycles, dangling } = graph.validateGraph(itemsArr);
+		const orphans = graph.orphanItems(itemsArr);
+		const lines: string[] = [];
+		for (const cyc of cycles) lines.push(`  ⚠ cycle: ${cyc.join(" -> ")}`);
+		for (const d of dangling) lines.push(`  ⚠ dangling dep: ${d.id} → ${d.dep} (missing)`);
+		for (const o of orphans)
+			lines.push(`  ⚠ orphan: ${o.id} (${o.status}) — no dependents, outside every module subgraph`);
+		return {
+			text: lines.length > 0 ? `⚠ graph warnings:\n${lines.join("\n")}` : "",
+			lines,
+			warnings: { cycles, dangling, orphans },
+		};
+	}
+
 	// =============================================================================
 	// task_commit
 	// =============================================================================
@@ -246,8 +279,15 @@ export default function (pi: ExtensionAPI) {
 					];
 			const idNote = store.sanitizedIdNote(p.id);
 			if (idNote) lines.push(idNote);
+			// Post-commit structure health check: surface orphan nodes, dangling
+			// deps / subgraph gates, and cycles — EXACTLY as task_list reports them
+			// ("⚠ graph warnings:" block, header included). Empty when the graph is
+			// healthy; present only when a structural problem exists (e.g. you freed
+			// a node from every subgraph).
+			const warned = graphWarnings();
+			const text = warned.text ? `${lines.join("\n")}\n${warned.text}` : lines.join("\n");
 			return {
-				content: [{ type: "text" as const, text: lines.join("\n") }],
+				content: [{ type: "text" as const, text }],
 				details: {
 					id: r.item.id,
 					title: r.item.title,
@@ -263,6 +303,7 @@ export default function (pi: ExtensionAPI) {
 					updated_at: r.item.updated_at,
 					updated_by: r.item.updated_by,
 					change_summary: summary,
+					graph_warnings: warned.warnings,
 				},
 			};
 		},
@@ -876,8 +917,7 @@ pi.registerTool({
 			const itemsArr = [...byId.values()];
 			const rs = graph.readySet(itemsArr);
 			const readyIds = new Set(rs.ready.map((i) => i.id));
-			const { cycles, dangling } = graph.validateGraph(itemsArr);
-			const orphans = graph.orphanItems(itemsArr);
+			const { text: warningBlock, warnings: { cycles, dangling, orphans } } = graphWarnings();
 			const counts: Record<TaskStatus, number> = {
 				pending: 0,
 				dispatched: 0,
@@ -909,21 +949,12 @@ pi.registerTool({
 				if (s.info_refs.length > 0) parts.push(`info_refs: ${s.info_refs.join(", ")}`);
 				return `  ${parts.join(" · ")}`;
 			};
-			const warningLines: string[] = [];
-			for (const cyc of cycles) warningLines.push(`  ⚠ cycle: ${cyc.join(" -> ")}`);
-			for (const d of dangling) warningLines.push(`  ⚠ dangling dep: ${d.id} → ${d.dep} (missing)`);
-			for (const o of orphans)
-				warningLines.push(`  ⚠ orphan: ${o.id} (${o.status}) — no dependents, outside every module subgraph`);
 			const header =
 				`task_list: ${summaries.length} item(s) — ${counts.done} done · ${counts.blocked} blocked · ` +
 				`${counts.pending} pending · ${counts.dispatched} dispatched` +
 				(infoCount > 0 ? ` · ${infoCount} shared info` : ``);
 			const body = summaries.map(row).join("\n");
-			const text =
-				header +
-				"\n" +
-				body +
-				(warningLines.length > 0 ? `\n⚠ graph warnings:\n${warningLines.join("\n")}` : "");
+			const text = header + "\n" + body + (warningBlock ? `\n${warningBlock}` : "");
 			return {
 				content: [{ type: "text" as const, text }],
 				details: {
