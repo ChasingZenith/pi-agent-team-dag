@@ -846,7 +846,7 @@ describe("struct_version + into_* wiring", () => {
     createTask({ id: "mod", kind: "module" });
     draft(`draft/${ME}/leaf.toml`, `id = 'leaf'\ntitle = 'leaf'\ninto_deps = [ 'mod' ]`);
     commitTask(CWD, "leaf", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
-    // parent's deps is the true edge; leaf is referenced, so it is not free-floating
+    // parent's deps is the true edge; leaf is referenced, so it is not an orphan
     const parent = readTask(CWD, "mod")!;
     expect(parent.deps).toContain("leaf");
   });

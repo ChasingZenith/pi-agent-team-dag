@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   dependentsOf,
+  disconnectedComponents,
   orphanItems,
   readyBuckets,
   readySet,
@@ -409,17 +410,18 @@ describe("orphanItems", () => {
   it("reports a pending unit with no dependents outside every module subgraph", () => {
     const m = mkTask({ id: "task-m", kind: "module", deps: ["task-a"] });
     const a = mkTask({ id: "task-a" });
-    const loose = mkTask({ id: "task-loose" }); // free-floating
-    expect(orphanItems([m, a, loose]).map((i) => i.id)).toEqual(["task-loose"]);
+    const orphan = mkTask({ id: "task-orphan" });
+    expect(orphanItems([m, a, orphan]).map((i) => i.id)).toEqual(["task-orphan"]);
   });
 
-  it("excludes items that someone depends on — only the unreferenced head of a loose cluster is an orphan", () => {
-    const m = mkTask({ id: "task-m", kind: "module" });
+  it("excludes items that someone depends on — only the unreferenced head of an orphan cluster is an orphan", () => {
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-inner"] });
+    const inner = mkTask({ id: "task-inner" });
     const consumer = mkTask({ id: "task-consumer", deps: ["task-supplier"] });
     const supplier = mkTask({ id: "task-supplier" });
     // the whole consumer/supplier pair is outside the module; supplier is
-    // referenced by consumer, so only consumer is the loose head
-    expect(orphanItems([m, consumer, supplier]).map((i) => i.id)).toEqual(["task-consumer"]);
+    // referenced by consumer, so only consumer is the orphan head
+    expect(orphanItems([m, inner, consumer, supplier]).map((i) => i.id)).toEqual(["task-consumer"]);
   });
 
   it("excludes items referenced only as a subgraph gate", () => {
@@ -428,11 +430,12 @@ describe("orphanItems", () => {
     expect(orphanItems([m, gate])).toEqual([]);
   });
 
-  it("never reports done or cancelled items — they are finished, not loose", () => {
-    const m = mkTask({ id: "task-m", kind: "module" });
+  it("never reports done or cancelled items — they are finished, not orphans", () => {
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-inner"] });
+    const inner = mkTask({ id: "task-inner" });
     const done = mkTask({ id: "task-done", status: "done" });
     const cancelled = mkTask({ id: "task-cancel", status: "cancelled" });
-    expect(orphanItems([m, done, cancelled])).toEqual([]);
+    expect(orphanItems([m, inner, done, cancelled])).toEqual([]);
   });
 
   it("returns [] when the plan has no modules — every root is a top-level deliverable", () => {
@@ -441,16 +444,117 @@ describe("orphanItems", () => {
     expect(orphanItems([a, b])).toEqual([]);
   });
 
-  it("never reports modules themselves (each module is its own subgraph's root)", () => {
-    const m = mkTask({ id: "task-m", kind: "module" });
-    expect(orphanItems([m])).toEqual([]);
+  it("never reports a module that owns a non-empty subgraph", () => {
+    // A module with content is its own subgraph's root and is never an orphan.
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-a"] });
+    const a = mkTask({ id: "task-a" });
+    expect(orphanItems([m, a])).toEqual([]);
+  });
+
+  it("reports an empty module (no deps, no gates) that nothing references", () => {
+    // A module nobody depends on with no structure of its own is an orphan shell.
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-a"] });
+    const a = mkTask({ id: "task-a" });
+    const empty = mkTask({ id: "task-empty" });
+    const emptyModule = mkTask({ id: "task-empty-mod", kind: "module" });
+    expect(orphanItems([m, a, empty, emptyModule]).map((i) => i.id)).toEqual(["task-empty", "task-empty-mod"]);
+  });
+
+  it("reports nothing when the whole plan is one connected component (correctly wired)", () => {
+    const root = mkTask({ id: "task-root", kind: "module", status: "active", deps: ["task-report"] });
+    const dirs = ["task-d1", "task-d2"].map((d) => mkTask({ id: d, kind: "module" }));
+    const report = mkTask({ id: "task-report", kind: "module", subgraph_deps: dirs.map((d) => d.id) });
+    expect(orphanItems([root, ...dirs, report])).toEqual([]);
+  });
+
+  it("reports an info node that no task references via info_refs", () => {
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-t"] });
+    const orphanInfo = mkTask({ id: "info-unused", kind: "info" });
+    const usedInfo = mkTask({ id: "info-used", kind: "info" });
+    const task = mkTask({ id: "task-t", info_refs: ["info-used"] });
+    expect(orphanItems([m, orphanInfo, usedInfo, task]).map((i) => i.id)).toEqual(["info-unused"]);
+  });
+
+  it("reports an unreferenced info node even when the plan has no modules", () => {
+    // Info orphan detection is independent of the module-orphan gate: an info
+    // node is pure content, so it is orphaned whether or not a module exists.
+    expect(orphanItems([mkTask({ id: "info-unused", kind: "info" }), mkTask({ id: "task-a" })]).map((i) => i.id)).toEqual([
+      "info-unused",
+    ]);
+  });
+
+  it("info nodes in deps/subgraph_deps do not make a task unreferenced", () => {
+    // Info nodes are pure content and never join the DAG — a unit referencing
+    // one via info_refs does NOT depend on it as a graph edge, so a task that
+    // only points at info (no real dep/gate reference) is still an orphan.
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-t"] });
+    const t = mkTask({ id: "task-t" });
+    const info = mkTask({ id: "info-a", kind: "info" });
+    const orphan = mkTask({ id: "task-orphan", info_refs: ["info-a"] });
+    expect(orphanItems([m, t, info, orphan]).map((i) => i.id)).toEqual(["task-orphan"]);
   });
 
   it("sorts by id regardless of input order", () => {
-    const m = mkTask({ id: "task-m", kind: "module" });
-    const z = mkTask({ id: "task-z" });
+    const m = mkTask({ id: "task-m", kind: "module", deps: ["task-a"] });
     const a = mkTask({ id: "task-a" });
-    expect(orphanItems([m, z, a]).map((i) => i.id)).toEqual(["task-a", "task-z"]);
+    const z = mkTask({ id: "task-z" });
+    const w = mkTask({ id: "task-w" });
+    expect(orphanItems([m, z, a, w]).map((i) => i.id)).toEqual(["task-w", "task-z"]);
+  });
+});
+
+// ━━ disconnectedComponents ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe("disconnectedComponents", () => {
+  const dirs = (prefix: string) => ["d1", "d2"].map((d) => mkTask({ id: `${prefix}-${d}`, kind: "module" }));
+
+  it("returns a single component for a connected plan", () => {
+    const root = mkTask({ id: "task-root", kind: "module", deps: ["task-report"] });
+    const dirList = dirs("task");
+    const report = mkTask({ id: "task-report", kind: "module", subgraph_deps: dirList.map((d) => d.id) });
+    expect(disconnectedComponents([root, ...dirList, report])).toEqual([
+      ["task-d1", "task-d2", "task-report", "task-root"],
+    ]);
+  });
+
+  it("reports two components when the commissioned root's children were never wired in", () => {
+    const root = mkTask({ id: "task-root", kind: "module", status: "active" });
+    const dirList = dirs("task");
+    const report = mkTask({ id: "task-report", kind: "module", subgraph_deps: dirList.map((d) => d.id) });
+    expect(disconnectedComponents([root, ...dirList, report])).toEqual([
+      ["task-root"],
+      ["task-d1", "task-d2", "task-report"],
+    ]);
+  });
+
+  it("treats subgraph_deps as an undirected connection, not a DAG direction", () => {
+    // gate is only linked to report via a subgraph_deps edge; that still
+    // connects them into one component, distinct from an unrelated root.
+    const root = mkTask({ id: "task-root", kind: "module" });
+    const report = mkTask({ id: "task-report", kind: "module", subgraph_deps: ["task-gate"] });
+    const gate = mkTask({ id: "task-gate" });
+    expect(disconnectedComponents([root, report, gate])).toEqual([
+      ["task-root"],
+      ["task-gate", "task-report"],
+    ]);
+  });
+
+  it("ignores info nodes (they carry no graph edges)", () => {
+    const root = mkTask({ id: "task-root", kind: "module", deps: ["task-a"] });
+    const a = mkTask({ id: "task-a" });
+    const info = mkTask({ id: "info-x", kind: "info" });
+    expect(disconnectedComponents([root, a, info])).toEqual([["task-a", "task-root"]]);
+  });
+
+  it("orders components by size (smallest first) and sorts ids within each", () => {
+    const root = mkTask({ id: "task-root", kind: "module", deps: ["task-a", "task-b"] });
+    const a = mkTask({ id: "task-a" });
+    const b = mkTask({ id: "task-b" });
+    const loner = mkTask({ id: "task-loner" });
+    expect(disconnectedComponents([root, a, b, loner])).toEqual([
+      ["task-loner"],
+      ["task-a", "task-b", "task-root"],
+    ]);
   });
 });
 
@@ -582,11 +686,19 @@ describe("shared information nodes (kind = info)", () => {
     expect(b.modules).toEqual([]);
   });
 
-  it("info nodes are not reported as orphans (they are content sources)", () => {
+  it("info nodes are orphans only when no task references them via info_refs", () => {
     const m = mkTask({ id: "mod", kind: "module", deps: ["site-a"] });
-    const site = mkTask({ id: "site-a" });
+    const site = mkTask({ id: "site-a", info_refs: ["common-reqs"] });
     const info = mkTask({ id: "common-reqs", kind: "info" });
+    // referenced through info_refs → not an orphan
     expect(orphanItems([m, site, info]).map((i) => i.id)).toEqual([]);
+  });
+
+  it("info nodes with no info_refs reference are orphans", () => {
+    const m = mkTask({ id: "mod", kind: "module", deps: ["site-a"] });
+    const site = mkTask({ id: "site-a" }); // does not reference common-reqs
+    const info = mkTask({ id: "common-reqs", kind: "info" });
+    expect(orphanItems([m, site, info]).map((i) => i.id)).toEqual(["common-reqs"]);
   });
 
   it("renderGraph shows info nodes in a separate section, not in the DAG tree", () => {

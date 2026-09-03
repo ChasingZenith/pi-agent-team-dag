@@ -174,32 +174,47 @@ export default function (pi: ExtensionAPI) {
 	 * Full-graph health check — the SAME check task_list runs, extracted so any
 	 * tool can surface structure problems next to its own result: every cycle,
 	 * every dangling dep (dep or subgraph gate id with no item), and every
-	 * free-floating orphan item (work that has come loose from the plan).
+	 * orphan item (a task with no dependents, outside every module subgraph).
 	 *
 	 * Returns `text` — the COMPLETE warning block, header ("⚠ graph warnings:")
 	 * included, exactly as task_list renders it; empty ("") when the graph is
-	 * healthy — so a caller appends it after its own result only when non-empty.
+	 * clean — so a caller appends it after its own result only when non-empty.
 	 * Also returns the individual warning `lines` and the structured `warnings`
 	 * for a details block.
 	 */
 	function graphWarnings(): {
 		text: string;
 		lines: string[];
-		warnings: { cycles: string[][]; dangling: Array<{ id: string; dep: string }>; orphans: Task[] };
+		warnings: {
+			cycles: string[][];
+			dangling: Array<{ id: string; dep: string }>;
+			orphans: Task[];
+			components: string[][];
+		};
 	} {
 		const byId = loadAllItems(cwd);
 		const itemsArr = [...byId.values()];
 		const { cycles, dangling } = graph.validateGraph(itemsArr);
 		const orphans = graph.orphanItems(itemsArr);
+		const components = graph.disconnectedComponents(itemsArr);
 		const lines: string[] = [];
 		for (const cyc of cycles) lines.push(`  ⚠ cycle: ${cyc.join(" -> ")}`);
 		for (const d of dangling) lines.push(`  ⚠ dangling dep: ${d.id} → ${d.dep} (missing)`);
-		for (const o of orphans)
-			lines.push(`  ⚠ orphan: ${o.id} (${o.status}) — no dependents, outside every module subgraph`);
+		for (const o of orphans) {
+			lines.push(
+				o.kind === "module"
+					? `  ⚠ orphan: ${o.id} (${o.status}) — module with no deps or gates, and nothing depends on it`
+					: `  ⚠ orphan: ${o.id} (${o.status}) — no dependents, outside every module subgraph`,
+			);
+		}
+		if (components.length > 1)
+			lines.push(
+				`  ⚠ disconnected graph: ${components.length} separate pieces — ${components.map((c) => `[${c.join(", ")}]`).join(" ")}`,
+			);
 		return {
 			text: lines.length > 0 ? `⚠ graph warnings:\n${lines.join("\n")}` : "",
 			lines,
-			warnings: { cycles, dangling, orphans },
+			warnings: { cycles, dangling, orphans, components },
 		};
 	}
 
@@ -288,10 +303,12 @@ export default function (pi: ExtensionAPI) {
 			// Post-commit structure health check: surface orphan nodes, dangling
 			// deps / subgraph gates, and cycles — EXACTLY as task_list reports them
 			// ("⚠ graph warnings:" block, header included). Empty when the graph is
-			// healthy; present only when a structural problem exists (e.g. you freed
+			// clean; present only when a structural problem exists (e.g. you freed
 			// a node from every subgraph).
 			const warned = graphWarnings();
-			const text = warned.text ? `${lines.join("\n")}\n${warned.text}` : lines.join("\n");
+			const text = warned.text
+				? `${lines.join("\n")}\n\n${warned.text}`
+				: lines.join("\n");
 			return {
 				content: [{ type: "text" as const, text }],
 				details: {
@@ -917,8 +934,8 @@ pi.registerTool({
 		label: "Task List",
 		description:
 			"List all tasks as a flat table: id, title, status, version, last update, ready mark — plus " +
-			"status counts and graph warnings (dependency cycles, dangling deps, orphan items — free-floating " +
-			"tasks with no dependents, outside every module subgraph). Use it to discover existing " +
+			"status counts and graph warnings (dependency cycles, dangling deps, orphan items — tasks " +
+			"with no dependents, outside every module subgraph). Use it to discover existing " + +
 			"items and to find the id referenced in a task message.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate) {
@@ -926,14 +943,14 @@ pi.registerTool({
 			if (summaries.length === 0) {
 				return {
 					content: [{ type: "text" as const, text: "task_list: no tasks yet" }],
-					details: { count: 0, items: [], warnings: { cycles: [], dangling: [], orphans: [] }, counts: {} },
+					details: { count: 0, items: [], warnings: { cycles: [], dangling: [], orphans: [], components: [] }, counts: {} },
 				};
 			}
 			const byId = loadAllItems(cwd);
 			const itemsArr = [...byId.values()];
 			const rs = graph.readySet(itemsArr);
 			const readyIds = new Set(rs.ready.map((i) => i.id));
-			const { text: warningBlock, warnings: { cycles, dangling, orphans } } = graphWarnings();
+			const { text: warningBlock, warnings: { cycles, dangling, orphans, components } } = graphWarnings();
 			const counts: Record<TaskStatus, number> = {
 				pending: 0,
 				dispatched: 0,
@@ -976,7 +993,7 @@ pi.registerTool({
 				details: {
 					count: summaries.length,
 					items: summaries,
-					warnings: { cycles, dangling, orphans },
+					warnings: { cycles, dangling, orphans, components },
 					counts,
 				},
 			};

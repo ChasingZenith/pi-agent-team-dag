@@ -202,7 +202,7 @@ change_summary = '重写接口契约'
 - **校验时机在 `task_commit`（提交）**——编辑草稿时不做任何校验；提交时对草稿内容校验：环检测、悬空依赖、门约束、kind 合法性，错误信息教 model 怎么修（列出可用 id / 环路径）。
 - **环检测**：提交时强校验，拒绝成环——错误信息**含环路径**（如 `auth-system → login-module → auth-system`）。环检查在**展开后的图**上运行（subgraph_deps 已展开），互门/自环同样被拒。
 - **悬空依赖**：deps 引用不存在的 id → 拒绝——错误信息**含可用 id 列表**。
-- **游离任务（orphan）**：`task_list` 额外报告游离节点——非终态（非 done/cancelled）、无人依赖（不出现在任何节点的 `deps` 或 `subgraph_deps` 中）、且不在任何 module 的子图内。只在计划含 module 时才有意义；游离任务的重新挂接用 metadata 草稿改 `deps` + `task_commit`，或用生命周期工具取消。
+- **游离任务（orphan）**：`task_list` 额外报告游离节点——非终态（非 done/cancelled）、无人依赖（不出现在任何节点的 `deps` 或 `subgraph_deps` 中）、且不在任何 module 的子图内。只在计划含 module 时才有意义；游离任务的重新挂接用 metadata 草稿改 `deps` + `task_commit`，或用生命周期工具取消。`module` 不豁免——一个 module 无人依赖且自身无内容（deps 与 subgraph_deps 均空）即为空壳游离节点；只有**非空** module（自身有 deps / 门）才是自己子图的根，不游离。
 - **门校验**：deps 更新把门移入子图时同样在提交时被拒；其余规则见 §2.7。
 - **done 门控用有效 deps**：标记 done 时检查的是 deps ∪ 门（读时展开）。
 
@@ -215,7 +215,7 @@ change_summary = '重写接口契约'
 | `task_checkout` | `id`, `scope?`(`description`\|`report`，默认 `description`), `version?` | 初始化自己的草稿（改内容的 Step 1，只给正文、不带 frontmatter）。**创建新任务**：`version=0`（id 尚不存在）→ 脚手架化 metadata 草稿（含 `id`）+ 空 description 草稿，填好后 `task_commit(id, expected_version=1)` 建 v1。**已存在任务**：省略 version = 当前版本，把真本 `description.md` 的**正文**（剥离 frontmatter）复制到 `draft/<cname>/<id>.description.md`；`version=<n>`（n<当前）→ 把 `history/<id>.v<n>/` 该历史快照的正文复制进草稿（`scope="description"` 时）。`scope="report"`：在 `draft/<cname>/<id>.report.md` 创建**空白草稿**（不带 frontmatter，不复制旧报告），之后 `write/edit` 正文 → `task_submit_report`（提交时补上 `for_version` = 当前 description 版本，见 docs/5 §3）。已有草稿时拒绝覆盖（需手动清除后重建） |
 | `task_set_status` | `id`, `status`, `dispatched_to?`, `change_summary?` | 状态迁移（见 §2.4）；返回 `unlocked`（见 §2.6）；`dispatched_to` 记录负责人——仅设置 `dispatched` 时有效，done/cancelled 自动清除。**生命周期事件：不 bump 版本**，只追加 history 摘要（`changed_items=["status"]` + `event`） |
 | `task_read` | `id`, `version?`, `fields?` | 一律返回元数据 + 图上下文（身份行、title/kind、deps、`subgraph_deps`、`info_refs`、dispatched_to、execution_session、依赖方、缺失 deps（含门）、就绪性、变更历史）+ 正文字数（`description (vN): N chars` / `completion report (for description vN): N chars`）+ 你自己的未提交草稿数 + **完整性警告**（存储细节不外泄，读与编辑分离：编辑走 `task_checkout` + write/edit + `task_commit`/`task_submit_report`）；长正文按需加载——`fields="description"` / `fields="report"` / `fields="full"`；省略的正文报告字数；`version=<n>` 读历史快照（同样受 `fields` 约束）。description 返回的是**有效描述**：被引用 `info` 节点正文注入 + task 自身正文（见 §2.1.1）；`kind="info"` 节点显示 `ready: none — shared information`，无生命周期 |
-| `task_list` | 无参 | 扁平表列出全部节点：id、title、状态 + 图告警（环 / 悬空依赖 / 游离任务）+ 状态计数；module 行尾带 `[module]` 标记、带门节点行尾 `subgraph_deps: <ids>`、带共享引用节点行尾 `info_refs: <ids>`；`info` 节点带 `[info]` 标记并单列 `shared info` 计数（不计入状态计数） |
+| `task_list` | 无参 | 扁平表列出全部节点：id、title、状态 + 图告警（环 / 悬空依赖 / 游离任务 / 断图）+ 状态计数；module 行尾带 `[module]` 标记、带门节点行尾 `subgraph_deps: <ids>`、带共享引用节点行尾 `info_refs: <ids>`；`info` 节点带 `[info]` 标记并单列 `shared info` 计数（不计入状态计数） |
 | `task_ready_set` | `for?` | 查询就绪集（见 §2.5，**按 kind 分桶**：unit 执行 / module 待驱动）+ 每个未就绪 pending 项及其缺失 deps + 进度计数；`for=<id>` 缩到该节点及其依赖闭包 |
 | `task_render` | 无参 | 整图渲染为缩进树（glyph 反映节点状态）；`info` 节点单列在 `── Shared information (N) ──` 段（不进 DAG 树），普通节点行尾带 `subgraph_deps: <ids>` / `info_refs: <ids>` |
 

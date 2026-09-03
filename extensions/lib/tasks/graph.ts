@@ -264,15 +264,17 @@ export function validateGraph(items: Task[]): ValidateResult {
 }
 
 /**
- * Free-floating items — work that has come loose from the plan: no item
- * depends on it (not via deps, not as a subgraph gate), and it is not part
- * of any module's subgraph (a module itself is its own subgraph's root, so
- * modules never appear here). Only meaningful when the plan has modules —
- * without them every root is a top-level deliverable by design, and the
- * check returns []. Done/cancelled items are never "loose": they are
- * finished or abandoned. Sorted by id.
+ * Orphan graph nodes — units and modules that sit apart from the plan. Only
+ * meaningful when the plan has modules: without them every root is a
+ * top-level deliverable, so this returns []. Done/cancelled items are never
+ * orphans. Sorted by id.
+ *
+ * A non-module task is an orphan when nothing depends on it (it appears in no
+ * other node's deps or subgraph_deps) and it is outside every module's
+ * subgraph. A module is an orphan when it has no deps, no subgraph_deps and no
+ * dependents.
  */
-export function orphanItems(items: Task[]): Task[] {
+function graphOrphans(items: Task[]): Task[] {
 	if (!items.some((i) => i.kind === "module")) return [];
 	const referenced = new Set<string>();
 	for (const i of items) {
@@ -281,14 +283,75 @@ export function orphanItems(items: Task[]): Task[] {
 	}
 	const inSubgraph = new Set<string>();
 	for (const m of items.filter((i) => i.kind === "module")) {
-		inSubgraph.add(m.id);
+		if (m.deps.length > 0 || (m.subgraph_deps ?? []).length > 0) inSubgraph.add(m.id);
 		for (const d of dependencyClosure(items, m.id)) inSubgraph.add(d);
 	}
 	return items
 		.filter((i) => i.status !== "done" && i.status !== "cancelled")
-		.filter((i) => i.kind !== "info") // shared info nodes are sources, not loose tasks
+		.filter((i) => i.kind !== "info")
 		.filter((i) => !referenced.has(i.id) && !inSubgraph.has(i.id))
 		.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * Orphan info nodes — kind="info" nodes no task references via info_refs.
+ * Independent of modules (an info node is pure content, not a DAG node), so
+ * this is not gated by module existence. Sorted by id.
+ */
+function infoOrphans(items: Task[]): Task[] {
+	const referenced = new Set<string>();
+	for (const i of items) if (i.kind !== "info") for (const r of i.info_refs ?? []) referenced.add(r);
+	return items
+		.filter((i) => i.kind === "info" && !referenced.has(i.id))
+		.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * All orphan items — graph orphans (units/modules apart from the plan) and
+ * info orphans (unreferenced shared content), combined and sorted by id. For
+ * whole-plan splits see {@link disconnectedComponents}.
+ */
+export function orphanItems(items: Task[]): Task[] {
+	return [...graphOrphans(items), ...infoOrphans(items)].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * Split the non-info nodes into connected components, treating deps and
+ * subgraph_deps as undirected edges (a component therefore follows either edge
+ * direction). A single component means the plan is connected; more than one
+ * means it is split into separate pieces. This does not pick which component
+ * is the intended plan. Components are returned with sorted ids, smallest
+ * first. `dependency-graph` exposes no connectivity API, so this uses a
+ * union-find over the adjacency lists.
+ */
+export function disconnectedComponents(items: Task[]): string[][] {
+	const nodes = items.filter((i) => i.kind !== "info");
+	if (nodes.length <= 1) return nodes.length === 1 ? [[nodes[0].id]] : [];
+	const byId = new Map(nodes.map((n) => [n.id, n]));
+	const parent = new Map<string, string>();
+	const find = (x: string): string => {
+		const root = parent.get(x);
+		if (root === undefined || root === x) return x;
+		parent.set(x, find(root));
+		return parent.get(x) as string;
+	};
+	const union = (a: string, b: string) => {
+		const ra = find(a);
+		const rb = find(b);
+		if (ra !== rb) parent.set(ra, rb);
+	};
+	for (const n of nodes) {
+		for (const d of n.deps) if (byId.has(d)) union(n.id, d);
+		for (const g of n.subgraph_deps ?? []) if (byId.has(g)) union(n.id, g);
+	}
+	const grouped = new Map<string, string[]>();
+	for (const n of nodes) {
+		const root = find(n.id);
+		const list = grouped.get(root);
+		if (list) list.push(n.id);
+		else grouped.set(root, [n.id]);
+	}
+	return [...grouped.values()].map((ids) => ids.sort()).sort((a, b) => a.length - b.length);
 }
 
 /** Find all cycles by removing each found cycle's nodes and re-running. */
