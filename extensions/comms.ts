@@ -547,26 +547,21 @@ export default function (pi: ExtensionAPI) {
 				details: { results, errors, reply_to_msg_id: p.reply_to_msg_id ?? null, remind_s: p.remind_s ?? null, deliver_as: p.deliver_as ?? null },
 			};
 		},
-		renderCall(args, theme, context) {
+		renderCall(args, theme) {
 			const a = args as any;
 			const targets = Array.isArray(a.targets) && a.targets.length ? a.targets : a.target ? [a.target] : [];
 			const tgt = targets && targets.length > 0 ? targets.join(", ") : "?";
-			const msg = a.message ?? "";
-			const preview = msg && msg.length > 60 ? msg.slice(0, 57) + "..." : msg;
-			const text =
-				theme.fg("toolTitle", theme.bold("comms_send ")) +
-				theme.fg("accent", `to ${tgt}`) +
-				(preview ? ` — ${theme.fg("dim", preview)}` : "");
-			if (!context.expanded) {
-				return new Text(text, 0, 0);
-			}
-			// Expanded: full message and every option.
-			const opts: string[] = [];
-			if (typeof a.remind_s === "number") opts.push(`remind_s ${a.remind_s}`);
-			if (a.reply_to_msg_id) opts.push(`reply_to_msg_id ${a.reply_to_msg_id}`);
-			if (a.deliver_as) opts.push(`deliver_as ${a.deliver_as}`);
-			const full = text + (msg ? `\nmessage: ${msg}` : "") + (opts.length ? "\n" + opts.join(" · ") : "");
-			return new Text(full, 0, 0);
+			const lines = [
+				theme.fg("toolTitle", theme.bold("comms_send ")) + theme.fg("accent", `to ${tgt}`),
+			];
+			// Show every input param block-style. The message is placed on its own
+			// following lines, so multi-line messages render naturally.
+			if (typeof a.message === "string" && a.message.length > 0) lines.push(`  message:
+${a.message}`);
+			if (typeof a.remind_s === "number") lines.push(`  remind_s: ${a.remind_s}`);
+			if (typeof a.reply_to_msg_id === "string" && a.reply_to_msg_id.length > 0) lines.push(`  reply_to_msg_id: ${a.reply_to_msg_id}`);
+			if (typeof a.deliver_as === "string" && a.deliver_as.length > 0) lines.push(`  deliver_as: ${a.deliver_as}`);
+			return new Text(lines.join("\n"), 0, 0);
 		},
 	});
 
