@@ -13,7 +13,6 @@ import {
 	DEFAULT_NATS_URL,
 	DEFAULT_OFFLINE_AFTER_MS,
 	DEFAULT_REGISTRY_TTL_MS,
-	DEFAULT_STALE_AFTER_MS,
 	DEFAULT_SUBNET,
 	SECRET_FILE,
 } from "./protocol.ts";
@@ -25,7 +24,6 @@ export interface RuntimeConfig {
 	heartbeatMs: number;
 	messageTtlMs: number;
 	registryTtlMs: number;
-	staleAfterMs: number;
 	offlineAfterMs: number;
 	/** comms_history bucket TTL — how long message content history is kept. */
 	historyTtlMs: number;
@@ -77,7 +75,6 @@ export function readConfig(pi: ExtensionAPI): RuntimeConfig {
 		heartbeatMs: numEnv("PI_COMMS_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS),
 		messageTtlMs: numEnv("PI_COMMS_MESSAGE_TTL_MS", DEFAULT_MESSAGE_TTL_MS),
 		registryTtlMs: numEnv("PI_COMMS_REGISTRY_TTL_MS", DEFAULT_REGISTRY_TTL_MS),
-		staleAfterMs: numEnv("PI_COMMS_STALE_AFTER_MS", DEFAULT_STALE_AFTER_MS),
 		offlineAfterMs: numEnv("PI_COMMS_OFFLINE_AFTER_MS", DEFAULT_OFFLINE_AFTER_MS),
 		historyTtlMs: numEnv("PI_COMMS_HISTORY_TTL_MS", DEFAULT_HISTORY_TTL_MS),
 	};

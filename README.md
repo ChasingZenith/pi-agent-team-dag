@@ -14,7 +14,7 @@ The Pi Agent Team DAG feature is composed of five pieces, one per layer of the s
 
 Networked messaging between agents. Every agent connects to a NATS hub, owns a durable per-agent prompt queue, and gets six tools — `comms_list_peer` (peer roster with status), `comms_send` (message/reply, returns `msg_id`), `comms_outbox`/`comms_inbox` (persistent send/receive history), `comms_dismiss` (stop a send's reminder), `comms_update_profile` (declare `current_task`). Full tool reference: [docs/1-comms.md](docs/1-comms.md).
 
-Reliability is baked in: **JetStream durable consumers** redeliver a crashed agent's unacked messages (nothing is silently lost), every send/receive persists to the `comms_history` KV bucket (24h TTL), and heartbeats let peers detect stale/offline agents. Async by design — no auto-reply (avoids ping-pong loops); optional `remind_s` (seconds) arms a consolidated reminder covering all pending sends.
+Reliability is baked in: **JetStream durable consumers** redeliver a crashed agent's unacked messages (nothing is silently lost), every send/receive persists to the `comms_history` KV bucket (24h TTL), and heartbeats let peers detect offline agents. Async by design — no auto-reply (avoids ping-pong loops); optional `remind_s` (seconds) arms a consolidated reminder covering all pending sends.
 
 ### 2. agent-lifecycle — on-demand agent spawning
 

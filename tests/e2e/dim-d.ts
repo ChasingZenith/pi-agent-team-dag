@@ -68,13 +68,12 @@ async function main(): Promise<void> {
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
     registryTtlMs: 30_000,
-    staleAfterMs: 30_000,
     offlineAfterMs: 60_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(30_000, 60_000);
+  registry.setRegistryTuning(60_000);
   messaging.setSubnet(SUBNET);
   messaging.setMessageTtlMs(1_800_000);
   log(`connected to ${cfg.natsUrl}, stream COMMS_${SUBNET} ensured`);

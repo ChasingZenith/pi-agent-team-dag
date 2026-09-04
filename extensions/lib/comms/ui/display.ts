@@ -19,23 +19,17 @@ export function abbreviateModel(model: string): string {
 	return m;
 }
 
-/** Status dot for peer rows: ● online, ~ stale, ✗ offline. Plain text (no ANSI). */
-export function statusDot(status: "online" | "stale" | "offline"): string {
-	if (status === "online") return "●";
-	if (status === "stale") return "~";
-	return "✗";
+/** Status dot for peer rows: ● online, ✗ offline. Plain text (no ANSI). */
+export function statusDot(status: "online" | "offline"): string {
+	return status === "online" ? "●" : "✗";
 }
 
-/** Status dot with theme colouring: ● success, ~ warning, ✗ error. */
-export function themeStatusDot(theme: Theme, status: "online" | "stale" | "offline"): string {
-	if (status === "online") return theme.fg("success", "●");
-	if (status === "stale") return theme.fg("warning", "~");
-	return theme.fg("error", "✗");
+/** Status dot with theme colouring: ● success, ✗ error. */
+export function themeStatusDot(theme: Theme, status: "online" | "offline"): string {
+	return status === "online" ? theme.fg("success", "●") : theme.fg("error", "✗");
 }
 
 /** Peer status word with theme colouring (send result target_status). */
 export function themeStatusWord(theme: Theme, status: string): string {
-	if (status === "online") return theme.fg("success", "online");
-	if (status === "stale") return theme.fg("warning", "stale");
-	return theme.fg("error", "offline");
+	return status === "online" ? theme.fg("success", "online") : theme.fg("error", "offline");
 }

@@ -93,7 +93,7 @@ Agent A (发送方)              NATS                    Agent B (接收方)
 - **`comms_names`(bucket 级 TTL 30s,租约)** — `n.<subnet>.<name>` 名字租约,值是名字本身(名字即地址,无需映射)。心跳 = 每 10s 重新 put(滑动过期)。停止心跳 → 30s 后名字自动释放,可被新 agent 抢占。**没有 stale/offline 扫描循环**——存在性(名字)靠 TTL,活跃度(状态)靠推导。
 - **`comms_history`(bucket 级 TTL 默认 24h)** — `h.<subnet>.<name>.<out|in>.<msg_id>` 双向**消息内容历史**:发出与收到的每条消息全文,compact(上下文压缩)或 agent 重启后由 `comms_outbox` / `comms_inbox` 重读。key 锚定名字,跨重启可读,outbox/inbox 的列表模式覆盖 agent 的**全部**历史而非仅当前进程。发送状态由历史记录推导(`replied` / `expired` / `waiting`);提醒本身是进程内存,不落历史。写入是 best-effort(不阻塞发送与消息注入),TTL 首次创建生效。
 
-状态推导(只对资料):`status: online` — last_seen_at 距今 < 30s;`stale` — 30s ~ 60s;`offline` — 超过 60s。离线资料**保留**在缓存里显示 ✗(这是"永久资料"的语义)。
+状态推导(只对资料):`status` 只有两态 — `online`(last_seen_at 距今 < 60s)与 `offline`(超过 60s),是 `last_seen_at` 的简单延伸,没有中间态。离线资料**保留**在缓存里显示 ✗(这是"永久资料"的语义)。
 
 注意:nats.js 的 `kv.get()` 对已删除的 key 返回 DEL tombstone 条目(非 null)——所有存在性判断必须检查 `entry.operation !== "DEL"`。
 
@@ -101,7 +101,7 @@ Agent A (发送方)              NATS                    Agent B (接收方)
 
 回复是**显式的**:调用 `comms_send(target=<发送方名字>, message="<回复内容>", reply_to_msg_id=<入站消息的 msg_id>)`——系统不自动应答,回复必须由接收方显式发起。发送方收到 `reply_to_msg_id` 命中自己**激活提醒条目**的消息时,自动把回复的 msg_id 记入该发送的历史记录(`comms_outbox` 可查状态与 reply msg_id,完整回复经 `comms_inbox <reply_msg_id>` 重读)并**停止该消息的提醒**;回复本身以普通入站 turn 自动到达——**接收方无需轮询**(工具语义见 §6.2)。
 
-**合并定时提醒**:提醒是**按消息**挂载的:每条提醒绑定一条消息的 `msg_id`,方向覆盖两个方向——自己**发出的**(等待回复)与**收到的**(收到后要跟进)。`comms_send(..., remind_s=<seconds>)` 挂上;之后用 `comms_remind(msg_id, remind_s)` 设置/调整/取消(语义见 §6.5)。激活的提醒每过一个间隔向 context 注入**一条合并提醒**,列出**所有**激活提醒(方向、对方、内容摘要、提醒间隔、已等时长、TTL 倒计时),而不是每条消息一条提醒。提醒在以下情况结束:
+**合并定时提醒**:提醒是**按消息**挂载的:每条提醒绑定一条消息的 `msg_id`,方向覆盖两个方向——自己**发出的**(等待回复)与**收到的**(收到后要跟进)。`comms_send(..., remind_s=<seconds>)` 挂上;之后用 `comms_remind(msg_id, remind_s)` 设置/调整/取消(语义见 §6.5)。激活的提醒每过一个间隔向 context 注入**一条合并提醒**,列出**所有**激活提醒(方向、对方、内容摘要、提醒间隔、已等时长、TTL 倒计时),而不是每条消息一条提醒。若某条提醒对应的对方**已离线**,注入文本会附加一行 ⚠ 提示(发出方向:其回复在对方回来前不会到达,考虑重发/取消/换法解决;收到方向:你的回复在对方回来前投递不到),提醒你当前对话无法推进。提醒在以下情况结束:
 
 - 收到命中该 msg_id 的回复(带 `reply_to_msg_id`)
 - `comms_remind(msg_id, 0)` 取消(提醒被移除,消息本身不变)
@@ -148,7 +148,7 @@ session_start
     │        put 完整资料刷新 TTL
     │
     └── 10. UI 刷新定时器(15s,unref):周期重渲染派生状态
-             (online→stale→offline,即使无任何 watch 事件)
+             (online→offline,即使无任何 watch 事件)
              ─────────────────────────────────────────────────
 session_running
     │
@@ -208,8 +208,7 @@ session_shutdown / SIGINT / SIGTERM
 | `PI_COMMS_HEARTBEAT_MS` | 心跳间隔(默认 10000) |
 | `PI_COMMS_MESSAGE_TTL_MS` | 消息 TTL / stream max_age(默认 1800000 = 30 分钟;consumer 重投窗口 ack_wait 固定 5 分钟) |
 | `PI_COMMS_REGISTRY_TTL_MS` | 注册表租约 TTL(默认 30000) |
-| `PI_COMMS_STALE_AFTER_MS` | 心跳超过多久标记 stale(默认 30000) |
-| `PI_COMMS_OFFLINE_AFTER_MS` | 心跳超过多久标记 offline(默认 60000;离线资料仍保留,不会从注册表删除) |
+| `PI_COMMS_OFFLINE_AFTER_MS` | 心跳超过多久标记 offline(默认 60000;唯一的状态阈值,超过即 offline;离线资料仍保留,不会从注册表删除) |
 | `PI_COMMS_HISTORY_TTL_MS` | 消息内容历史(comms_history)保留时长(默认 86400000 = 24h)。**bucket 级 TTL 首次创建时生效**,改动需删除 bucket |
 | `PI_COMMS_NATS_VERSION` | up.sh 下载 nats-server 的版本(默认 2.14.4) |
 | `NATS_SERVER_BIN` | 显式指定 nats-server 二进制路径 |
@@ -229,7 +228,7 @@ session_shutdown / SIGINT / SIGTERM
 - `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `followUp`(目标当前 turn 完全结束后处理,空闲时立即触发)。两个模式都是 pi 侧语义:消息到达即注入,由 pi 自行排队与投递,comms 层不做任何等待或批次合并
 - 入站注入:每条消息到达即注入 — 单条 framing(标注 sender / msg_id / reply 状态),携带自己的 `deliver_as`(缺省 `steer`,不做模式提升);**注入成功后立即 ack**,失败保持 unacked,5 分钟 `ack_wait` 后由 stream 重投重试;注入后、回合完成前目标崩溃的消息不会被重投,由发送方 `remind_s` 兜底
 - 无跃点限制:转发链不设防循环上限,由使用方自行约束
-- 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `stale` / `offline`)
+- 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `offline`)
 - 注意:发送的前提是目标**正在心跳**(名字租约存在);一旦发送成功,消息就留在 stream(TTL 内)——目标随后崩溃/重启,同名重启后由复用同一 consumer 收到(崩溃重投);目标已停机超过租约期(心跳停止 30s 后名字被回收)再发送则报 `target not found`
 
 ### 6.3 `comms_outbox` — 重读自己发送的消息(含状态与回复)
@@ -261,7 +260,7 @@ session_shutdown / SIGINT / SIGTERM
 ---
 ## 7. 状态行
 
-status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers` 计数)。完整 peer 列表放在 belowEditor widget(`comms-peers`)中,单行文本按终端宽度自动换行 — 窄窗口/多 peer 时也不会截断,所有 peer 都能看到。格式紧凑:`Peers: ● alice, ~ bob, ✗ carol, …`(● 在线 / ~ stale / ✗ 离线,符号与 `comms_list_peer` 一致;不含自己)。无 peer 时 widget 隐藏,状态只显示 `📡 name@subnet`。状态由 `last_seen_at` 派生,除 watch 事件外每 15s 定时重渲染 — peer 崩溃(无任何事件)或 NATS 断线时,离线状态也会在 ~75s 内如实呈现,恢复后自动回到在线。详细 peer 信息统一走 `comms_list_peer`。
+status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers` 计数)。完整 peer 列表放在 belowEditor widget(`comms-peers`)中,单行文本按终端宽度自动换行 — 窄窗口/多 peer 时也不会截断,所有 peer 都能看到。格式紧凑:`Peers: ● alice, ✗ bob, ✗ carol, …`(● 在线 / ✗ 离线,符号与 `comms_list_peer` 一致;不含自己)。无 peer 时 widget 隐藏,状态只显示 `📡 name@subnet`。状态由 `last_seen_at` 派生,除 watch 事件外每 15s 定时重渲染 — peer 崩溃(无任何事件)或 NATS 断线时,离线状态也会在 ~75s 内如实呈现,恢复后自动回到在线。详细 peer 信息统一走 `comms_list_peer`。
 
 ---
 ## 8. 审计日志

@@ -58,7 +58,8 @@ export const DEFAULT_NATS_URL = "nats://127.0.0.1:4222";
 export const DEFAULT_SUBNET = "subnet0";
 export const DEFAULT_HEARTBEAT_MS = 10_000;
 export const DEFAULT_REGISTRY_TTL_MS = 30_000;
-export const DEFAULT_STALE_AFTER_MS = 30_000;
+/** No heartbeat for this long → the peer is OFFline (status derived from
+ *  last_seen_at — a single threshold; there is no intermediate state). */
 export const DEFAULT_OFFLINE_AFTER_MS = 60_000;
 export const DEFAULT_MESSAGE_TTL_MS = 1_800_000; // 30 min
 /** How long the message content history bucket keeps records (comms_history
@@ -193,7 +194,7 @@ export function promptDurable(name: string): string {
 
 // ━━ Shared types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-type AgentStatus = "online" | "stale" | "offline";
+type AgentStatus = "online" | "offline";
 
 export interface AgentProfile {
 	name: string;
@@ -327,12 +328,10 @@ export function nowIso(): string {
 	return new Date().toISOString();
 }
 
-/** Derived status from last_seen: fresh → online, aged → stale, gone → offline. */
-export function statusFromLastSeen(lastSeenIso: string, staleAfterMs: number, offlineAfterMs: number): AgentStatus {
+/** Derived status from last_seen: heartbeated within offlineAfterMs → online,
+ *  otherwise offline. One threshold — no intermediate state. */
+export function statusFromLastSeen(lastSeenIso: string, offlineAfterMs: number): AgentStatus {
 	const last = Date.parse(lastSeenIso);
 	if (Number.isNaN(last)) return "offline";
-	const dt = Date.now() - last;
-	if (dt > offlineAfterMs) return "offline";
-	if (dt > staleAfterMs) return "stale";
-	return "online";
+	return Date.now() - last > offlineAfterMs ? "offline" : "online";
 }

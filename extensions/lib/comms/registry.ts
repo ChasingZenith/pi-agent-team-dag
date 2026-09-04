@@ -2,7 +2,7 @@
  * comms — agent registry over two NATS KV buckets:
  *
  *   comms_profiles — permanent agent profiles (a.<subnet>.<name>, NO bucket TTL).
- *                Profiles outlive the agent: status (online/stale/offline) is
+ *                Profiles outlive the agent: status (online/offline) is
  *                derived from last_seen_at, so offline agents stay visible.
  *   comms_names — name lease (n.<subnet>.<name>) with a bucket-level TTL:
  *                heartbeat refreshes it (sliding expiry); an agent that stops
@@ -37,12 +37,10 @@ import { audit } from "./audit.ts";
 const cache = new Map<string, StoredProfile>();
 let watchIter: QueuedIterator<KvEntry> | null = null;
 let watchShutdown = false;
-let staleAfterMs = 30_000;
 let offlineAfterMs = 60_000;
 let onChange: (() => void) | null = null;
 
-export function setRegistryTuning(stale: number, offline: number): void {
-	staleAfterMs = stale;
+export function setRegistryTuning(offline: number): void {
 	offlineAfterMs = offline;
 }
 
@@ -218,7 +216,7 @@ export function getPeers(): AgentProfile[] {
 	for (const profile of cache.values()) {
 		out.push({
 			...profile,
-			status: statusFromLastSeen(profile.last_seen_at, staleAfterMs, offlineAfterMs),
+			status: statusFromLastSeen(profile.last_seen_at, offlineAfterMs),
 		});
 	}
 	return out;
@@ -250,10 +248,10 @@ export async function resolveName(subnet: string, name: string): Promise<string 
  * TTL — an entry existing means the peer is heartbeating), the peer is
  * assumed online.
  */
-export function statusOfName(subnet: string, name: string): "online" | "stale" | "offline" {
+export function statusOfName(subnet: string, name: string): "online" | "offline" {
 	const profile = cache.get(profileKey(subnet, name));
 	if (!profile) return "online";
-	return statusFromLastSeen(profile.last_seen_at, staleAfterMs, offlineAfterMs);
+	return statusFromLastSeen(profile.last_seen_at, offlineAfterMs);
 }
 
 /**

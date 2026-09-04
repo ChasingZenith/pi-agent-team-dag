@@ -184,7 +184,7 @@ async function runB7B8(): Promise<void> {
   ).catch(() => null);
   check("B-7-profile", !!profile, `KV profile a.test-b.b-leaser present at register time`);
   if (profile) {
-    const st = statusFromLastSeen((profile as any).last_seen_at, 30_000, 60_000);
+    const st = statusFromLastSeen((profile as any).last_seen_at, 60_000);
     check("B-7-profile-online", st === "online", `profile status derived online before crash (got ${st})`);
   }
 
@@ -211,7 +211,7 @@ async function runB7B8(): Promise<void> {
   // B-8: +70s — profile permanent + offline derived (same crash timeline)
   await sleep(35_000);
   const profile70 = (await kvRead(getKvProfiles(), profileKey("test-b", "b-leaser"))) as any;
-  const st70 = profile70 ? statusFromLastSeen(profile70.last_seen_at, 30_000, 60_000) : null;
+  const st70 = profile70 ? statusFromLastSeen(profile70.last_seen_at, 60_000) : null;
   check("B-8a", !!profile70, `t+70s profile a.test-b.b-leaser still present (profile=null? ${profile70 === null})`);
   check("B-8b", st70 === "offline", `t+70s profile statusFromLastSeen → offline (got ${st70})`);
 
@@ -236,13 +236,13 @@ async function runB7B8(): Promise<void> {
   check("B-7c", reregOk, `same-name re-register succeeded after lease expiry${reregOk ? "" : ` — ${reregErr}`}`);
 }
 
-// ━━ B-10: pure statusFromLastSeen ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━ B-10: pure statusFromLastSeen (single 60s threshold — no stale band) ━━━━
 function runB10(): void {
   const now = Date.now();
   const iso = (agoMs: number) => new Date(now - agoMs).toISOString();
-  check("B-10a", statusFromLastSeen(iso(10_000), 30_000, 60_000) === "online", "last_seen 10s ago → online");
-  check("B-10b", statusFromLastSeen(iso(40_000), 30_000, 60_000) === "stale", "last_seen 40s ago → stale");
-  check("B-10c", statusFromLastSeen(iso(70_000), 30_000, 60_000) === "offline", "last_seen 70s ago → offline");
+  check("B-10a", statusFromLastSeen(iso(10_000), 60_000) === "online", "last_seen 10s ago → online");
+  check("B-10b", statusFromLastSeen(iso(40_000), 60_000) === "online", "last_seen 40s ago → online (below 60s threshold)");
+  check("B-10c", statusFromLastSeen(iso(70_000), 60_000) === "offline", "last_seen 70s ago → offline");
 }
 
 // ━━ main ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -257,13 +257,12 @@ async function main(): Promise<void> {
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
     registryTtlMs: 30_000,
-    staleAfterMs: 30_000,
     offlineAfterMs: 60_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(30_000, 60_000);
+  registry.setRegistryTuning(60_000);
   messaging.setSubnet(SUBNET);
   messaging.setMessageTtlMs(1_800_000);
   log(`connected to ${cfg.natsUrl}, stream COMMS_${SUBNET} ensured`);

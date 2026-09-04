@@ -47,13 +47,12 @@ async function main(): Promise<void> {
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
     registryTtlMs: 30_000,
-    staleAfterMs: 30_000,
     offlineAfterMs: 60_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(30_000, 60_000);
+  registry.setRegistryTuning(60_000);
 
   const fakeCtx = { model: { provider: "deepseek", id: "deepseek-v4-flash" }, thinkingLevel: "off" } as any;
   const spawnRes = await executeAgentSpawn(
@@ -103,7 +102,7 @@ async function main(): Promise<void> {
   // +70s: profile permanent + offline derived
   await sleep(35_000);
   const profile = (await kvRead(getKvProfiles(), profileKey("test-b", "b-crasher"))) as any;
-  const st = profile ? statusFromLastSeen(profile.last_seen_at, 30_000, 60_000) : null;
+  const st = profile ? statusFromLastSeen(profile.last_seen_at, 60_000) : null;
   check("BC-6", !!profile, `t+70s profile a.test-b.b-crasher still present (profile=null? ${profile === null})`);
   check("BC-7", st === "offline", `t+70s profile statusFromLastSeen → offline (got ${st})`);
 

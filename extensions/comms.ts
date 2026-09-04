@@ -150,9 +150,9 @@ export default function (pi: ExtensionAPI) {
 	let shuttingDown = false;
 	let bootFailed = false;
 
-	// UI re-render interval: well below the default stale/offline thresholds
-	// (30 s / 60 s) so derived peer statuses surface within ~75 s of a peer
-	// going away, and below any heartbeat-driven event gap.
+	// UI re-render interval: well below the default offline threshold (60 s)
+	// so derived peer statuses surface within ~75 s of a peer going away,
+	// and below any heartbeat-driven event gap.
 	const UI_REFRESH_MS = 15_000;
 
 	function fmtMs(ms: number): string {
@@ -279,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Registry tuning.
-		registry.setRegistryTuning(cfg.staleAfterMs, cfg.offlineAfterMs);
+		registry.setRegistryTuning(cfg.offlineAfterMs);
 
 		// Register (name claim + initial profile).
 		try {
@@ -322,14 +322,25 @@ export default function (pi: ExtensionAPI) {
 		};
 		messaging.setRemindInjector((pending: ActiveReminder[]) => {
 			if (!pi.sendMessage) return; // is it really needed?
-			const lines = pending.map((x) =>
-				`  ${x.dir === "in" ? "from" : "to"} ${x.target} (${x.target_status}) — ${x.summary}` +
-				`\n    msg_id ${x.msg_id} · remind every ${fmtMs(x.remind_s * 1000)} · ${fmtMs(x.elapsed_ms)} elapsed` +
-				(x.expires_in_ms !== null
-					? x.expires_in_ms > 0
-						? ` · expires in ${fmtMs(x.expires_in_ms)}`
-						: " · expired — resend or cancel"
-					: ""));
+			const lines = pending.map((x) => {
+				const base =
+					`  ${x.dir === "in" ? "from" : "to"} ${x.target} (${x.target_status}) — ${x.summary}` +
+					`\n    msg_id ${x.msg_id} · remind every ${fmtMs(x.remind_s * 1000)} · ${fmtMs(x.elapsed_ms)} elapsed` +
+					(x.expires_in_ms !== null
+						? x.expires_in_ms > 0
+							? ` · expires in ${fmtMs(x.expires_in_ms)}`
+							: " · expired — resend or cancel"
+						: "");
+				// The peer we're waiting on is offline: the conversation can't
+				// progress right now (no reply in / our reply undelivable).
+				if (x.target_status === "offline") {
+					return base +
+						(x.dir === "out"
+							? `\n    ⚠ ${x.target} is OFFLINE — their reply won't arrive until they're back; consider resending, cancelling, or solving it another way.`
+							: `\n    ⚠ ${x.target} is OFFLINE — your reply to them won't be delivered until they're back online.`);
+				}
+				return base;
+			});
 			pi.sendMessage(
 				{
 					customType: "comms-reminder",
@@ -348,7 +359,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Watch the registry (peer cache), re-rendering the footer status and
 		// the belowEditor peers widget whenever the peer set changes
-		// (peers join / leave / go stale). The widget word-wraps at the
+		// (peers join / leave / go offline). The widget word-wraps at the
 		// terminal width, so all peers stay visible even in a narrow window.
 		// The watch loop self-heals after NATS outages (registry.startWatch).
 		registry.startWatch(identity.subnet);
@@ -373,7 +384,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Time-driven UI refresh — a crashed peer emits no DEL and a NATS
 		// outage emits nothing at all, so re-render on a timer to surface
-		// derived statuses (online → stale → offline) within ~offlineAfterMs +
+		// derived statuses (online → offline) within ~offlineAfterMs +
 		// this interval. unref'd: pure UI, must not hold the process open.
 		uiRefreshTimer = setInterval(refreshPeersUi, UI_REFRESH_MS);
 		try { (uiRefreshTimer as any).unref?.(); } catch { /* ignore */ }
@@ -440,7 +451,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"List peer agents on the comms hub for YOUR subnet: each peer's name, status, model, " +
 			"live context-window usage, and current task. Your own entry is marked with a \"(you)\" suffix. " +
-			"Status symbols: ● online · ~ stale (no heartbeat for 30-60 s) · ✗ offline (no heartbeat for 60+ s).",
+			"Status symbols: ● online · ✗ offline (no heartbeat for ~60 s).",
 		parameters: Type.Object({}),
 		async execute(_callId, _params) {
 			if (!identity) throw new Error("comms not initialised");

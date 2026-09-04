@@ -169,8 +169,8 @@ export interface ActiveReminder {
 	target: string;
 	/** ms since the message was sent/received. */
 	elapsed_ms: number;
-	/** Peer status at read time ("unknown" when the name is missing). */
-	target_status: "online" | "stale" | "offline" | "unknown";
+	/** Peer status at read time ("online" | "offline"; "unknown" when the name is missing). */
+	target_status: "online" | "offline" | "unknown";
 	/** ms remaining until sentAt + TTL (out only); null when no TTL configured. */
 	expires_in_ms: number | null;
 	/** Reminder cadence in seconds. */
@@ -372,8 +372,8 @@ async function handlePrompt(m: JsMsg, injector: (inbound: InboundContext) => Pro
 
 interface SendResult {
 	msg_id: string;
-	/** Target status at send time (online / stale / offline) — the message is queued regardless. */
-	target_status: "online" | "stale" | "offline";
+	/** Target status at send time (online / offline) — the message is queued regardless. */
+	target_status: "online" | "offline";
 }
 
 export interface SendOptions {
