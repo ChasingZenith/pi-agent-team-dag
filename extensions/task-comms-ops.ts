@@ -285,7 +285,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			const a = args as Record<string, unknown>;
 			const text =
-				theme.fg("toolTitle", theme.bold("dispatch ")) +
+				theme.fg("toolTitle", theme.bold("task_dispatch ")) +
 				theme.fg("accent", `${(a.task_id as string) || "?"} → ${(a.agent as string) || "?"}`);
 			if (!context.expanded) return new Text(text, 0, 0);
 			// Expanded: the full call args (including the delegation message), as the LLM saw them.
@@ -501,7 +501,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			const a = args as Record<string, unknown>;
 			const text =
-				theme.fg("toolTitle", theme.bold("report ")) + theme.fg("accent", (a.id as string) || "?");
+				theme.fg("toolTitle", theme.bold("task_submit_report ")) + theme.fg("accent", (a.id as string) || "?");
 			if (!context.expanded) return new Text(text, 0, 0);
 			// Expanded: the full call args, as the LLM saw them.
 			return new Text(text + "\n" + fmtArgs(a), 0, 0);
@@ -580,7 +580,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			renderCall(args: Record<string, unknown>, theme: any, context: any) {
 				const text =
-					theme.fg("toolTitle", theme.bold(`${name.replace("task_", "")} `)) +
+					theme.fg("toolTitle", theme.bold(`${name} `)) +
 					theme.fg("accent", (args.id as string) || "?");
 				if (!context.expanded) return new Text(text, 0, 0);
 				// Expanded: the full call args (change_summary), as the LLM saw them.
