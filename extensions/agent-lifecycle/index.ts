@@ -42,7 +42,6 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  displayName,
   getRoleTemplate,
   interpolate,
   listRoleNames,
@@ -57,6 +56,7 @@ import {
 import { checkTmux, tmuxNewWindow, tmuxKillWindow } from "../lib/tmux";
 import { agentFileStem, writeAndSendScript } from "../lib/launch-script";
 import { forkSession, writePreloadedSessionFile } from "../lib/role-context/fork";
+import { sanitizeAgentName } from "../lib/comms/protocol";
 
 // Expanded (ctrl+O) rendering: show the full call args — the same information
 // the LLM sees in its context.
@@ -514,6 +514,21 @@ export async function executeAgentSpawnByRole(
   }
 
   const agentName = name || uniqueName(role);
+  // The comms identity is the SANITIZED name (case-preserving, illegal chars
+  // rewritten to `-`) — `sanitizeAgentName` is applied at registration in
+  // comms.ts. Report this exact cname so a caller can comms_send/comms_remind
+  // to it without a case/sanitization mismatch.
+  const cname = sanitizeAgentName(agentName);
+
+  // Warn when the final cname differs from what the caller asked for / the
+  // natural default — the name was de-duplicated (suffix appended) or
+  // sanitized, so the caller must use the EXACT `cname`, never the requested
+  // one. NOTE: this catches collisions within THIS spawner's own registry
+  // (uniqueName) + sanitization only; a collision suffix applied LATER by
+  // comms registry.register() (name claimed by another process) is not known
+  // here — the caller/Skill must re-verify via comms_list_peer.
+  const requestedName = name ?? role;
+  const nameChanged = cname !== requestedName;
 
   // Build the self-contained context from the role template
   const llmCtx = llmContextFromRole(role, agentName);
@@ -604,17 +619,20 @@ export async function executeAgentSpawnByRole(
       {
         type: "text" as const,
         text:
-          `✅ Spawned "${displayName(agentName)}" (${template.label})\n` +
+          `Spawned "${cname}" (${template.label})\n` +
           `- Role: ${role}\n` +
           `- Tools: ${tools.join(",")}\n` +
-          `- Window: ${windowId || "unknown"}\n\n` +
-          `Give this agent name to the caller.`,
+          `- Window: ${windowId || "unknown"}\n` +
+          (nameChanged
+            ? `\n⚠ Name changed: requested "${requestedName}" but spawned as "${cname}" (the requested name was already taken or needed sanitizing). Reply to the caller with the EXACT comms identity "${cname}".`
+            : "")
       },
     ],
     details: {
-      agentName,
+      agentName: cname,
       role,
       tools: tools.join(","),
+      ...(nameChanged ? { requestedName, nameChanged: true } : {}),
       windowId,
       sessionFile: spawnDetails.sessionFile,
       status: spawnDetails.status,
@@ -649,6 +667,8 @@ export async function executeAgentRestart(
   const { name, resumeFrom } = params;
 
   const manifest = readSpawnManifest(name, cwd);
+  // The restarted agent's comms identity (same sanitization comms applies).
+  const cname = sanitizeAgentName(name);
   const failing = (error: string, extra: Record<string, unknown> = {}): SpawnResult => ({
     content: [{ type: "text" as const, text: `Could not restart "${name}": ${error}` }],
     details: { name, status: "error", error, ...extra },
@@ -699,15 +719,14 @@ export async function executeAgentRestart(
       {
         type: "text" as const,
         text:
-          `♻ Restarted "${displayName(name)}" (${manifest.role}) from its execution_session — context resumed.\n` +
+          `♻ Restarted "${cname}" (${manifest.role}) — context resumed.\n` +
           `- Tools: ${manifest.tools}\n` +
           `- Window: ${(details.windowId as string) || "unknown"}\n` +
-          `- Session: ${(details.sessionFile as string) || "unknown"}\n\n` +
-          `Give this agent name to the caller (same name, restarted).`,
+          `- Session: ${(details.sessionFile as string) || "unknown"}.`,
       },
     ],
     details: {
-      agentName: name,
+      agentName: cname,
       role: manifest.role,
       tools: manifest.tools,
       windowId: details.windowId,
