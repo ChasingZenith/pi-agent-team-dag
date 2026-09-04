@@ -160,7 +160,7 @@ describe("task-comms-ops extension shell", () => {
 
     // the manager dispatches to worker-1 (identity = manager-1)
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
-    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined);
+    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go", remind_s: 300 }, undefined, undefined);
     expect(sent).toHaveLength(1); // the delegation message
     expect(sent[0].target).toBe("worker-1");
 
@@ -223,9 +223,29 @@ describe("task-comms-ops extension shell", () => {
 
     // rejected before any send — the shared info node is pure content, never dispatched
     await expect(
-      dispatch.execute("c5", { task_id: "common-reqs", agent: "worker-1", message: "go" }, undefined, undefined),
+      dispatch.execute("c5", { task_id: "common-reqs", agent: "worker-1", message: "go", remind_s: 300 }, undefined, undefined),
     ).rejects.toThrow(/shared information node \(kind = "info"\), pure content that is never dispatched/);
     expect(sent).toHaveLength(0); // NO delegation message went out
+  });
+
+  it("task_dispatch requires remind_s > 0 (mandatory, never 0)", async () => {
+    const { pi, tools, handlers } = makeFakePi();
+    opsExtension(pi);
+    await handlers["session_start"]({}, { cwd: CWD });
+    const sent: Array<{ target: string; body: string; opts: any }> = [];
+    const dispatch = tools.find((t) => t.name === "task_dispatch");
+
+    createTask("task-x", "X");
+    handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
+
+    // remind_s = 0 (or missing) is rejected before any send — a dispatch always needs a reminder
+    await expect(
+      dispatch.execute("c5", { task_id: "task-x", agent: "worker-1", message: "go", remind_s: 0 }, undefined, undefined),
+    ).rejects.toThrow(/remind_s > 0/);
+    await expect(
+      dispatch.execute("c6", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined),
+    ).rejects.toThrow(/remind_s > 0/);
+    expect(sent).toHaveLength(0); // nothing sent — no orphaned delegation
   });
 
   it("task_start refuses a worker that is not the dispatchee", async () => {
@@ -239,7 +259,7 @@ describe("task-comms-ops extension shell", () => {
     createTask("task-x", "X");
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
-    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined);
+    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go", remind_s: 300 }, undefined, undefined);
 
     // a different worker (worker-2) cannot start an item dispatched to worker-1
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("worker-2", sent));
@@ -262,7 +282,7 @@ describe("task-comms-ops extension shell", () => {
 
     // the manager dispatches to worker-1 (identity = manager-1)
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
-    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined);
+    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go", remind_s: 300 }, undefined, undefined);
 
     // the worker writes its record — the reply to the dispatch message is
     // automatic (the msg_id lives on the dispatch, no parameter needed)
@@ -336,7 +356,7 @@ describe("task-comms-ops extension shell", () => {
     createTask("task-x", "X");
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("manager-1", sent));
-    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go" }, undefined, undefined);
+    await dispatch.execute("c2", { task_id: "task-x", agent: "worker-1", message: "go", remind_s: 300 }, undefined, undefined);
 
     handlers[`events:${COMMS_RUNTIME_EVENT}`](makeRuntime("worker-2", sent));
     writeReportDraft("worker-2", "task-x", "hijack");

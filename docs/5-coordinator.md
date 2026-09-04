@@ -144,7 +144,7 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 
 | 工具 | 参数 | 封装的动作 |
 |------|------|-----------|
-| `task_dispatch` | `task_id, agent, message` | 发送委托消息（带提醒，含常量开工指令）+ `set_status(dispatched, dispatched_to=<agent>)` 一步完成；`dispatched_to` 记 **agent 名字**（comms 身份，跨重启稳定），派发者与委托消息 msg_id 记入 `dispatched_to`（`dispatched_by` / `dispatch_msg_id`） |
+| `task_dispatch` | `task_id, agent, message, remind_s` | 发送委托消息（含常量开工指令）+ `set_status(dispatched, dispatched_to=<agent>)` 一步完成；`remind_s` 为**必选、>0**（如 300 = 每 5 分钟），是这条任务唯一的提醒——worker 开工 `task_start` 自动通知派发者、完成 `task_submit_report` 自动回复并停掉 reminder；`dispatched_to` 记 **agent 名字**（comms 身份，跨重启稳定），派发者与委托消息 msg_id 记入 `dispatched_to`（`dispatched_by` / `dispatch_msg_id`） |
 | `task_start` | `id` | **worker 侧工具**：开工声明——把派发给自己的任务从 dispatched 转 active（校验 `dispatched_to.name` 为调用者）+ **把自己的 pi 执行会话写入节点**（`execution_session`：session id + JSONL 转录文件路径，后续据此回溯该任务实际如何完成）+ 自动通知派发者（无提醒，告知已开工）+ 自动把任务标题写入 comms profile 的 `current_task`（与 `comms_update_profile` 同一实现，peers 实时可见） |
 | `task_submit_report` | `id, expected_version` | **worker 侧工具**：读**自己的报告草稿**（先由 `task_checkout(id, scope="report")` 生成空白草稿、write/edit 写正文）→ 校验 `dispatched_to.name` 为调用者 + `expected_version`（description 契约未漂移，锚定 `for_version`）→ 提交节点 + 自动**回复**委托消息（回复目标与 msg_id 单一定义在节点记录 `dispatched_by` / `dispatch_msg_id`，调用者无须传 target / reply_to_msg_id，一行完成通知停掉 reminder）+ 清空 `current_task` |
 | `task_complete` | `id, change_summary?` | 标 done（store 校验 deps 满足，未满足报错列缺失）+ 自动通知解锁项的等待方（无提醒） |

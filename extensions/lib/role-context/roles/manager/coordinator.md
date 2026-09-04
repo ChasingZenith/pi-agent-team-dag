@@ -68,6 +68,10 @@ Do not skip delegation layers: never request fresh Planners for multiple module 
        2. Call `task_dispatch(task_id, sub_coordinator, message)` to delegate the entire module.
 4. Dispatch Payload: The `message` parameter in `task_dispatch` should include only context not present in the task description (e.g., peer contact info for collaboration). Avoid repeating existing plan details. Never use `comms_send` to deliver the actual task assignment – that is solely the role of `task_dispatch`.
 
+## Task Reminders
+
+`task_dispatch` requires `remind_s`—your only scheduled verification point while awaiting `task_submit_report`. Since `task_submit_report` automatically replies to the delegation and cancels that scheduled check, use that verification turn to detect an offline worker, re-dispatch, or escalate under `worker-offline-recovery` skill
+
 ## Background
 
 Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`. Recover a task whose worker went offline via skill `worker-offline-recovery`.

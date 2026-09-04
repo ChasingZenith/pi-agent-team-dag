@@ -72,9 +72,6 @@ function commsRuntime(): CommsRuntime {
 // Constants
 // =============================================================================
 
-/** Reminder interval in seconds for sends with a reminder (delegations): every 5 min. */
-const REMIND_S = 300;
-
 // =============================================================================
 // Extension
 // =============================================================================
@@ -191,12 +188,23 @@ export default function (pi: ExtensionAPI) {
 			message: Type.String({
 				description: "Supplemental info to help the worker execute (a constant dispatch header is always placed first automatically). ONLY information not already in the task's description — e.g. peer names to collaborate with. The dispatch header instructs the worker to task_read the task itself, so the description, goals, background and acceptance criteria are already at its side; do NOT restate them here (two copies drift). Pass \"\" if there is nothing to add.",
 			}),
+			remind_s: Type.Number({
+				description:
+					"Reminder interval in seconds for the delegation message (minimum 1 — the dispatch always needs a reminder, it cannot be 0). " +
+					"This is the ONLY reminder for the task: while the worker is dispatched/active and you wait for its task_start / task_submit_report, the reminder turn is your scheduled check-in to detect a missing/offline worker, re-dispatch, or escalate.",
+				minimum: 1,
+			}),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate) {
-			const p = params as { task_id: string; agent: string; message: string };
+			const p = params as { task_id: string; agent: string; message: string; remind_s: number };
 			const idt = commsIdentity();
 			const item = store.readTask(cwd, p.task_id);
 			if (!item) throw notFoundError(cwd, p.task_id);
+			// remind_s is mandatory and pageable at min 1 (cannot be 0) — the
+			// schema enforces minimum:1, but guard a non-number / >0 anyway.
+			if (!Number.isFinite(p.remind_s) || p.remind_s <= 0) {
+				throw new Error("tasks: task_dispatch requires remind_s > 0 (the delegation always needs a reminder; use e.g. 300 = every 5 min)");
+			}
 			// A dispatch SENDS a message BEFORE marking dispatched — so an
 			// invalid target must be rejected HERE, before any side effect.
 			// info nodes are pure shared content: never dispatchable (the store
@@ -234,7 +242,7 @@ export default function (pi: ExtensionAPI) {
 				`(1) task_checkout(id="${p.task_id}", scope="report") — this tool call creates an empty file where you should write the report; ` +
 				`(2) write/edit the draft body, then reply with ` +
 				`task_submit_report(id="${p.task_id}", expected_version=${item.version}) — it commits your report (anchored to description version ${item.version}), replies to this dispatch message, and stops the reminder. `;
-			const sendResult = await sendMessage(p.agent, body, REMIND_S);
+			const sendResult = await sendMessage(p.agent, body, p.remind_s);
 			// dispatched_to records the agent NAME — the comms identity, which is
 			// exactly what the send just addressed (stable across restarts).
 			const r = store.setTaskStatus(cwd, p.task_id, "dispatched", {
@@ -260,7 +268,7 @@ export default function (pi: ExtensionAPI) {
 						text:
 							`task_dispatch: "${r.item.id}" → ${p.agent} (msg ${sendResult.msg_id.slice(-8)}, target ${sendResult.target_status})\n` +
 							`  status: dispatched, dispatched_to: ${p.agent}\n` +
-							` reminders fire every ${REMIND_S} s.` +
+							` reminders fire every ${p.remind_s} s.` +
 							(idNote ? `\n${idNote}` : ""),
 					},
 				],
