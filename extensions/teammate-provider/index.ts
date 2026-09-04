@@ -138,7 +138,7 @@ export default function (pi: ExtensionAPI) {
       const a = args as Record<string, unknown>;
       const role = (a.role as string) || "?";
       const text =
-        theme.fg("toolTitle", theme.bold("tp_spawn ")) +
+        theme.fg("toolTitle", theme.bold("tp_spawn_agent ")) +
         theme.fg("accent", `[${role}]`);
       if (!context.expanded) return new Text(text, 0, 0);
       // Expanded: the full call args (role/name), as the LLM saw them.
@@ -213,7 +213,7 @@ export default function (pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const a = args as Record<string, unknown>;
       const text =
-        theme.fg("toolTitle", theme.bold("tp_restart ")) +
+        theme.fg("toolTitle", theme.bold("tp_restart_agent ")) +
         theme.fg("accent", (a.agent as string) || "?");
       if (!context.expanded) return new Text(text, 0, 0);
       // Expanded: the full call args (agent/task_id), as the LLM saw them.
