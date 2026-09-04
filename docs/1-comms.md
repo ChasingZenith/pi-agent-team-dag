@@ -15,7 +15,7 @@
 - **跨重启复用**:地址以名字锚定、不随进程变化——同名重启复用同一 durable consumer(干净关闭也不删除),未 ack 的 prompt 重投、已 ack 的不重放、离线期间积累的消息续投(stream TTL 内);outbox/inbox 历史同样跨重启可读(见 §2.1.1、§9)
 - **显式回复**:回复 = `comms_send(target=<发送方>, reply_to_msg_id=<收到的 msg_id>)`,无自动应答;回复自动以入站 turn 到达,无需轮询(见 §2.4、§6.2)
 - **合并定时提醒**:提醒按**消息**挂载→ `comms_send(remind_s=<seconds>)` 挂上,事后用 `comms_remind(msg_id, remind_s)` 设置/调整/取消;激活的提醒每过一个间隔注入**一条合并提醒**(覆盖所有激活提醒),到期停止提醒;完全不带提醒的发送(默认 `remind_s=0`)即单向纯通知(见 §2.4)
-- **投递模式可选**:`comms_send(deliver_as=…)` 控制消息到达对端 agent 的投递方式 — `steer`(默认)/ `follow-up`(语义见 §6.2)
+- **投递模式可选**:`comms_send(deliver_as=…)` 控制消息到达对端 agent 的投递方式 — `steer`(默认)/ `followUp`(语义见 §6.2)
 - Bearer token 认证(NATS 原生,默认自动生成,0600 持久化)
 - 客户端原生自动重连(指数退避由 NATS 客户端处理)
 
@@ -218,15 +218,15 @@ session_shutdown / SIGINT / SIGTERM
 ## 6. 工具列表
 
 ### 6.1 `comms_list_peer` — 列出在线 peer
-- 返回:名称、模型、在线状态(● / ~ / ✗,纯文本)、上下文使用率、current_task
-- 数据源:本地 KV watch 缓存(不含自己)
+- 返回:名称、模型、在线状态(● / ~ / ✗,纯文本)、上下文使用率、current_task;自己的条目标 `(you)` 后缀
+- 数据源:本地 KV watch 缓存(含自己——首行 `N peer(s)` 及列表含自己,`(you)` 标注;details 另含 `self` 与 `subnet`)
 
 ### 6.2 `comms_send` — 发起消息 / 回复 / 群发
 - `target`(peer 名称,**大小写敏感**)或 `targets`(数组,群发,每个收件人一个 `msg_id`)、`message`
 - **回复自动到达**:回复以入站 turn 注入,**无需轮询**
 - `remind_s`(可选,秒,默认 0):挂起提醒 — 未收到回复时每过 `remind_s` 秒向 context 注入**一条合并提醒**(覆盖所有激活提醒);收到回复或消息过期后自动停止,`comms_remind(msg_id, 0)` 取消。**`remind_s=0`(默认) = 纯通知**(不挂提醒、不阻塞 auto-exit;事后可用 `comms_remind(msg_id, N)` 挂上;见 §2.4)
 - `reply_to_msg_id`(可选):**回复模式** — 填你要回复的入站消息的 msg_id;发送方收到后自动记录回复并停止该 msg_id 的提醒循环。回复 = 显式 `comms_send(target=<发送方>, reply_to_msg_id=<msg_id>)`,**没有自动应答**
-- `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `follow-up`(目标当前 turn 完全结束后处理,空闲时立即触发)。两个模式都是 pi 侧语义:消息到达即注入,由 pi 自行排队与投递,comms 层不做任何等待或批次合并
+- `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `followUp`(目标当前 turn 完全结束后处理,空闲时立即触发)。两个模式都是 pi 侧语义:消息到达即注入,由 pi 自行排队与投递,comms 层不做任何等待或批次合并
 - 入站注入:每条消息到达即注入 — 单条 framing(标注 sender / msg_id / reply 状态),携带自己的 `deliver_as`(缺省 `steer`,不做模式提升);**注入成功后立即 ack**,失败保持 unacked,5 分钟 `ack_wait` 后由 stream 重投重试;注入后、回合完成前目标崩溃的消息不会被重投,由发送方 `remind_s` 兜底
 - 无跃点限制:转发链不设防循环上限,由使用方自行约束
 - 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `stale` / `offline`)
@@ -337,7 +337,7 @@ pi -e extensions/agent-lifecycle
 ## 11. 模块结构
 
 ```
-extensions/comms.ts                — 薄入口:flags、5 工具、生命周期接线(纯通信,不含角色逻辑)
+extensions/comms.ts                — 薄入口:flags、6 工具、生命周期接线(纯通信,不含角色逻辑)
 extensions/lib/comms/
   protocol.ts                         — 共享契约:类型 + subject/stream/bucket 模板 + 常量
   config.ts                           — flag/env → RuntimeConfig + secret 文件(0600)

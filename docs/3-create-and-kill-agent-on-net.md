@@ -58,6 +58,8 @@ extensions/
 │  │ tmux 窗口 @1                 │  │ tmux 窗口 @2             │  │
 │  │ pi                           │  │ pi                       │  │
 │  │ -e comms.ts               │  │ -e comms.ts           │  │
+│  │ -e task-graph.ts            │  │ -e task-graph.ts       │  │
+│  │ -e task-comms-ops.ts        │  │ -e task-comms-ops.ts   │  │
 │  │ -e role-context.ts           │  │ -e role-context.ts       │  │
 │  │ -e auto-exit.ts              │  │ -e auto-exit.ts          │  │
 │  │ --cname scout                │  │ --cname builder          │  │
@@ -258,7 +260,7 @@ interface AgentState {
 - 状态存储在模块级 `Map<string, AgentState>`（key 为 agent 名称小写）
 - 无论通过工具注册的 `agent_spawn` 还是模块函数 `executeAgentSpawn` spawn 的 agent，都写入同一个 `moduleAgents`
 - `session_shutdown` 时遍历 `moduleAgents` kill 所有 window——无论谁 spawn 的（§6）
-- 状态由 comms 推导（资料 `last_seen_at` → `online` / `stale` / `offline`，见 docs/1 §2.3），agent-lifecycle 本身不轮询更新
+- 状态由 comms 推导（资料 `last_seen_at` → `online` / `offline`，见 docs/1 §2.3），agent-lifecycle 本身不轮询更新
 
 ### 8.2 导出函数（供其他扩展直接调用）
 

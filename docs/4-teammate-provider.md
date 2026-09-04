@@ -80,7 +80,7 @@ TP 提供 **1 个工具**供自身的 LLM 使用。查看在线 agent 直接调 
 
 - **用途**：从角色模板创建并 spawn 新 agent。
 - **参数**：
-  - `role`（string）：角色名（coordinator / scout / web-searcher / planner / experts-reviewer / consultor / worker）
+  - `role`（string）：角色名（coordinator / scout / web-searcher / planner / experts-reviewer / consultor / worker / requirements-clarifier）
   - `name`（可选）：自定义名称，默认从 role 去重生成
   - `add_tools`（可选，string[]）：在角色模板 `defaultTools` **之外追加**的工具名（模板里没有的工具）；最终白名单 =（`defaultTools` ∪ `add_tools`）− `exclude_tools`
   - `exclude_tools`（可选，string[]）：从角色模板 `defaultTools` **移除**的工具名（如去掉 worker 的 `bash` 使其只读）
