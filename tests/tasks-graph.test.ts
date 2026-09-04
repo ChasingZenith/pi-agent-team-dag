@@ -70,6 +70,14 @@ describe("readySet", () => {
     expect(r.notReady).toEqual([]);
   });
 
+  it("treats a worker_offline dep as NOT satisfied (locks its dependent, like blocked)", () => {
+    const off = mkTask({ id: "task-off", status: "worker_offline" });
+    const b = mkTask({ id: "task-b", deps: ["task-off"] });
+    const r = readySet([off, b]);
+    expect(r.ready).toEqual([]);
+    expect(r.notReady.map((i) => i.missing)).toEqual([["task-off"]]);
+  });
+
   it("treats a cancelled dep as satisfied", () => {
     const c = mkTask({ id: "task-c", status: "cancelled" });
     const b = mkTask({ id: "task-b", deps: ["task-c"] });

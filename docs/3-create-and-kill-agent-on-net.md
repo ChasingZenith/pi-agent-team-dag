@@ -262,14 +262,17 @@ interface AgentState {
 - `session_shutdown` 时遍历 `moduleAgents` kill 所有 window——无论谁 spawn 的（§6）
 - 状态由 comms 推导（资料 `last_seen_at` → `online` / `offline`，见 docs/1 §2.3），agent-lifecycle 本身不轮询更新
 
+**spawn manifest（持久化的 spawn 配方）**：`moduleAgents` 只记 name/windowId/sessionFile/status，**不记 role/tools/skills/extensions/model**——`executeAgentRestart` 恢复 agent 时需要重建这些（同名 agent 重启必须复现同样的工具白名单与能力）。因此每次成功 spawn 时把完整配方写入 `.pi/agent-sessions/<agentFileStem(name)>.manifest.json`（`{ name, role, model, tools, skills, extensions, sessionFile }`），重启时读取它重建。write 是 best-effort（失败只使恢复-by-配方不可用，不影响 spawn 本身）。
+
 ### 8.2 导出函数（供其他扩展直接调用）
 
 `agent-lifecycle` 不仅注册工具，还**导出**核心函数供其他扩展直接导入：
 
 | 函数 | 签名 | 用途 |
 |------|------|------|
-| `executeAgentSpawn(params, cwd, ctx)` | `→ Promise<SpawnResult>` | 核心 spawn 逻辑（接收 LLMContext） |
+| `executeAgentSpawn(params, cwd, ctx)` | `→ Promise<SpawnResult>` | 核心 spawn 逻辑（接收 LLMContext；`params.resumeFrom` 为**恢复**现有 session 文件——reopen 某个已存在的 JSONL，不截断，pi 直接续传转录） |
 | `executeAgentSpawnByRole(params, cwd, ctx)` | `→ Promise<SpawnResult>` | **role-aware spawn**：角色验证 → 去重命名 → `llmContextFromRole` → 应用能力覆盖（`addTools`/`excludeTools`/`addSkills`/`excludeSkills`/`addExtensions`/`excludeExtensions`）→ spawn——teammate-provider 的 `tp_spawn_agent` 只调用它（参数见 docs/4 §4.1） |
+| `executeAgentRestart(params, cwd, ctx)` | `→ Promise<SpawnResult>` | **恢复死掉的 agent**：读 spawn manifest（role/tools/skills/extensions/model）→ kill 残留 window/状态 → 用 `resumeFrom` 指向已记录的 `execution_session` JSONL 重新 spawn 同名 agent（上下文保留）→ 重启后**不写 session 文件**、不改文件名（重命名字稳定，comms consumer 复用）——teammate-provider 的 `tp_restart_agent` 调用它 |
 | `executeAgentKill(params)` | `→ SpawnResult` | 核心 kill 逻辑 |
 | `listRoleNames` / `buildRoleCatalog` / `interpolate` | 转发自 lib/role-context | 角色查询——TP 构建自身 prompt 与工具描述时使用 |
 

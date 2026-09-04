@@ -111,6 +111,31 @@ When you finish (or when reality stops part of the work): (1) task_checkout(id="
 
 ---
 
+## 2.2 Worker 离线恢复（worker_offline）
+
+派发后任务可能**失去执行者**（worker 崩溃 / SIGKILL / 机器宕机）。Coordinator 通过 **comms reminder** 辨别：派发消息的提醒回合若报告接收方 `⚠ X is OFFLINE`，即该 worker 已掉线。**这不是 `blocked`**——`blocked` 是现实阻碍**计划**，`worker_offline` 是**执行者消失**（可恢复的失败，不是计划矛盾）。
+
+完整协议（coordinator 驱动 + TP 重启的**双角色流程**）在独立 skill `worker-offline-recovery`（`.pi/skills/worker-offline-recovery.md`），coordinator 与 TP 都读取：
+
+```
+Coordinator 从 reminder 发现 dispatch 接收方 offline
+   → task_set_status(id, "worker_offline")          # 专门状态，依赖方保持锁定
+   → comms_send → TP: "Restart the agent <name> that was running task <id> — it went offline; resume its execution_session"
+   → TP 读节点上的 execution_session（JSONL），按原 role/name 重启同名 agent（保留上次执行上下文）
+   → TP 回复 "已重启"（reply_to_msg_id 指向 coordinator 的请求）
+   → Coordinator: task_dispatch(id, 重启后的同名agent, message="你被重启了——先submit一次report(task_checkout + task_submit_report)，然后等我决定是否继续")
+   → Worker: 提交report（此任务仍 dispatched 给它，合法）→ 等待
+   → Coordinator 审阅report：继续 → comms_send 让其 task_start 继续；终止 → task_block / complete / cancel
+```
+
+语义要点：
+- **`worker_offline` 对依赖方不算满足**——保持锁定（不进入就绪集），与 `blocked` 一致；但它**可恢复**：`worker_offline → dispatched` 合法，重启后 `task_dispatch` 直接重新交给同名 agent。
+- **`worker_offline` 只能手动标记**（系统不自动判断 offline）——coordinator 从 reminder 判断后显式设置。
+- 任务重新派发后，重启 worker 在 message 提示下**先 submit report 再等待**（不 task_start），等 coordinator 决定是否继续，避免重启后盲目重跑。
+- 若节点无 `execution_session`（worker 从未 task_start 就挂了），或重启徒劳，则 `worker_offline` 后转 `task_block` 走常规 reality-beats-plan 路径。
+
+---
+
 ## 3. 工具
 
 Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工具：
@@ -240,6 +265,7 @@ extensions/lib/role-context/roles/
     └── worker / scout / web-searcher / consultor
 
 .pi/skills/reality-beats-plan.md        ← 遇阻上报统一协议（含新披露边缘三分类）
+.pi/skills/worker-offline-recovery.md   ← worker 离线恢复（worker_offline）——coordinator + TP 双角色协议
 ```
 
 > 角色模板目录（`lib/role-context/roles/`）与 tasks / role-context 的完整文件清单见 docs/2 §1 与 docs/6 §7；task-comms-ops 的组件定位见 docs/0-overview §1。

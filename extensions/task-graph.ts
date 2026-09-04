@@ -149,7 +149,7 @@ export default function (pi: ExtensionAPI) {
 	// Shared helpers
 	// ---------------------------------------------------------------------------
 
-	const STATUSES: TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled"];
+	const STATUSES: TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled", "worker_offline"];
 	const STATUS_GLYPH: Record<TaskStatus, string> = {
 		pending: "◻",
 		dispatched: "◔",
@@ -157,6 +157,7 @@ export default function (pi: ExtensionAPI) {
 		done: "✓",
 		blocked: "⛔",
 		cancelled: "⊘",
+		worker_offline: "✚",
 	};
 
 	/** Number of the caller's existing draft files. Used to indicate "you have N uncommitted
@@ -539,12 +540,14 @@ pi.registerTool({
 				Type.Literal("done"),
 				Type.Literal("blocked"),
 				Type.Literal("cancelled"),
+				Type.Literal("worker_offline"),
 			],
 			{
 				description:
 					"New status to set. pending; dispatched (delegation sent, owner recorded, work not yet started — " +
 					"set together with dispatched_to); active (in progress — the dispatched worker moves its item here via task_start); " +
-					"done; blocked (reality is blocking progress); cancelled. " +
+					"done; blocked (reality is blocking progress); cancelled; worker_offline (the executing worker went offline/dead mid-flight — " +
+					"a recoverable failure distinct from blocked: the coordinator re-dispatches to a restarted agent after restart). " +
 					"done can be reopened (done → active); cancelled can be undone (cancelled → pending). " +
 					"A task can only be marked done when all deps are done/cancelled — otherwise the transition is rejected with the missing deps listed.",
 			},
@@ -958,6 +961,7 @@ pi.registerTool({
 				done: 0,
 				blocked: 0,
 				cancelled: 0,
+				worker_offline: 0,
 			};
 			let infoCount = 0;
 			for (const i of itemsArr) {

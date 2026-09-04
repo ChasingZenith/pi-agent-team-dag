@@ -38,6 +38,7 @@ import {
   existsSync,
   writeFileSync,
   renameSync,
+  readFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -85,6 +86,58 @@ interface AgentState {
   sessionFile: string;
   status: "spawning" | "online" | "offline" | "error";
   startedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Spawn manifest — the recipe a restart needs to rebuild an agent exactly.
+//
+// executeAgentSpawnByRole / executeAgentSpawn resolve the effective whitelist
+// (tools), skills, extensions and the model at spawn time, but none of that is
+// recoverable from the moduleAgents registry (which only keeps name/windowId/
+// sessionFile/status). A worker restart (tp_restart_agent) must re-create the
+// SAME agent — same role, same tools, same skills — so the spawn recipe is
+// persisted to a small manifest file next to the session. Written on every
+// successful spawn; read back by the restart path.
+// ---------------------------------------------------------------------------
+
+interface SpawnManifest {
+  name: string;
+  role: string;
+  model: string;
+  /** Effective tool whitelist (defaultTools − excluded ∪ added), as a csv. */
+  tools: string;
+  /** Effective skill paths (absolute). */
+  skills: string[];
+  /** Effective extension paths (absolute). */
+  extensions: string[];
+  sessionFile: string;
+}
+
+/** Absolute path of the spawn manifest for an agent name (in the session dir). */
+function spawnManifestPath(name: string, cwd: string): string {
+  return resolve(join(cwd, ".pi", "agent-sessions"), `${agentFileStem(name)}.manifest.json`);
+}
+
+/** Persist the spawn recipe (best effort — never fail a successful spawn). */
+function writeSpawnManifest(manifest: SpawnManifest, cwd: string): void {
+  try {
+    mkdirSync(join(cwd, ".pi", "agent-sessions"), { recursive: true });
+    writeFileSync(spawnManifestPath(manifest.name, cwd), JSON.stringify(manifest, null, 2));
+  } catch {
+    // best effort — a missing manifest only disables restart-by-recipe
+  }
+}
+
+/** Read a spawn manifest, or null when absent/corrupt. */
+function readSpawnManifest(name: string, cwd: string): SpawnManifest | null {
+  try {
+    const raw = readFileSync(spawnManifestPath(name, cwd), "utf-8");
+    const m = JSON.parse(raw) as SpawnManifest;
+    if (typeof m.role !== "string" || !m.role.trim()) return null;
+    return { ...m, tools: m.tools ?? "", skills: m.skills ?? [], extensions: m.extensions ?? [] };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +206,14 @@ export async function executeAgentSpawn(
      * for the full contract.
      */
     autoExit?: boolean;
+    /**
+     * Resume an EXISTING session file (the recorded execution_session JSONL)
+     * instead of starting a fresh/preloaded/forked session. When set, the
+     * session file is passed to pi as-is and pi opens it (continues the
+     * transcript — the restarted agent keeps its prior context). The file must
+     * already exist; it is NOT truncated. Used by executeAgentRestart.
+     */
+    resumeFrom?: string;
   },
   cwd: string,
   ctx: ExtensionContext,
@@ -204,7 +265,10 @@ export async function executeAgentSpawn(
     );
   }
 
-  // Session file, three modes:
+  // Session file, four modes:
+  //   0. resumeFrom — reopen an EXISTING session file (the recorded
+  //      execution_session JSONL); pi opens it and continues the transcript. No
+  //      write: the file is the dead agent's history, resumed as-is.
   //   1. context "fork" — branch the spawner's own session, trimmed to before
   //      the last delegation (comms-inbound) message. Format, ids, history
   //      are all pi SessionManager-generated. messages is ignored (the task is
@@ -215,7 +279,14 @@ export async function executeAgentSpawn(
   // Writes are atomic (temp + rename), so a failed write never leaves a
   // truncated file and a live agent's fd never observes one.
   let forkInfo: { trimmed: boolean; fullInherit: boolean; materializedByFallback: boolean } | null = null;
-  if (llmCtx.context === "fork") {
+  if (params.resumeFrom) {
+    sessionFile = resolve(cwd, params.resumeFrom);
+    if (!existsSync(sessionFile)) {
+      throw new Error(
+        `Cannot resume "${name}" — session file does not exist: ${sessionFile} (the dead agent's execution_session was lost)`,
+      );
+    }
+  } else if (llmCtx.context === "fork") {
     // ctx.sessionManager is the read-only view of the SPAWNER's own session —
     // forkSession opens a separate manager instance on it (never mutates the
     // live session). The default openSession resolves SessionManager via the
@@ -283,6 +354,21 @@ export async function executeAgentSpawn(
     };
     moduleAgents.set(name.toLowerCase(), state);
 
+    // Persist the spawn recipe (role/tools/skills/extensions/model/session)
+    // so a later restart can rebuild the SAME agent. Best effort.
+    writeSpawnManifest(
+      {
+        name,
+        role: llmCtx.role ?? "",
+        model,
+        tools: (llmCtx.tools ?? []).join(","),
+        skills: llmCtx.skills ?? [],
+        extensions: llmCtx.extensions ?? [],
+        sessionFile,
+      },
+      cwd,
+    );
+
     return {
       content: [
         {
@@ -303,7 +389,8 @@ export async function executeAgentSpawn(
         windowId,
         sessionFile,
         status: "spawning",
-        context: llmCtx.context ?? "fresh",
+        context: llmCtx.context ?? (params.resumeFrom ? "resume" : "fresh"),
+        ...(params.resumeFrom ? { resumed: true } : {}),
         ...(forkInfo
           ? {
               forked: true,
@@ -343,6 +430,14 @@ export interface SpawnByRoleParams {
    * child to inherit this process's session via fork.
    */
   context?: "fresh" | "fork";
+  /**
+   * Resume an EXISTING session file (the recorded execution_session JSONL)
+   * instead of a fresh session — the restarted agent continues its prior
+   * transcript. When set, the same role/name/tools are used. Preferred path is
+   * executeAgentRestart, which reads the spawn manifest; this is the low-level
+   * passthrough for callers that already hold the recipe.
+   */
+  resumeFrom?: string;
   /**
    * Tool names to ADD to the role template's defaultTools whitelist (tools
    * NOT in the template). Effective whitelist = (defaultTools ∪ addTools) −
@@ -495,6 +590,7 @@ export async function executeAgentSpawnByRole(
         extensions,
       },
       autoExit: params.autoExit,
+      ...(params.resumeFrom ? { resumeFrom: params.resumeFrom } : {}),
     },
     cwd,
     ctx,
@@ -527,6 +623,98 @@ export async function executeAgentSpawnByRole(
       ...(capabilityWarnings.length
         ? { capabilityWarnings }
         : {}),
+    },
+  };
+}
+
+/**
+ * Restart a dead agent by resuming its recorded execution_session, rebuilding
+ * it from the spawn manifest (role/tools/skills/extensions/model — none of
+ * which survive in the moduleAgents registry).
+ *
+ * Flow: kill any surviving window/state → re-spawn the SAME name with the
+ * manifest's recipe, pointing `resumeFrom` at the recorded session file so pi
+ * opens it and continues the transcript (prior context preserved).
+ *
+ * @param params - { name } and the session file to resume
+ * @param cwd    - Working directory
+ * @returns Restart result, or an error result (details.error) when no manifest
+ *          or no resume source is available.
+ */
+export async function executeAgentRestart(
+  params: { name: string; resumeFrom: string },
+  cwd: string,
+  ctx: ExtensionContext,
+): Promise<SpawnResult> {
+  const { name, resumeFrom } = params;
+
+  const manifest = readSpawnManifest(name, cwd);
+  const failing = (error: string, extra: Record<string, unknown> = {}): SpawnResult => ({
+    content: [{ type: "text" as const, text: `Could not restart "${name}": ${error}` }],
+    details: { name, status: "error", error, ...extra },
+  });
+
+  if (!manifest) {
+    return failing(
+      "no spawn manifest recorded for this agent (it was spawned without one, or the manifest was lost) — re-spawn it fresh via tp_spawn_agent instead",
+    );
+  }
+  if (!manifest.role.trim()) {
+    return failing("the spawn manifest has no role — cannot reconstruct the agent", { ...manifest });
+  }
+
+  // Kill any surviving window / stale registry state first (the restart
+  // reuses the SAME name; a live incarnation would collide on dedupe).
+  if (moduleAgents.has(name.toLowerCase())) {
+    executeAgentKill({ name });
+  }
+
+  // Rebuild the recipe from the manifest (not the role template): a restart
+  // must reproduce the EXACT agent, including any add/exclude tool overrides
+  // that differ from the template's defaultTools.
+  const llmCtx: LLMContext = llmContextFromRole(manifest.role, name) ?? {
+    role: manifest.role,
+    tools: manifest.tools ? manifest.tools.split(",") : [],
+    skills: manifest.skills,
+    extensions: manifest.extensions,
+  };
+  llmCtx.tools = manifest.tools ? manifest.tools.split(",") : llmCtx.tools;
+  llmCtx.skills = manifest.skills;
+  llmCtx.extensions = manifest.extensions;
+
+  const spawnResult = await executeAgentSpawn(
+    {
+      name,
+      llmContext: llmCtx,
+      model: manifest.model || undefined,
+      resumeFrom,
+    },
+    cwd,
+    ctx,
+  );
+
+  const details = (spawnResult?.details ?? {}) as Record<string, unknown>;
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `♻ Restarted "${displayName(name)}" (${manifest.role}) from its execution_session — context resumed.\n` +
+          `- Tools: ${manifest.tools}\n` +
+          `- Window: ${(details.windowId as string) || "unknown"}\n` +
+          `- Session: ${(details.sessionFile as string) || "unknown"}\n\n` +
+          `Give this agent name to the caller (same name, restarted).`,
+      },
+    ],
+    details: {
+      agentName: name,
+      role: manifest.role,
+      tools: manifest.tools,
+      windowId: details.windowId,
+      sessionFile: details.sessionFile,
+      status: details.status,
+      restarted: true,
+      session_resumed_from: resumeFrom,
     },
   };
 }

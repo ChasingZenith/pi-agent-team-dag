@@ -74,7 +74,7 @@ Agent A                          Teammate Provider
 
 ## 4. 工具
 
-TP 提供 **1 个工具**供自身的 LLM 使用。查看在线 agent 直接调 `comms_list_peer`。
+TP 提供 **2 个工具**供自身的 LLM 使用。查看在线 agent 直接调 `comms_list_peer`。
 
 ### 4.1 `tp_spawn_agent`
 
@@ -91,6 +91,16 @@ TP 提供 **1 个工具**供自身的 LLM 使用。查看在线 agent 直接调 
 - **实现**：**单步调用** `executeAgentSpawnByRole({ role, name, addTools, excludeTools, addSkills, excludeSkills, addExtensions, excludeExtensions }, cwd, ctx)`（docs/3 §8.2——模块函数导入，非工具调用）；工具白名单的计算（`defaultTools − exclude ∪ add`）在 agent-lifecycle 侧完成一次，经 `--role-tools` 传给 spawned agent（docs/3 §7.1）
 - **上下文**：spawn 出的 agent 获得干净的模板上下文，不继承 TP 的对话历史（见 §3 上下文隔离）。
 - **返回值**：agent 名称、role、**有效工具白名单**、skills、window ID 等（`tools` 为计算后的白名单，而非模板原始 `defaultTools`）。任务不在 spawn 时传入——由调用方在收到 TP 回复后自行交付（`task_dispatch`）。
+
+### 4.2 `tp_restart_agent`
+
+- **用途**：重启一个死掉/离线的 agent，**恢复其执行上下文**（worker-offline 恢复链路）。调用方传出 agent 名 + 它正在跑的任务 id。
+- **参数**：
+  - `agent`（string）：要重启的 agent 名——**同名**（comms 身份跨重启稳定，复用同一 durable consumer）。
+  - `task_id`（string）：该 agent 正在跑的任务——用于读取任务节点上记录的 `execution_session`（dead agent 正在执行的 JSONL 转录）。
+- **实现**：读 `task.execution_session.session_file` → **单步调用** `executeAgentRestart({ name: agent, resumeFrom: sessionFile }, cwd, ctx)`（docs/3 §8.2——模块函数导入）；重启从 spawn manifest（role/tools/skills/extensions/model）重建同名 agent，用 `resumeFrom` 指向该 JSONL，pi reopen 续传（保留上次执行上下文）。无 `execution_session`（worker 从未 task_start）+ 即报错。
+- **上下文**：重启后的 agent 复用原会话转录，**保留上次执行的对话上下文**（这正是恢复的意义）。
+- **返回值**：agent 名（同名）、role、工具白名单、session 路径、`restarted: true`——调用方据此重新 `task_dispatch` 给该名。
 
 ---
 
@@ -126,7 +136,7 @@ TP spawn 使用 role-context 的角色模板——`lib/role-context/roles/` 下�
 
 ## 7. System Prompt
 
-TP 的 system prompt 是角色模板 `lib/role-context/roles/manager/teammate-provider.md`（frontmatter `defaultTools` 即其工具白名单：`tp_spawn_agent` + `comms_*`，不含 `task_*`），使用 `{{role_catalog}}` 占位符在加载时注入角色目录。**角色目录逐项列出每个角色的 `Default tools`，以及模板声明的 `Declared skills:` / `Declared extensions:`**（`buildRoleCatalog` 经 `skillRefs`/`extensionRefs` 输出原始声明，docs/2 §3）——TP 据此知道每个角色默认有哪些工具/能力，从而在 spawn 时决定 `exclude_*`（去掉默认的）或 `add_*`（补模板没有的）。主要内容：
+TP 的 system prompt 是角色模板 `lib/role-context/roles/manager/teammate-provider.md`（frontmatter `defaultTools` 即其工具白名单：`tp_spawn_agent` + `tp_restart_agent` + `comms_*`，不含 `task_*`），使用 `{{role_catalog}}` 占位符在加载时注入角色目录。**角色目录逐项列出每个角色的 `Default tools`，以及模板声明的 `Declared skills:` / `Declared extensions:`**（`buildRoleCatalog` 经 `skillRefs`/`extensionRefs` 输出原始声明，docs/2 §3）——TP 据此知道每个角色默认有哪些工具/能力，从而在 spawn 时决定 `exclude_*`（去掉默认的）或 `add_*`（补模板没有的）。主要内容：
 
 - 你是唯一的 TP，所有人来找你
 - 收到请求 → 调 `comms_list_peer` 扫描在线 agent → 你（LLM）自己判断

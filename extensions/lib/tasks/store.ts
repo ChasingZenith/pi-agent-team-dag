@@ -81,8 +81,9 @@
  *   | current   | legal next                                              |
  *   |-----------|---------------------------------------------------------|
  *   | pending    | dispatched, active, blocked, done, cancelled            |
- *   | dispatched | active, pending, blocked, done, cancelled               |
- *   | active     | pending, blocked, done, cancelled                       |
+ *   | dispatched | active, pending, blocked, done, cancelled, worker_offline |
+ *   | active     | pending, blocked, done, cancelled, worker_offline       |
+ *   | worker_offline | dispatched, pending, blocked, done, cancelled       |
  *   | blocked    | pending, dispatched, active, done, cancelled           |
  *   | done       | active (reopen)                                          |
  *   | cancelled  | pending (undo)                                           |
@@ -114,9 +115,9 @@ import { buildGraph, dependencyClosure, effectiveDeps, unlockedBy } from "./grap
 // Types
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = "pending" | "dispatched" | "active" | "done" | "blocked" | "cancelled";
+export type TaskStatus = "pending" | "dispatched" | "active" | "done" | "blocked" | "cancelled" | "worker_offline";
 
-const STATUSES: readonly TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled"];
+const STATUSES: readonly TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled", "worker_offline"];
 
 /**
  * Granularity kind: "unit" (a concrete work item a single agent can resolve within a
@@ -1556,8 +1557,9 @@ export function commitTask(
 /** Legal next statuses per current status (see the state machine in the header). */
 const LEGAL_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
 	pending: ["dispatched", "active", "blocked", "done", "cancelled"],
-	dispatched: ["active", "pending", "blocked", "done", "cancelled"],
-	active: ["pending", "blocked", "done", "cancelled"],
+	dispatched: ["active", "pending", "blocked", "done", "cancelled", "worker_offline"],
+	active: ["pending", "blocked", "done", "cancelled", "worker_offline"],
+	worker_offline: ["dispatched", "pending", "blocked", "done", "cancelled"],
 	blocked: ["pending", "dispatched", "active", "done", "cancelled"],
 	done: ["active"],
 	cancelled: ["pending"],
@@ -1566,8 +1568,9 @@ const LEGAL_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
 /** Human-readable legal-targets list for error messages. */
 const TRANSITION_HINTS: Record<TaskStatus, string> = {
 	pending: "dispatched, active, blocked, done (with deps satisfied), cancelled",
-	dispatched: "active (start), pending, blocked, done (with deps satisfied), cancelled",
-	active: "pending, blocked, done (with deps satisfied), cancelled",
+	dispatched: "active (start), pending, blocked, done (with deps satisfied), cancelled, worker_offline",
+	active: "pending, blocked, done (with deps satisfied), cancelled, worker_offline",
+	worker_offline: "dispatched, pending, blocked, done (with deps satisfied), cancelled",
 	blocked: "pending, dispatched, active, done (with deps satisfied), cancelled",
 	done: "active (reopen)",
 	cancelled: "pending (undo)",

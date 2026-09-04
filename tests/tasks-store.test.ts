@@ -357,6 +357,58 @@ describe("version semantics — lifecycle and reports do not bump", () => {
     expect(() => setTaskStatus(CWD, "t", "cancelled", { updated_by: ME })).toThrow(/legal transitions/);
   });
 
+  it("worker_offline transitions: active/dispatched → worker_offline, then worker_offline → dispatched", () => {
+    createTask({ id: "wo" });
+    // dispatched → worker_offline (worker died before starting)
+    let r = setTaskStatus(CWD, "wo", "dispatched", {
+      dispatched_to: { name: "worker-1", dispatched_by: "manager", dispatch_msg_id: "m1" },
+      updated_by: "manager",
+      event: "dispatch",
+    });
+    expect(r.item.status).toBe("dispatched");
+    expect(r.item.dispatched_to?.name).toBe("worker-1");
+    r = setTaskStatus(CWD, "wo", "worker_offline", { updated_by: "manager", event: "worker_offline", change_summary: "worker-1 offline" });
+    expect(r.item.status).toBe("worker_offline");
+    // worker_offline → dispatched after restart (recovery path)
+    r = setTaskStatus(CWD, "wo", "dispatched", {
+      dispatched_to: { name: "worker-1", dispatched_by: "manager", dispatch_msg_id: "m2" },
+      updated_by: "manager",
+      event: "dispatch",
+    });
+    expect(r.item.status).toBe("dispatched");
+    expect(r.item.dispatched_to?.name).toBe("worker-1");
+    // now active → worker_offline (worker died mid-flight)
+    r = setTaskStatus(CWD, "wo", "active", {
+      execution_session: { session_id: "s1", session_file: ".pi/agent-sessions/x.json" },
+      updated_by: "worker-1",
+      event: "start",
+    });
+    r = setTaskStatus(CWD, "wo", "worker_offline", { updated_by: "manager", event: "worker_offline" });
+    expect(r.item.status).toBe("worker_offline");
+    // version unchanged (lifecycle event)
+    expect(r.item.version).toBe(1);
+  });
+
+  it("worker_offline is not satisfied for dependents (locks them, like blocked)", () => {
+    createTask({ id: "dep-wo", deps: [] });
+    createTask({ id: "waits-wo", deps: ["dep-wo"] });
+    setTaskStatus(CWD, "dep-wo", "dispatched", {
+      dispatched_to: { name: "worker-1", dispatched_by: "manager", dispatch_msg_id: "m1" },
+      updated_by: "manager",
+      event: "dispatch",
+    });
+    setTaskStatus(CWD, "dep-wo", "worker_offline", { updated_by: "manager", event: "worker_offline" });
+    // While dep-wo is worker_offline (not done/cancelled), its dependent stays locked:
+    // marking the dependent done must FAIL with the missing dep listed.
+    expect(() => setTaskStatus(CWD, "waits-wo", "done", { updated_by: "manager", event: "complete" })).toThrow(
+      /deps not satisfied: dep-wo/,
+    );
+    // Once dep-wo is done, the dependent can complete.
+    setTaskStatus(CWD, "dep-wo", "done", { updated_by: "manager", event: "complete" });
+    const r = setTaskStatus(CWD, "waits-wo", "done", { updated_by: "manager", event: "complete" });
+    expect(r.item.status).toBe("done");
+  });
+
   it("reopen (done → active) voids the report; the report true copy resets", () => {
     createTask({ id: "re" });
     setTaskStatus(CWD, "re", "dispatched", {

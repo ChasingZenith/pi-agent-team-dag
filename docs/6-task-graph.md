@@ -41,14 +41,15 @@
 
 ### 2.4 状态机
 
-每个 task 的状态：`pending / dispatched / active / done / blocked / cancelled`。合法迁移由 `task_set_status` 校验：
+每个 task 的状态：`pending / dispatched / active / done / blocked / cancelled / worker_offline`。合法迁移由 `task_set_status` 校验：
 
 | 当前状态 | 合法迁移 |
 |------|------|
 | `pending` | `dispatched`（派发）、`active`（开始执行）、`blocked`（现实受阻）、`done`（deps 满足时）、`cancelled`（放弃） |
-| `dispatched` | `active`（worker 用 `task_start` 声明开工）、`pending`（收回重新派发）、`blocked`、`done`（deps 满足时）、`cancelled` |
-| `active` | `pending`（收回）、`blocked`、`done`（deps 满足时）、`cancelled` |
+| `dispatched` | `active`（worker 用 `task_start` 声明开工）、`pending`（收回重新派发）、`blocked`、`done`（deps 满足时）、`cancelled`、`worker_offline`（执行者离线） |
+| `active` | `pending`（收回）、`blocked`、`done`（deps 满足时）、`cancelled`、`worker_offline`（执行者离线） |
 | `blocked` | `pending`（解除阻塞）、`dispatched`（重新派发）、`active`、`done`（deps 满足时）、`cancelled` |
+| `worker_offline` | `dispatched`（重启后重新派发）、`pending`（收回重新安排）、`blocked`、`done`（deps 满足时）、`cancelled` |
 | `done` | `active`（reopen：验证未过 / 需返工） |
 | `cancelled` | `pending`（undo：取消后重新规划） |
 
@@ -56,7 +57,8 @@
 - `done` / `cancelled` 是终态（除 reopen / undo 外）。
 - **标 done 必须 deps 全部满足**——否则报错并**列出缺失 deps**（标 done、取消或调整 deps）。
 - **`cancelled` 对依赖方视为满足**（解锁计算与之一致）；**`blocked` 不算满足**——被阻塞的节点保持锁定。
-- **`blocked` 只能手动标记**——系统不会自动判断阻塞。
+- **`worker_offline` = 执行任务的人在途离线/死亡**（可恢复失败，区别于 `blocked`）：coordinator 从 comms reminder 发现派发消息的接收方 offline 后，把任务置为 `worker_offline`——既不是现实阻碍计划（`blocked`），也不是执行完成（`done`）。对依赖方它**不算满足**（保持锁定）；但它是**可恢复**的：TP 用节点上记录的 `execution_session`（JSONL）重启同名 agent 后，coordinator 重新 `task_dispatch`（`worker_offline → dispatched` 合法）把任务交给重启的 agent。
+- **`blocked` / `worker_offline` 只能手动标记**——系统不会自动判断阻塞或离线。
 
 ### 2.5 就绪集（ready set）
 
@@ -121,7 +123,7 @@
 | `deps` | string[] | 依赖边：前置依赖 id 列表——任何粒度皆可声明；unit 的 deps 是纯顺序依赖（等待前置完成，仍直接执行） |
 | `subgraph_deps` | string[] | 子图门（仅 module）（语义见 §2.7，校验见 §4） |
 | `info_refs` | string[] | 共享信息引用（内容引用，**不是图边**）：所引用 `info` 节点（kind=`"info"`）的正文在此 task 读 description 时自动注入（见 §2.1.1）；unit / module 皆可声明，`info` 节点自身不可声明 |
-| `status` | string | `pending` / `dispatched` / `active` / `done` / `blocked` / `cancelled`（见 §2.4）；`info` 节点无状态语义，状态迁移被拒 |
+| `status` | string | `pending` / `dispatched` / `active` / `done` / `blocked` / `cancelled` / `worker_offline`（见 §2.4）；`info` 节点无状态语义，状态迁移被拒 |
 | `kind` | string | `unit`（默认）/ `module` / `info`（共享信息节点）；unit 不能声明 `subgraph_deps`；info 不能声明 deps / subgraph_deps / info_refs |
 | `version` | number | 内容修订号（§3.1，内容变化 +1）；`task_read` 返回，`task_commit` / `task_submit_report` 携带 `expected_version` 做乐观并发校验（必填，见 §3.4） |
 | `struct_version` | number | 结构修订号：`deps` / `subgraph_deps` 每变化一次 +1（含 `into_*` 接线重提交父节点），独立于 `version`——接线/改边从不 bump `version` |

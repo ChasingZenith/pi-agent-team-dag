@@ -25,10 +25,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import {
+  executeAgentRestart,
   executeAgentSpawnByRole,
   getRoleTemplate,
   listRoleNames,
 } from "../agent-lifecycle";
+import { readTask } from "../lib/tasks/store";
 
 // Expanded (ctrl+O) rendering: show the full call args / result content —
 // the same information the LLM sees in its context.
@@ -140,6 +142,81 @@ export default function (pi: ExtensionAPI) {
         theme.fg("accent", `[${role}]`);
       if (!context.expanded) return new Text(text, 0, 0);
       // Expanded: the full call args (role/name), as the LLM saw them.
+      return new Text(text + "\n" + fmtArgs(a), 0, 0);
+    },
+  });
+
+  // ======================================================================
+  // tp_restart_agent
+  // ======================================================================
+
+  pi.registerTool({
+    name: "tp_restart_agent",
+    label: "TP Restart Agent",
+    description:
+      "Restart a dead/offline agent by resuming its recorded execution_session. Caller asks with the agent name " +
+      "and the task it was running; this tool reads the task's execution_session (the JSONL transcript the dead " +
+      "agent was executing in), re-spawns the SAME agent name with that session file (context preserved), and " +
+      "rebuilds it from the recorded spawn manifest (same role / tools / skills). Use when a worker went offline " +
+      "mid-flight (a dispatch reminder reported it offline) and the caller wants to recover the task rather than " +
+      "re-spawn fresh. Reply to the caller that it is restarted (same name).",
+    parameters: Type.Object({
+      agent: Type.String({
+        description:
+          "The agent name to restart — the SAME name it was running under (the comms identity, stable across restarts).",
+      }),
+      task_id: Type.String({
+        description:
+          "The task the agent was running. Used to read the recorded execution_session (the JSONL transcript to resume).",
+      }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const { agent, task_id } = params as { agent: string; task_id: string };
+      try {
+        // Read the recorded execution session from the task node — the JSONL
+        // the dead agent was executing in. This is what preserves context.
+        const cwd = process.cwd();
+        const task = readTask(cwd, task_id);
+        const sessionFile = task?.execution_session?.session_file;
+        if (!sessionFile) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Could not restart "${agent}": task "${task_id}" has no recorded execution_session (the worker never started it, so there is nothing to resume)`,
+              },
+            ],
+            details: { agent, task_id, status: "error", error: "no execution_session" },
+          };
+        }
+        const res = await executeAgentRestart({ name: agent, resumeFrom: sessionFile }, cwd, ctx as any);
+        const ok = (res.details?.status as string) !== "error";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: ok
+                ? `${(res.content[0] as { text: string }).text}\n\nTask restored: re-dispatch task "${task_id}" to "${agent}" and have the worker report first.`
+                : (res.content[0] as { text: string }).text,
+            },
+          ],
+          details: { agent, task_id, ...(res.details ?? {}), restarted: ok },
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: `tp_restart_agent error: ${message}` }],
+          details: { agent, task_id, status: "error", error: message },
+        };
+      }
+    },
+    renderCall(args, theme, context) {
+      const a = args as Record<string, unknown>;
+      const text =
+        theme.fg("toolTitle", theme.bold("tp_restart ")) +
+        theme.fg("accent", (a.agent as string) || "?");
+      if (!context.expanded) return new Text(text, 0, 0);
+      // Expanded: the full call args (agent/task_id), as the LLM saw them.
       return new Text(text + "\n" + fmtArgs(a), 0, 0);
     },
   });

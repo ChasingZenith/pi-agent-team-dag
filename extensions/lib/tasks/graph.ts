@@ -117,7 +117,7 @@ export interface ReadySetResult {
 
 /**
  * Partition the pending items into ready / notReady. Non-pending items
- * (dispatched, active, blocked, done, cancelled) are neither: the ready set is
+ * (dispatched, active, blocked, done, cancelled, worker_offline) are neither: the ready set is
  * about what can be dispatched NOW — a dispatched item is already owned.
  * Missing lists use EFFECTIVE deps (deps + subgraph gates), so a gated node
  * reports its unsatisfied gate among the missing — that is why it cannot be
@@ -380,12 +380,13 @@ const STATUS_GLYPHS: Record<TaskStatus, string> = {
 	done: "✓",
 	blocked: "⊘",
 	cancelled: "✕",
+	worker_offline: "✚",
 };
 
 /** Shown when the render traversal re-enters a node (corrupted cycle). */
 const CYCLE_GLYPH = "↻";
 
-const STATUS_ORDER: TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled"];
+const STATUS_ORDER: TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled", "worker_offline"];
 
 /**
  * Forest render of the dependency structure, top-down from the deliverables:

@@ -70,9 +70,14 @@ Do not skip delegation layers: never request fresh Planners for multiple module 
 
 ## Background
 
-Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`.
+Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`. Recover a task whose worker went offline via skill `worker-offline-recovery`.
 
 ## Report Review & Discrepancy Handling
+
+### Worker Offline Recovery
+
+A dispatched/active task may lose its worker (crash, SIGKILL, machine dies). Detect it from a comms reminder reporting the recipient `(offline)`; it is `worker_offline`, NOT `blocked` (the executor disappeared — a recoverable failure, not a plan contradiction). Read the skill `worker-offline-recovery` for the full two-role protocol (set `worker_offline`, ask TP to restart via its `execution_session`, re-dispatch the SAME agent after the restart, worker reports first then waits for your decision to continue or stop).
+
 
 When an agent submits a report via `task_submit_report`, evaluate it against the plan and choose the appropriate action path:
 
