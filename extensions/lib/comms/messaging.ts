@@ -447,11 +447,12 @@ export async function send(
 		.catch((err: any) => audit("history_write_failed", { direction: "out", msg_id: msgId, reason: err?.message ?? String(err) }));
 
 	// Target status for the caller (comms_send's target_status): derived
-	// from the peer profile cache; falls back to online when the profile is not
-	// cached yet but the name lease resolved it (live == heartbeating). The
-	// message is queued to the stream regardless — an offline target simply
-	// redelivers on restart.
-	const targetStatus = statusOfName(identity.subnet, target);
+	// from the peer profile cache. The name lease was just resolved above (an
+	// entry existing == the peer is heartbeating), so a missing cached profile
+	// still means online — pass the online fallback explicitly. The message is
+	// queued to the stream regardless — an offline target simply redelivers on
+	// restart.
+	const targetStatus = statusOfName(identity.subnet, target, "online");
 
 	const now = Date.now();
 	// A reminder is armed only by an explicit remindS > 0 (seconds). Omitted

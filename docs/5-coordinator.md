@@ -22,7 +22,7 @@
 
 - **高级接口驱动**：多步协调动作（找 agent → 派发；标 done → 通知等待方）封装为**单动作工具**（见 §3）——LLM 负责内容（委托消息、判断、仲裁决策），代码负责动作（找 agent、写图、通知）
 - **全部委托**：不读文件、不写代码、不执行命令——一切通过 specialist 完成
-- **图操作归 planner（小调整除外）**：coordinator 无 `task_commit`/`task_set_status` 的常规图写，新增节点与状态推进经 task-comms-ops 工具，小调整直接改草稿 + `task_commit`（改 title / description / deps，见 §3）
+- **图操作归 planner（小调整除外）**：coordinator 无 `task_commit` 的常规图写，新增节点经 task-comms-ops 工具，小调整直接改草稿 + `task_commit`（改 title / description / deps，见 §3）。coordinator 通常经语义化工具推进状态（task_dispatch / task_start / task_submit_report / task_complete / task_block / task_cancel），仅当语义化工具不覆盖的底层迁移（如 `task_set_status(id, "worker_offline")`、done→active 重开）时才用 `task_set_status`
 - **闭环工作流**：实际反馈 → 调整图 → 全局同步
 - **递归**：复杂子目标可 spawn 子 Coordinator（父级把子图交给它）
 
@@ -156,6 +156,8 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 只读查询（参数与语义见 docs/6 §5）：`task_read`（读节点全文与就绪性）、`task_list`（按状态过滤列表）、`task_ready_set`（就绪集——派发前必查；**按 kind 分桶**：unit 执行 / module 待驱动；`for=<id>` 限定某节点及其依赖闭包，自身就绪也列出；就绪集内两两无依赖 → 可并行派发）、`task_render`（整图渲染，评审与汇报）。
 
 图写：coordinator 的小调整与接口仲裁直接改草稿 + `task_commit`（metadata 草稿只写要改的字段 `title?/description?/deps?/kind?` + `change_summary`，提交时校验 deps 存在性与无环；`kind` 可翻转 unit → module——执行暴露需细化时）；子图生成（写草稿 + `task_commit` 建节点、链接父节点 deps）归 planner（由下放的子 coordinator 委托）。
+
+底层状态迁移：coordinator 的常规状态推进走上面的语义化工具；当某个迁移没有对应语义工具时用 `task_set_status`（`id, status, change_summary?`）——典型是 `worker_offline`（§2.2 恢复流程，无语义工具覆盖）、以及 `done → active` 重开、`cancelled → pending` 撤销等。它是生命周期事件：不 bump 版本、只记 history 摘要（见 docs/6 §2.4）。
 
 ### comms 通信工具
 

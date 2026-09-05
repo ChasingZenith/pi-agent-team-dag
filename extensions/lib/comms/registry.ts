@@ -243,14 +243,25 @@ export async function resolveName(subnet: string, name: string): Promise<string 
 /**
  * Current status of a peer name, derived from the cached profile's
  * last_seen_at (same logic as getPeers). Used by the sender side (comms_send
- * target_status, listActiveReminders target_status). When the profile is not
- * cached yet but the caller already resolved the name (the name lease is a
- * TTL — an entry existing means the peer is heartbeating), the peer is
- * assumed online.
+ * target_status, listActiveReminders target_status).
+ *
+ * A missing profile means the peer is NOT known to be heartbeating: a graceful
+ * exit (clearOwn) deletes the profile, and only a crashed agent leaves one
+ * behind (shown offline via last_seen_at). So the default for an uncached
+ * profile is "offline" — never assume a vanished peer is alive. The only
+ * caller that may legitimately assume online is the send path, which has just
+ * resolved the name lease (an entry existing == heartbeating) and therefore
+ * passes `missingStatus: "online"`. The reminder path (listActiveReminders)
+ * arms reminders for arbitrary peers from history with no liveness check, so
+ * it must not rely on the online fallback.
  */
-export function statusOfName(subnet: string, name: string): "online" | "offline" {
+export function statusOfName(
+	subnet: string,
+	name: string,
+	missingStatus: "online" | "offline" = "offline",
+): "online" | "offline" {
 	const profile = cache.get(profileKey(subnet, name));
-	if (!profile) return "online";
+	if (!profile) return missingStatus;
 	return statusFromLastSeen(profile.last_seen_at, offlineAfterMs);
 }
 
