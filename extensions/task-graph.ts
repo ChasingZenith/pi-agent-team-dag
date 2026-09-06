@@ -938,7 +938,7 @@ pi.registerTool({
 		description:
 			"List all tasks as a flat table: id, title, status, version, last update, ready mark — plus " +
 			"status counts and graph warnings (dependency cycles, dangling deps, orphan items — tasks " +
-			"with no dependents, outside every module subgraph). Use it to discover existing " + +
+			"with no dependents, outside every module subgraph). Use it to discover existing " +
 			"items and to find the id referenced in a task message.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate) {
