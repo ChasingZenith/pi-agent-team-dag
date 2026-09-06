@@ -40,6 +40,7 @@ import { audit } from "./audit.ts";
 const cache = new Map<string, StoredProfile>();
 let watchIter: QueuedIterator<KvEntry> | null = null;
 let watchShutdown = false;
+let watchActive = false;
 let offlineAfterMs = 60_000;
 let reclaimAfterMs = 10 * 60_000;
 let onChange: (() => void) | null = null;
@@ -214,7 +215,8 @@ export async function updateOwnProfile(
 // are explicit deletes like clearOwn, which the watch does see).
 
 export function startWatch(subnet: string): void {
-	if (watchIter || watchShutdown) return;
+	if (watchActive) return;
+	watchActive = true;
 	watchShutdown = false;
 	void runWatchLoop(subnet);
 }
@@ -265,6 +267,7 @@ async function runWatchLoop(subnet: string): Promise<void> {
 }
 
 export function stopWatch(): void {
+	watchActive = false;
 	watchShutdown = true;
 	try { watchIter?.stop(); } catch { /* ignore */ }
 	watchIter = null;
