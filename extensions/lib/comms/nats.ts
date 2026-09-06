@@ -18,7 +18,6 @@ import type { RuntimeConfig } from "./config.ts";
 import {
 	KV_BUCKET_PROFILES,
 	KV_BUCKET_HISTORY,
-	KV_BUCKET_NAMES,
 	streamName,
 	streamSubjects,
 } from "./protocol.ts";
@@ -35,7 +34,6 @@ let nc: NatsConnection | null = null;
 let js: JetStreamClient | null = null;
 let jsm: JetStreamManager | null = null;
 let kvProfiles: KV | null = null;
-let kvNames: KV | null = null;
 let kvHistory: KV | null = null;
 
 export function getNc(): NatsConnection {
@@ -54,11 +52,6 @@ export function getJsm(): JetStreamManager {
 export function getKvProfiles(): KV {
 	if (!kvProfiles) throw new Error("comms: not connected");
 	return kvProfiles;
-}
-/** Name index (n.<subnet>.<name>) — bucket TTL lease: presence == alive. */
-export function getKvNames(): KV {
-	if (!kvNames) throw new Error("comms: not connected");
-	return kvNames;
 }
 /** Message content history (h.<subnet>.<name>.<out|in>.<msg_id>) — bucket
  *  TTL (default 24h): outbox/inbox re-read content after compact or restart. */
@@ -86,12 +79,11 @@ export async function connectNats(cfg: RuntimeConfig): Promise<void> {
 	js = jsc;
 	jsm = await jsc.jetstreamManager();
 
-	// Three KV buckets with distinct lifetimes (see protocol.ts):
-	//   comms_profiles   — permanent profiles (no TTL; offline stays visible,
-	//                  status derived from last_seen_at).
-	//   comms_names   — name index with a bucket-level TTL lease: every
-	//                  heartbeat put refreshes it; stopping heartbeats
-	//                  releases the name claim automatically.
+	// Two KV buckets (see protocol.ts):
+	//   comms_profiles   — permanent lifecycle records (no TTL; offline/exited
+	//                  stay visible; status derived from lifecycle+last_seen_at;
+	//                  the name claim lives in the same entry — reclaim is
+	//                  reader-driven, no lease bucket).
 	//   comms_history — message content history, bucket TTL (default 24h). NOTE:
 	//                  views.kv() only BINDS an existing bucket — the TTL is
 	//                  applied on first creation, never re-applied. Changing
@@ -99,11 +91,6 @@ export async function connectNats(cfg: RuntimeConfig): Promise<void> {
 	kvProfiles = await jsc.views.kv(KV_BUCKET_PROFILES, {
 		history: 1,
 		description: "comms agent profiles (a.<subnet>.<name>, permanent)",
-	});
-	kvNames = await jsc.views.kv(KV_BUCKET_NAMES, {
-		ttl: cfg.registryTtlMs,
-		history: 1,
-		description: "comms name index (n.<subnet>.<name>, TTL lease)",
 	});
 	kvHistory = await jsc.views.kv(KV_BUCKET_HISTORY, {
 		ttl: cfg.historyTtlMs,
@@ -177,13 +164,12 @@ export async function ensureStream(messageTtlMs: number, subnet: string): Promis
 
 export async function closeNats(): Promise<void> {
 	// NOTE: never destroy() the KV buckets here — they are shared state; only
-	// this agent's own keys are removed by registry.clearOwn().
+	// this agent's own entry is finalized by registry.clearOwn().
 	try { await nc?.drain(); } catch { /* best-effort */ }
 	try { nc?.close(); } catch { /* best-effort */ }
 	nc = null;
 	js = null;
 	jsm = null;
 	kvProfiles = null;
-	kvNames = null;
 	kvHistory = null;
 }

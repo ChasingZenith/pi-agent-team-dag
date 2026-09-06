@@ -8,7 +8,7 @@
  * 在 turn 结束后,各自保序。
  */
 import { connectE2e, waitFor, BUCKETS } from "./helpers.ts";
-import { msgSubject, ulid, nameKey } from "../../extensions/lib/comms/protocol.ts";
+import { msgSubject, ulid, profileKey } from "../../extensions/lib/comms/protocol.ts";
 
 const SUBNET = "smoketest";
 const TARGET = "smoke-b";
@@ -18,9 +18,9 @@ const log = (tag: string, ...rest: any[]) => console.log(new Date().toISOString(
 async function main(): Promise<void> {
   const nc = await connectE2e();
   const js = nc.jetstream();
-  const names = await js.views.kv(BUCKETS.names);
-  await waitFor(async () => Boolean(await names.get(nameKey(SUBNET, TARGET)).catch(() => null)), {
-    label: "smoke-b name lease", timeoutMs: 60_000,
+  const profiles = await js.views.kv(BUCKETS.profiles);
+  await waitFor(async () => Boolean(await profiles.get(profileKey(SUBNET, TARGET)).catch(() => null)), {
+    label: "smoke-b profile", timeoutMs: 60_000,
   });
   log("[1] smoke-b online");
 

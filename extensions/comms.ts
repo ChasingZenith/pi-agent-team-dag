@@ -2,8 +2,9 @@
  * comms — Pi Agent communication network on NATS + JetStream.
  *
  *   stream  COMMS_<subnet>    durable per-agent prompt consumer
- *   bucket  comms_profiles       permanent agent profiles (a.<subnet>.<name>; offline stays visible)
- *   bucket  comms_names       name lease (n.<subnet>.<name>, TTL lease — releases on crash)
+ *   bucket  comms_profiles       lifecycle records (a.<subnet>.<name>; one entry per agent —
+ *                             name claim + lifecycle (living/gracefully_exited) + last_seen_at;
+ *                             offline/exited stay visible, name reclaim is reader-driven)
  *   bucket  comms_history     message content history (h.<subnet>.<name>.<out|in>.<msg_id>, TTL default 24h)
  *
  * Identity: the agent NAME is the comms identity and the address for every
@@ -278,8 +279,10 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Registry tuning.
-		registry.setRegistryTuning(cfg.offlineAfterMs);
+		// Registry tuning: display-offline threshold (fast convergence, cheap to
+		// be wrong) + name-reclaim threshold (conservative — a steal must never
+		// fire on a merely slow agent).
+		registry.setRegistryTuning(cfg.offlineAfterMs, cfg.reclaimAfterMs);
 
 		// Register (name claim + initial profile).
 		try {

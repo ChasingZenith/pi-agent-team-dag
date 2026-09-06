@@ -22,14 +22,12 @@ import {
   statusFromLastSeen,
   nowIso,
   DEFAULT_NATS_URL,
-  nameKey,
   profileKey,
 } from "../../extensions/lib/comms/protocol.ts";
 import {
   connectNats,
   ensureStream,
   getKvProfiles,
-  getKvNames,
   getKvHistory,
 } from "../../extensions/lib/comms/nats.ts";
 import { resolveToken, waitFor, sleep, readJsonl, kvRead } from "./helpers.ts";
@@ -75,7 +73,6 @@ async function dumpKv(): Promise<Record<string, unknown>> {
   };
   return {
     profiles: await read(getKvProfiles(), "a.test-b.>"),
-    names: await read(getKvNames(), "n.test-b.>"),
     history: await read(getKvHistory(), "h.test-b.>"),
   };
 }
@@ -149,12 +146,10 @@ async function runB9(harnessId: any): Promise<void> {
   check("B-9b", threw && /target not found/.test(errMsg), `error mentions "target not found" — got: ${errMsg}`);
 
   await registry.clearOwn(dummy);
-  // A deleted key reads back as a DEL tombstone with an empty value (""), not
-  // null — treat falsy as deleted.
-  const gone = await kvRead(getKvNames(), nameKey("test-a", "b-xdummy"));
-  const profileGone = await kvRead(getKvProfiles(), profileKey("test-a", "b-xdummy"));
-  check("B-9c", !gone, `test-a dummy name lease cleaned (read=${JSON.stringify(gone)})`);
-  check("B-9d", !profileGone, `test-a dummy profile cleaned (read=${JSON.stringify(profileGone)})`);
+  // clearOwn writes a TERMINAL tombstone (lifecycle gracefully_exited) instead
+  // of deleting — the entry remains, but the name claim is dead and stealable.
+  const tomb = (await kvRead(getKvProfiles(), profileKey("test-a", "b-xdummy"))) as any;
+  check("B-9c", !!tomb && tomb.lifecycle === "gracefully_exited", `test-a dummy profile tombstoned (read=${JSON.stringify(tomb)})`);
 }
 
 // ━━ B-7 + B-8: spawn b-leaser, crash it (kill-window), lease expiry + profile ━━━━
@@ -198,15 +193,21 @@ async function runB7B8(): Promise<void> {
   }
   const t0 = Date.now();
 
-  // B-7a: +5s — lease still alive
+  // B-7a: +5s — profile still resolves (holder presumed alive)
   await sleep(5_000);
   const sid5 = await registry.resolveName("test-b", "b-leaser");
-  check("B-7a", sid5 !== null, `t+5s name lease still resolves (sid=${sid5})`);
+  check("B-7a", sid5 !== null, `t+5s profile still resolves (got ${JSON.stringify(sid5)})`);
 
-  // B-7b: +35s — lease expired (bucket TTL 30s from last heartbeat ≤10s pre-crash)
+  // B-7b: +35s — the crashed holder's entry persists (living-labeled, stale
+  // last_seen_at); the name is stealable (reclaim threshold 30s in this
+  // harness) but addressability never lapses.
   await sleep(30_000);
   const sid35 = await registry.resolveName("test-b", "b-leaser");
-  check("B-7b", sid35 === null, `t+35s name lease expired, resolveName → null (got ${JSON.stringify(sid35)})`);
+  check(
+    "B-7b",
+    sid35 !== null && sid35.lifecycle === "living",
+    `t+35s crashed holder's entry remains, lifecycle=living (got ${JSON.stringify(sid35)})`,
+  );
 
   // B-8: +70s — profile permanent + offline derived (same crash timeline)
   await sleep(35_000);
@@ -221,7 +222,8 @@ async function runB7B8(): Promise<void> {
     JSON.stringify(await dumpKv(), null, 2),
   );
 
-  // B-7c: same-name re-register succeeds after lease reclaim (name 30s 回收)
+  // B-7c: same-name re-register succeeds by STEALING the dead claim
+  // (living + last_seen_at older than reclaimAfterMs=30s in this harness)
   let reregOk = false;
   let reregErr = "";
   for (let i = 0; i < 6 && !reregOk; i++) {
@@ -256,13 +258,13 @@ async function main(): Promise<void> {
     subnet: SUBNET,
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
-    registryTtlMs: 30_000,
     offlineAfterMs: 60_000,
+    reclaimAfterMs: 30_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(60_000);
+  registry.setRegistryTuning(60_000, 30_000);
   messaging.setSubnet(SUBNET);
   messaging.setMessageTtlMs(1_800_000);
   log(`connected to ${cfg.natsUrl}, stream COMMS_${SUBNET} ensured`);

@@ -22,9 +22,8 @@
  * comms' implementation modules at runtime.
  */
 
-import type { Identity } from "./protocol";
+import type { Identity, StoredProfile } from "./protocol";
 import type * as messaging from "./messaging";
-import type { StoredProfile } from "./registry";
 
 /** Event channel carrying the shared comms runtime handle (CommsRuntime). */
 export const COMMS_RUNTIME_EVENT = "comms:runtime";

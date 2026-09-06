@@ -1,18 +1,22 @@
 /**
- * comms — agent registry over two NATS KV buckets:
+ * comms — agent registry over the profiles KV bucket:
  *
- *   comms_profiles — permanent agent profiles (a.<subnet>.<name>, NO bucket TTL).
- *                Profiles outlive the agent: status (online/offline) is
- *                derived from last_seen_at, so offline agents stay visible.
- *   comms_names — name lease (n.<subnet>.<name>) with a bucket-level TTL:
- *                heartbeat refreshes it (sliding expiry); an agent that stops
- *                heartbeating loses its name claim automatically, so the name
- *                can be reclaimed. An entry existing == the agent is
- *                heartbeating; the entry VALUE is the name itself (the name
- *                is the address — no separate id to map).
+ *   comms_profiles — permanent lifecycle records (a.<subnet>.<name>, NO bucket
+ *                TTL). ONE entry per agent carries the name claim, the
+ *                lifecycle state ("living" | "gracefully_exited") and the
+ *                raw heartbeat timestamp; addressability and status always
+ *                come from the same snapshot.
  *
- * The profile key is the NAME (not the session id): reclaiming a name
- * overwrites the old profile — no duplicate profiles for a restarted agent.
+ * Entries outlive the agent: an offline/exited agent stays visible. Name
+ * reclaim happens when a register collides with a dead holder — a
+ * gracefully_exited terminal state (immutable, so the steal is race-free via
+ * revision-check) or a living profile whose last_seen_at is older than
+ * reclaimAfterMs (conservative second threshold, never fires on a merely
+ * slow agent).
+ *
+ * The profile key is the NAME (not the session id): one entry per name, and
+ * reclaiming a name overwrites the old profile — no duplicate profiles for a
+ * restarted agent.
  *
  * Every key is namespaced by the subnet (the communication domain): agents
  * in different subnets never see each other's profiles or names. The subnet
@@ -25,11 +29,10 @@ import type { AgentProfile, Identity, StoredProfile } from "./protocol.ts";
 import {
 	profileKey,
 	profileKeyPrefix,
-	nameKey,
 	nowIso,
-	statusFromLastSeen,
+	statusFromProfile,
 } from "./protocol.ts";
-import { getKvProfiles, getKvNames } from "./nats.ts";
+import { getKvProfiles } from "./nats.ts";
 import { audit } from "./audit.ts";
 
 // ━━ Module state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -38,10 +41,22 @@ const cache = new Map<string, StoredProfile>();
 let watchIter: QueuedIterator<KvEntry> | null = null;
 let watchShutdown = false;
 let offlineAfterMs = 60_000;
+let reclaimAfterMs = 10 * 60_000;
 let onChange: (() => void) | null = null;
 
-export function setRegistryTuning(offline: number): void {
+export function setRegistryTuning(offline: number, reclaim: number): void {
 	offlineAfterMs = offline;
+	reclaimAfterMs = reclaim;
+}
+
+/**
+ * Is a living profile's name reclaimable — i.e. the holder is presumed
+ * crashed? Deliberately a much larger threshold than the display-offline
+ * threshold: a steal must never fire on a merely slow/lagging agent.
+ */
+function isReclaimable(profile: StoredProfile): boolean {
+	const last = Date.parse(profile.last_seen_at);
+	return Number.isNaN(last) || Date.now() - last > reclaimAfterMs;
 }
 
 /** Called whenever the peer cache changes (entry wires this to the widget). */
@@ -49,7 +64,7 @@ export function setCacheChangeListener(cb: (() => void) | null): void {
 	onChange = cb;
 }
 
-// ━━ Registration / lease ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━ Registration / lifecycle ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export interface ProfileHeartbeatExtra {
 	context_used_pct: number;
@@ -64,31 +79,42 @@ function buildProfile(identity: Identity, extra: ProfileHeartbeatExtra): StoredP
 		subnet: identity.subnet,
 		started_at: identity.started_at,
 		context_used_pct: extra.context_used_pct,
-		status: "online",
+		lifecycle: "living",
 		current_task: identity.current_task,
 		last_seen_at: nowIso(),
 	};
 }
 
 /**
- * Register: claim the name via create() (atomic — fails if taken, then
- * suffix and retry), then put the initial profile. Returns the identity with
- * the resolved name.
+ * Register: claim the name via create() on the profile key (atomic — fails if
+ * taken), then the entry IS the initial profile. On collision: suffix and
+ * retry — UNLESS the current holder is dead, in which case the name is stolen
+ * via a revision-checked update (race-free: only one claimant's update can
+ * match the observed revision):
+ *   - gracefully_exited — terminal, immutable (the exited agent never writes
+ *     again), so the steal condition cannot flip between read and write;
+ *   - living with last_seen_at older than reclaimAfterMs — presumed crashed.
+ *     The conservative threshold keeps the in-flight-heartbeat race window
+ *     negligible (a merely slow agent is never stolen).
  */
 export async function register(identity: Identity, extra: ProfileHeartbeatExtra): Promise<Identity> {
-	const kvNames = getKvNames();
+	const kv = getKvProfiles();
 	const base = identity.name;
 	let assigned = base;
 
 	for (let n = 2; ; n++) {
 		try {
-			await kvNames.create(nameKey(identity.subnet, assigned), assigned);
+			const profile = buildProfile({ ...identity, name: assigned }, extra);
+			await kv.create(profileKey(identity.subnet, assigned), JSON.stringify(profile));
 			break;
 		} catch (err: any) {
 			// Only a genuine name collision (KV wrong-last-sequence, 10071)
-			// warrants a suffix; a network/other failure must fail loudly
-			// instead of silently renaming the agent.
+			// warrants a suffix/steal; a network/other failure must fail
+			// loudly instead of silently renaming the agent.
 			if (err?.api_error?.err_code !== 10071) throw err;
+
+			if (await tryStealDeadName(identity, assigned)) break;
+
 			if (n > 100) {
 				throw new Error(`comms: cannot claim a unique name for "${base}"`);
 			}
@@ -101,26 +127,63 @@ export async function register(identity: Identity, extra: ProfileHeartbeatExtra)
 		identity.name = assigned;
 	}
 
-	const profile = buildProfile(identity, extra);
-	// Profile key = name: the old profile (if any, e.g. a previous session with the
-	// same name) is overwritten — one profile per name, always.
-	await getKvProfiles().put(profileKey(identity.subnet, identity.name), JSON.stringify(profile));
 	audit("register", { name: identity.name, subnet: identity.subnet });
 	return identity;
 }
 
 /**
- * Refresh the lease: full-profile put (permanent profiles bucket) + name-index put
- * (TTL lease — this is what keeps the name claim alive). Returns the stored
- * profile that was written (status online, last_seen_at refreshed).
+ * Try to steal a dead holder's name claim (see register). Returns true when
+ * the steal succeeded and the profile entry now belongs to us.
+ */
+async function tryStealDeadName(identity: Identity, name: string): Promise<boolean> {
+	const kv = getKvProfiles();
+	const key = profileKey(identity.subnet, name);
+	let holder: StoredProfile | null = null;
+	let revision: number;
+	try {
+		const entry = await kv.get(key);
+		if (!entry) return false; // key never existed — retry create next pass
+		revision = entry.revision;
+		// A deleted key comes back as a DEL tombstone entry — the DEL message
+		// still occupies a stream sequence, so create() keeps failing (10071);
+		// the name is vacated: steal it by updating at the DEL revision.
+		if (entry.operation !== "DEL") {
+			holder = entry.json<StoredProfile>();
+			if (!holder || typeof holder.name !== "string") return false;
+		}
+	} catch {
+		return false; // unreadable holder — treat as alive, suffix instead
+	}
+	const dead = holder === null
+		|| holder.lifecycle === "gracefully_exited"
+		|| isReclaimable(holder);
+	if (!dead) return false;
+	try {
+		const profile = buildProfile({ ...identity, name }, { context_used_pct: 0, model: identity.model });
+		await kv.update(key, JSON.stringify(profile), revision);
+		audit("name_reclaimed", {
+			name,
+			subnet: identity.subnet,
+			holder_lifecycle: holder === null ? "deleted" : holder.lifecycle ?? "living",
+			holder_last_seen_at: holder?.last_seen_at ?? null,
+		});
+		return true;
+	} catch (err: any) {
+		// Lost the revision race (holder heartbeated in between, or another
+		// claimant stole first) — fall through to suffix/retry.
+		audit("name_reclaim_lost", { name, subnet: identity.subnet, reason: err?.message ?? String(err) });
+		return false;
+	}
+}
+
+/**
+ * Heartbeat: a full-profile put — refreshes last_seen_at and keeps the name
+ * claim alive (the claim is the entry itself). Returns the stored profile
+ * that was written.
  */
 export async function heartbeat(identity: Identity, extra: ProfileHeartbeatExtra): Promise<StoredProfile> {
 	const profile = buildProfile(identity, extra);
-	const put = Promise.all([
-		getKvProfiles().put(profileKey(identity.subnet, identity.name), JSON.stringify(profile)),
-		getKvNames().put(nameKey(identity.subnet, identity.name), identity.name),
-	]);
-	await put;
+	await getKvProfiles().put(profileKey(identity.subnet, identity.name), JSON.stringify(profile));
 	return profile;
 }
 
@@ -210,80 +273,97 @@ export function stopWatch(): void {
 
 // ━━ Queries ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/** Live peer profiles (status derived from last_seen_at), for comms_list_peer. */
+/** Live peer profiles (status derived from lifecycle + last_seen_at), for
+ *  comms_list_peer. Terminal (gracefully_exited) entries are included — they
+ *  are the tombstones that let the UI distinguish a clean exit from a crash. */
 export function getPeers(): AgentProfile[] {
 	const out: AgentProfile[] = [];
 	for (const profile of cache.values()) {
 		out.push({
 			...profile,
-			status: statusFromLastSeen(profile.last_seen_at, offlineAfterMs),
+			status: statusFromProfile(profile, offlineAfterMs),
 		});
 	}
 	return out;
 }
 
 /**
- * Liveness check: confirm a peer name is heartbeating, or null when unknown.
- * The name lease is a TTL: an entry existing == the agent is heartbeating.
- * (Profile existence is NOT checked — profiles persist forever.) The message
- * address is the name itself — no separate id to resolve.
+ * Resolve a peer name to its holder's profile. Returns null only when the
+ * name is unclaimed. A gracefully_exited holder is returned as-is (lifecycle
+ * "gracefully_exited") so callers can give a precise reason instead of a
+ * generic "not found"; a crashed (living + stale) holder also resolves —
+ * messages still queue on the stream and redeliver on restart.
  */
-export async function resolveName(subnet: string, name: string): Promise<string | null> {
+export async function resolveName(subnet: string, name: string): Promise<StoredProfile | null> {
 	try {
-		const entry = await getKvNames().get(nameKey(subnet, name));
+		const entry = await getKvProfiles().get(profileKey(subnet, name));
 		// A deleted key comes back as a DEL tombstone entry (non-null).
 		if (!entry || entry.operation === "DEL") return null;
-		const value = entry.string().trim();
-		return value.length > 0 ? name : null;
+		const profile = entry.json<StoredProfile>();
+		if (!profile || typeof profile.name !== "string") return null;
+		return profile;
 	} catch {
 		return null;
 	}
 }
 
 /**
- * Current status of a peer name, derived from the cached profile's
- * last_seen_at (same logic as getPeers). Used by the sender side (comms_send
- * target_status, listActiveReminders target_status).
+ * Status of a peer name, derived from the CACHED profile (watch mirror of the
+ * profiles bucket). Used by paths with no fresh evidence of their own, e.g.
+ * the reminder path (listActiveReminders arms reminders for arbitrary peers
+ * from history with no liveness check); the send path derives its status from
+ * the resolveName snapshot instead.
  *
- * A missing profile means the peer is NOT known to be heartbeating: a graceful
- * exit (clearOwn) deletes the profile, and only a crashed agent leaves one
- * behind (shown offline via last_seen_at). So the default for an uncached
- * profile is "offline" — never assume a vanished peer is alive. The only
- * caller that may legitimately assume online is the send path, which has just
- * resolved the name lease (an entry existing == heartbeating) and therefore
- * passes `missingStatus: "online"`. The reminder path (listActiveReminders)
- * arms reminders for arbitrary peers from history with no liveness check, so
- * it must not rely on the online fallback.
+ * A missing cached profile means the peer is NOT known to be alive — the
+ * answer is unconditionally "offline" (never assume a peer we know nothing
+ * about is alive; the message still delivers via the stream). A cached
+ * terminal entry (gracefully_exited) is offline; a cached living entry is
+ * judged by last_seen_at.
  */
-export function statusOfName(
-	subnet: string,
-	name: string,
-	missingStatus: "online" | "offline" = "offline",
-): "online" | "offline" {
+export function statusOfName(subnet: string, name: string): "online" | "offline" {
 	const profile = cache.get(profileKey(subnet, name));
-	if (!profile) return missingStatus;
-	return statusFromLastSeen(profile.last_seen_at, offlineAfterMs);
+	if (!profile) return "offline";
+	return statusOfProfile(profile);
 }
 
 /**
- * Best-effort removal of our own keys on clean shutdown (2s cap).
- * Profile is deleted too — a graceful exit is an explicit leave: the profile
- * disappears. Only a crashed agent's profile stays (permanent, shown offline).
+ * Status of a specific profile snapshot (module-tuned thresholds). The send
+ * path uses this on the resolveName result so its target_status is derived
+ * from the same entry that proved addressability.
+ */
+export function statusOfProfile(profile: StoredProfile): "online" | "offline" {
+	return statusFromProfile(profile, offlineAfterMs);
+}
+
+/**
+ * Best-effort graceful-exit write on clean shutdown (2s cap): put a TERMINAL
+ * profile (lifecycle "gracefully_exited"). The entry becomes an immutable
+ * tombstone — peers see the exit immediately and can tell a clean leave from
+ * a crash; a later register under this name steals the entry race-free
+ * (terminal state cannot flip between read and write).
  */
 export async function clearOwn(identity: Identity): Promise<void> {
 	try {
-		const deletes = [
-			getKvProfiles().delete(profileKey(identity.subnet, identity.name)),
-			getKvNames().delete(nameKey(identity.subnet, identity.name)),
-		];
+		const tombstone: StoredProfile = {
+			name: identity.name,
+			model: identity.model,
+			cwd: identity.cwd,
+			subnet: identity.subnet,
+			started_at: identity.started_at,
+			context_used_pct: 0,
+			lifecycle: "gracefully_exited",
+			current_task: identity.current_task,
+			last_seen_at: nowIso(),
+		};
 		await Promise.race([
-			Promise.all(deletes),
+			getKvProfiles().put(profileKey(identity.subnet, identity.name), JSON.stringify(tombstone)),
 			new Promise<void>((resolve) => {
 				const timer = setTimeout(() => resolve(), 2_000);
 				try { (timer as any).unref?.(); } catch { /* ignore */ }
 			}),
 		]);
 	} catch {
-		// best-effort — a stale profile just shows offline; the name lease expires
+		// best-effort — a stale living profile just shows offline (presumed
+		// crashed) and is reclaimable after reclaimAfterMs
 	}
 }

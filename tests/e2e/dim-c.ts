@@ -5,7 +5,7 @@
  *   phase1          C-1/C-2/C-3：role spawn 语义 + JSONL v3 格式（必须在 tmux pane 内运行）
  *   sf <name>       打印 name 的 session 文件路径与 launch 脚本路径
  *   kvget <sub> <n> 打印 KV 卡/名条目
- *   kv-dump <sub>   dump 该 subnet 的 profiles+names 到 /tmp/e2e-c-kv-<sub>.json 并打印
+ *   kv-dump <sub>   dump 该 subnet 的 profiles 到 /tmp/e2e-c-kv-<sub>.json 并打印
  *   wake <n> <msg>  以 c-waker 身份向 <n> 发一条消息（test-c）
  *   noreply-harness 注册 c-noreply 并每 5s 心跳，直到进程被终止（C-7 长驻）
  *   fork-probe      F-1：fork spawn 集成 — 父 fixture → fork 文件 → 真实 pi 子进程加载
@@ -16,7 +16,7 @@ import * as messaging from "../../extensions/lib/comms/messaging.ts";
 import * as nats from "../../extensions/lib/comms/nats.ts";
 import { readSecretFile, type RuntimeConfig } from "../../extensions/lib/comms/config.ts";
 import {
-  DEFAULT_SUBNET, DEFAULT_NATS_URL, DEFAULT_REGISTRY_TTL_MS, DEFAULT_MESSAGE_TTL_MS,
+  DEFAULT_SUBNET, DEFAULT_NATS_URL, DEFAULT_RECLAIM_AFTER_MS, DEFAULT_MESSAGE_TTL_MS,
   DEFAULT_HISTORY_TTL_MS, DEFAULT_HEARTBEAT_MS, DEFAULT_OFFLINE_AFTER_MS,
 } from "../../extensions/lib/comms/protocol.ts";
 import type { Identity } from "../../extensions/lib/comms/protocol.ts";
@@ -73,7 +73,7 @@ function makeConfig(subnet: string): RuntimeConfig {
     subnet,
     heartbeatMs: DEFAULT_HEARTBEAT_MS,
     messageTtlMs: DEFAULT_MESSAGE_TTL_MS,
-    registryTtlMs: DEFAULT_REGISTRY_TTL_MS,
+    reclaimAfterMs: DEFAULT_RECLAIM_AFTER_MS,
     offlineAfterMs: DEFAULT_OFFLINE_AFTER_MS,
     historyTtlMs: DEFAULT_HISTORY_TTL_MS,
   };
@@ -208,33 +208,27 @@ async function phase1(): Promise<void> {
 async function kvDump(subnet: string): Promise<void> {
   const nc = await connectE2e();
   const kvC = await nc.jetstream().views.kv(BUCKETS.profiles, { history: 1 });
-  const kvN = await nc.jetstream().views.kv(BUCKETS.names, { history: 1 });
-  const out: Record<string, unknown> = { profiles: {}, names: {} };
-  for (const [kv, target] of [
-    [kvC, "profiles"],
-    [kvN, "names"],
-  ] as const) {
-    const prefix = target === "profiles" ? `a.${subnet}.` : `n.${subnet}.`;
-    const keys: string[] = [];
-    try {
-      const kiter = await kv.keys();
-      for await (const k of kiter) {
-        if (k.startsWith(prefix)) keys.push(k);
-      }
-      await kiter.stop().catch(() => {});
-    } catch (e) {
-      console.log(`[kv-dump] keys() failed for ${target}: ${String(e)}`);
+  const out: Record<string, unknown> = { profiles: {} };
+  const prefix = `a.${subnet}.`;
+  const keys: string[] = [];
+  try {
+    const kiter = await kvC.keys();
+    for await (const k of kiter) {
+      if (k.startsWith(prefix)) keys.push(k);
     }
-    const entries: Record<string, unknown> = {};
-    for (const k of keys) {
-      const v = await kvRead(kv, k);
-      if (v !== null) entries[k] = v;
-    }
-    out[target] = entries;
+    await kiter.stop().catch(() => {});
+  } catch (e) {
+    console.log(`[kv-dump] keys() failed for profiles: ${String(e)}`);
   }
+  const entries: Record<string, unknown> = {};
+  for (const k of keys) {
+    const v = await kvRead(kvC, k);
+    if (v !== null) entries[k] = v;
+  }
+  out.profiles = entries;
   const file = `/tmp/e2e-c-kv-${subnet}.json`;
   writeFileSync(file, JSON.stringify(out, null, 2));
-  console.log(`[kv-dump] ${subnet}: profiles=${Object.keys(out.profiles).length} names=${Object.keys(out.names).length} → ${file}`);
+  console.log(`[kv-dump] ${subnet}: profiles=${Object.keys(out.profiles).length} → ${file}`);
   console.log(JSON.stringify(out, null, 2));
   await nc.close();
 }
@@ -242,11 +236,8 @@ async function kvDump(subnet: string): Promise<void> {
 async function kvGet(subnet: string, name: string): Promise<void> {
   const nc = await connectE2e();
   const kvC = await nc.jetstream().views.kv(BUCKETS.profiles, { history: 1 });
-  const kvN = await nc.jetstream().views.kv(BUCKETS.names, { history: 1 });
   const profile = await kvRead(kvC, `a.${subnet}.${name}`);
-  const nameEntry = await kvRead(kvN, `n.${subnet}.${name}`);
   console.log(`[kvget] a.${subnet}.${name} = ${JSON.stringify(profile)}`);
-  console.log(`[kvget] n.${subnet}.${name} = ${JSON.stringify(nameEntry)}`);
   await nc.close();
 }
 

@@ -20,7 +20,7 @@ import {
   msgSubjectPrefix,
   promptDurable,
   ulid,
-  nameKey,
+  profileKey,
   DEFAULT_NATS_URL,
 } from "../../extensions/lib/comms/protocol.ts";
 
@@ -34,10 +34,10 @@ async function main(): Promise<void> {
   const jsm = await nc.jetstreamManager();
   console.log(`[1] connected ${DEFAULT_NATS_URL}`);
 
-  // ── 1. 等待 smoke-b 注册(名字租约)──
-  const names = await js.views.kv(BUCKETS.names);
-  await waitFor(async () => Boolean(await names.get(nameKey(SUBNET, TARGET)).catch(() => null)), {
-    label: "smoke-b name lease", timeoutMs: 60_000,
+  // ── 1. 等待 smoke-b 注册(living profile)──
+  const profiles = await js.views.kv(BUCKETS.profiles);
+  await waitFor(async () => Boolean(await profiles.get(profileKey(SUBNET, TARGET)).catch(() => null)), {
+    label: "smoke-b profile", timeoutMs: 60_000,
   });
   console.log(`[2] smoke-b registered on ${SUBNET}`);
 
@@ -46,11 +46,16 @@ async function main(): Promise<void> {
   const baseAck = baseCi.ack_floor?.consumer_seq ?? 0;
   console.log(`[baseline] consumer p_${TARGET} ack_floor_seq=${baseAck} delivered_seq=${baseCi.delivered?.consumer_seq}`);
 
-  // ── 2. sim-a 名字租约(15s 续期 —— smoke-b 的 comms_send 才能 resolve)──
+  // ── 2. sim-a 心跳(living profile,15s 续期 —— smoke-b 的 comms_send 才能 resolve)──
+  const simProfile = {
+    name: SENDER, model: "sim", cwd: "/tmp", subnet: SUBNET,
+    started_at: new Date().toISOString(), context_used_pct: 0,
+    lifecycle: "living", last_seen_at: new Date().toISOString(),
+  };
   const lease = setInterval(() => {
-    names.put(nameKey(SUBNET, SENDER), SENDER).catch(() => {});
+    profiles.put(profileKey(SUBNET, SENDER), JSON.stringify({ ...simProfile, last_seen_at: new Date().toISOString() })).catch(() => {});
   }, 15_000);
-  await names.put(nameKey(SUBNET, SENDER), SENDER);
+  await profiles.put(profileKey(SUBNET, SENDER), JSON.stringify(simProfile));
 
   // ── 3. 订阅 sim-a 的收件,截获 smoke-b 的回复 ──
   const replies: any[] = [];

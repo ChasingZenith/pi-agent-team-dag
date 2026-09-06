@@ -18,11 +18,10 @@ import {
   DEFAULT_NATS_URL,
   SECRET_FILE,
   KV_BUCKET_PROFILES,
-  KV_BUCKET_NAMES,
   KV_BUCKET_HISTORY,
 } from "../../extensions/lib/comms/protocol.ts";
 
-export const BUCKETS = { profiles: KV_BUCKET_PROFILES, names: KV_BUCKET_NAMES, history: KV_BUCKET_HISTORY };
+export const BUCKETS = { profiles: KV_BUCKET_PROFILES, history: KV_BUCKET_HISTORY };
 
 const textDecoder = new TextDecoder();
 

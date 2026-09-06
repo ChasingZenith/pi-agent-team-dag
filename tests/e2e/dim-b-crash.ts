@@ -3,9 +3,10 @@
  *
  * Finding from B-7: `tmux kill-window` (agent_kill) sends SIGHUP, which pi 0.83
  * handles as a GRACEFUL shutdown (comms-log "shutdown" event, clearOwn →
- * profile + name keys deleted immediately). This script verifies the crash
- * semantics the B-7/B-8 brief assumed — lease expiry via bucket TTL (30s) and
- * permanent offline profile — by SIGKILLing the agent process (no handler runs).
+ * terminal tombstone written immediately). This script verifies the crash
+ * semantics the B-7/B-8 brief assumed — the living-labeled entry remains with
+ * a stale last_seen_at (presumed crashed) and the name becomes stealable via
+ * the reclaim threshold — by SIGKILLing the agent process (no handler runs).
  *
  * Run inside a tmux pane of session e2e-b:
  *   tmux send-keys -t e2e-b 'cd <root> && bun run tests/e2e/dim-b-crash.ts --subnet test-b > /tmp/e2e-b-crash.log 2>&1' Enter
@@ -20,10 +21,9 @@ import {
   statusFromLastSeen,
   nowIso,
   DEFAULT_NATS_URL,
-  nameKey,
   profileKey,
 } from "../../extensions/lib/comms/protocol.ts";
-import { connectNats, ensureStream, getKvProfiles, getKvNames } from "../../extensions/lib/comms/nats.ts";
+import { connectNats, ensureStream, getKvProfiles } from "../../extensions/lib/comms/nats.ts";
 import { resolveToken, waitFor, sleep, readJsonl, kvRead } from "./helpers.ts";
 
 const ROOT = process.cwd();
@@ -46,13 +46,13 @@ async function main(): Promise<void> {
     subnet: SUBNET,
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
-    registryTtlMs: 30_000,
     offlineAfterMs: 60_000,
+    reclaimAfterMs: 30_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(60_000);
+  registry.setRegistryTuning(60_000, 30_000);
 
   const fakeCtx = { model: { provider: "deepseek", id: "deepseek-v4-flash" }, thinkingLevel: "off" } as any;
   const spawnRes = await executeAgentSpawn(
@@ -89,15 +89,20 @@ async function main(): Promise<void> {
   log(`SIGKILL ${pid} sent at ${new Date().toISOString()}`);
   const t0 = Date.now();
 
-  // +5s: lease (bucket TTL 30s) still alive — last heartbeat ≤10s pre-kill
+  // +5s: holder presumed alive — last heartbeat ≤10s pre-kill
   await sleep(5_000);
   const sid5 = await registry.resolveName("test-b", "b-crasher");
-  check("BC-4", sid5 !== null, `t+5s name lease still resolves (sid=${sid5})`);
+  check("BC-4", sid5 !== null, `t+5s profile still resolves (got ${JSON.stringify(sid5)})`);
 
-  // +35s: lease expired via bucket TTL (30s from last heartbeat put)
+  // +35s: the crashed holder's entry persists (living-labeled, stale
+  // last_seen_at); name stealable (reclaim threshold 30s in this harness)
   await sleep(30_000);
   const sid35 = await registry.resolveName("test-b", "b-crasher");
-  check("BC-5", sid35 === null, `t+35s name lease expired via TTL, resolveName → null (got ${JSON.stringify(sid35)})`);
+  check(
+    "BC-5",
+    sid35 !== null && sid35.lifecycle === "living",
+    `t+35s crashed entry remains, lifecycle=living (got ${JSON.stringify(sid35)})`,
+  );
 
   // +70s: profile permanent + offline derived
   await sleep(35_000);
@@ -127,7 +132,7 @@ async function main(): Promise<void> {
       await sleep(2_000);
     }
   }
-  check("BC-8", reregOk, `same-name re-register succeeded after TTL reclaim${reregOk ? "" : ` — ${reregErr}`}`);
+  check("BC-8", reregOk, `same-name re-register succeeded by stealing the dead claim${reregOk ? "" : ` — ${reregErr}`}`);
 
   // Evidence
   const evidence = {

@@ -70,7 +70,7 @@ import {
 	ulid,
 } from "./protocol.ts";
 import { getJs, getJsm } from "./nats.ts";
-import { resolveName, statusOfName } from "./registry.ts";
+import { resolveName, statusOfName, statusOfProfile } from "./registry.ts";
 import { audit } from "./audit.ts";
 import { createReminderScheduler, fifoEvict, type ReminderEntry } from "./reminder.ts";
 import * as history from "./history.ts";
@@ -410,15 +410,22 @@ export async function send(
 	message: string,
 	opts?: SendOptions,
 ): Promise<SendResult> {
-	// The name lease is the liveness check: an index entry existing == the
-	// agent is heartbeating. The message address is the NAME itself (stable
-	// across restarts), so a message published to a live agent is queued by
-	// the stream up to its TTL even if the agent crashes right after.
+	// Resolve the target's lifecycle record: a gracefully_exited holder is
+	// terminal — send fails with the precise reason. A crashed (living +
+	// stale) holder still resolves: the message address is the NAME itself
+	// (stable across restarts), so a message published to a dead agent is
+	// queued by the stream up to its TTL and redelivered on restart.
 	const resolved = await resolveName(identity.subnet, target);
 	if (!resolved) {
 		throw new Error(
 			`comms: target not found: ${target} — check the exact name via comms_list_peer ` +
 			`(names are case-sensitive and auto-suffixed on collision)`,
+		);
+	}
+	if (resolved.lifecycle === "gracefully_exited") {
+		throw new Error(
+			`comms: target ${target} exited gracefully at ${resolved.last_seen_at} — ` +
+			`pick another agent or respawn one (comms_list_peer)`,
 		);
 	}
 
@@ -446,13 +453,11 @@ export async function send(
 	void history.recordOutbound(identity, target, msgId, message, opts?.replyToMsgId ?? null)
 		.catch((err: any) => audit("history_write_failed", { direction: "out", msg_id: msgId, reason: err?.message ?? String(err) }));
 
-	// Target status for the caller (comms_send's target_status): derived
-	// from the peer profile cache. The name lease was just resolved above (an
-	// entry existing == the peer is heartbeating), so a missing cached profile
-	// still means online — pass the online fallback explicitly. The message is
-	// queued to the stream regardless — an offline target simply redelivers on
+	// Target status for the caller (comms_send's target_status): derived from
+	// the profile snapshot resolveName just returned. The message is queued
+	// to the stream regardless — an offline target simply redelivers on
 	// restart.
-	const targetStatus = statusOfName(identity.subnet, target, "online");
+	const targetStatus = statusOfProfile(resolved);
 
 	const now = Date.now();
 	// A reminder is armed only by an explicit remindS > 0 (seconds). Omitted

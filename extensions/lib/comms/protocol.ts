@@ -10,10 +10,9 @@
  * default subnet is "subnet0":
  *
  *   stream  COMMS_<subnet>             subjects <subnet>.msg.>
- *   bucket  comms_profiles               keys a.<subnet>.<name> (profile, no TTL — offline
- *                                     agents stay visible; status derived from last_seen)
- *   bucket  comms_names               keys n.<subnet>.<name> (name lease, TTL — a name
- *                                     entry existing means the agent is heartbeating)
+ *   bucket  comms_profiles               keys a.<subnet>.<name> (profile = lifecycle
+ *                                     record, no TTL — offline/exited agents stay visible;
+ *                                     liveness derived from lifecycle + last_seen_at)
  *   bucket  comms_history             keys h.<subnet>.<name>.<out|in>.<msg_id>
  *                                     (bidirectional message content history, bucket TTL)
  *   message <subnet>.msg.<targetname>.<msgid>
@@ -25,8 +24,16 @@
  * any per-process id. A restarted agent under the same name reuses the same
  * consumer and history keys, so crash redelivery, queued delivery and outbox
  * re-read all survive a restart (up to the stream/history TTLs). The name is
- * unique per subnet (exclusive lease + collision suffix), and sanitized before
+ * unique per subnet (exclusive claim + collision suffix), and sanitized before
  * use as a NATS segment.
+ *
+ * Single source of truth: ONE entry per agent (the profile) carries the name
+ * claim and the lifecycle state ("living" | "gracefully_exited") —
+ * addressability (the entry exists) and status (derived from lifecycle +
+ * last_seen_at) always come from the same snapshot. A name is released when
+ * a claimant reads a dead holder: a gracefully_exited entry (immutable
+ * terminal state) or a living entry whose last_seen_at is older than
+ * reclaimAfterMs (presumed crashed).
  */
 
 import type { JsMsg } from "nats";
@@ -57,23 +64,27 @@ export const DEFAULT_NATS_URL = "nats://127.0.0.1:4222";
  *  (separate streams/subjects/KV keys) — pass --subnet to join a specific one. */
 export const DEFAULT_SUBNET = "subnet0";
 export const DEFAULT_HEARTBEAT_MS = 10_000;
-export const DEFAULT_REGISTRY_TTL_MS = 30_000;
 /** No heartbeat for this long → the peer is OFFline (status derived from
- *  last_seen_at — a single threshold; there is no intermediate state). */
+ *  last_seen_at — a single threshold; there is no intermediate state). Kept
+ *  small so status converges fast; NOT used for name reclaim. */
 export const DEFAULT_OFFLINE_AFTER_MS = 60_000;
+/** No heartbeat for this long → the name claim of a living-profiled agent is
+ *  presumed dead and reclaimable (register's collision path steals it). Kept
+ *  deliberately larger than OFFLINE_AFTER_MS: a steal must never fire on a
+ *  merely slow/lagging agent — only on a deeply-gone one. */
+export const DEFAULT_RECLAIM_AFTER_MS = 10 * 60_000;
 export const DEFAULT_MESSAGE_TTL_MS = 1_800_000; // 30 min
 /** How long the message content history bucket keeps records (comms_history
  *  bucket TTL — applied on first creation; changing it requires deleting the
  *  bucket). Long enough to cover compact + restart re-reads. */
 export const DEFAULT_HISTORY_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
-// Three buckets with deliberately different lifetimes (see the header):
-//   comms_profiles — permanent (no TTL; status derived from last_seen_at).
-//   comms_names — TTL lease; the name is released when heartbeats stop.
+// Two buckets with deliberately different lifetimes (see the header):
+//   comms_profiles — permanent (no TTL): lifecycle record, the single source
+//                   of truth for the name claim AND the status.
 //   comms_history — bidirectional message content history (bucket TTL, default
 //                   24h): outbox/inbox re-read content after compact/restart.
 export const KV_BUCKET_PROFILES = "comms_profiles";
-export const KV_BUCKET_NAMES = "comms_names";
 export const KV_BUCKET_HISTORY = "comms_history";
 const STREAM_PREFIX = "COMMS_";
 
@@ -129,17 +140,14 @@ export function streamName(subnet: string = DEFAULT_SUBNET): string {
 }
 
 /**
- * Profile key is the agent NAME, not the session id: one profile per name, and
- * reclaiming a name (put to the names bucket) overwrites the old profile —
- * no stale duplicate profiles after a restart. The profile persists even after
- * the agent goes offline (profiles bucket has no TTL).
+ * Profile key is the agent NAME, not the session id: one entry per name, and
+ * reclaiming a name overwrites the old profile — no duplicate profiles for a
+ * restarted agent. The entry persists even after the agent goes offline
+ * (profiles bucket has no TTL) — it is the tombstone that keeps dead agents
+ * visible and their last state readable.
  */
 export function profileKey(subnet: string, name: string): string {
 	return `a.${subnet}.${sanitizeAgentName(name)}`;
-}
-
-export function nameKey(subnet: string, name: string): string {
-	return `n.${subnet}.${sanitizeAgentName(name)}`;
 }
 
 /** History key for a message WE sent (outbox direction). Name-anchored: the
@@ -184,10 +192,11 @@ export function msgSubjectPrefix(subnet: string, name: string): string {
 }
 
 /** Durable prompt consumer for an agent, named after the agent itself. The
- *  consumer persists across restarts (clean shutdown does NOT delete it — the
- *  entry only releases the name lease), so a restart under the same name
- *  resumes the same cursor: unacked prompts redeliver, acked ones are never
- *  replayed, and messages queued while offline deliver on return. */
+ *  consumer persists across restarts (clean shutdown does NOT delete it —
+ *  the profile entry just becomes a terminal tombstone), so a restart under
+ *  the same name resumes the same cursor: unacked prompts redeliver, acked
+ *  ones are never replayed, and messages queued while offline deliver on
+ *  return. */
 export function promptDurable(name: string): string {
 	return `p_${sanitizeAgentName(name)}`;
 }
@@ -195,6 +204,17 @@ export function promptDurable(name: string): string {
 // ━━ Shared types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 type AgentStatus = "online" | "offline";
+
+/**
+ * Lifecycle of an agent, as WRITTEN by the agent itself:
+ *   living — the agent is (or claims to be) heartbeating; liveness is derived
+ *            from last_seen_at. A crashed agent is stuck here forever — its
+ *            entry is the tombstone, liveness is presumed dead via timeout.
+ *   gracefully_exited — terminal, immutable: written once by clearOwn(). The
+ *            agent will never write again, so the state is unconditionally
+ *            trusted (no timestamp check needed).
+ */
+export type ProfileLifecycle = "living" | "gracefully_exited";
 
 export interface AgentProfile {
 	name: string;
@@ -207,8 +227,19 @@ export interface AgentProfile {
 	current_task?: string;
 }
 
-/** AgentProfile as stored in the KV bucket: status computed, lease tracked. */
-export interface StoredProfile extends AgentProfile {
+/** AgentProfile as stored in the KV bucket: the written lifecycle + the raw
+ *  heartbeat timestamp. Display status is never stored — it is derived
+ *  (statusFromProfile). */
+export interface StoredProfile {
+	name: string;
+	model: string;
+	cwd: string;
+	subnet: string;
+	started_at: string;
+	context_used_pct: number;
+	current_task?: string;
+	/** Absent → treated as "living". */
+	lifecycle?: ProfileLifecycle;
 	last_seen_at: string;
 }
 
@@ -334,4 +365,18 @@ export function statusFromLastSeen(lastSeenIso: string, offlineAfterMs: number):
 	const last = Date.parse(lastSeenIso);
 	if (Number.isNaN(last)) return "offline";
 	return Date.now() - last > offlineAfterMs ? "offline" : "online";
+}
+
+/**
+ * Derived status from a full profile record. A terminal lifecycle
+ * (gracefully_exited) is unconditionally offline; a living record is judged
+ * by last_seen_at (a crash leaves "living" behind, so the timestamp is the
+ * only liveness evidence).
+ */
+export function statusFromProfile(
+	profile: Pick<StoredProfile, "lifecycle" | "last_seen_at">,
+	offlineAfterMs: number,
+): AgentStatus {
+	if (profile.lifecycle === "gracefully_exited") return "offline";
+	return statusFromLastSeen(profile.last_seen_at, offlineAfterMs);
 }

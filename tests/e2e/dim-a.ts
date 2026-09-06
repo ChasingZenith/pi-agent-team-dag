@@ -6,8 +6,9 @@
  *   TMPDIR=/sys bun run tests/e2e/dim-a.ts --subnet test-a --only auto-cleanup  # A-6
  *
  * 关键语义（与源码对齐）：
- *   - agent_kill = tmux kill-window = SIGHUP = crash 语义：profile 永久保留、name 租约 TTL 过期
- *   - 只有 ctx.shutdown() 的干净退出才 clearOwn（profile+name 立即删除）
+ *   - agent_kill = tmux kill-window = SIGHUP = crash 语义：profile（living 标签）永久保留、
+ *     last_seen_at 超过 reclaimAfterMs 后名字可被抢占
+ *   - 只有 ctx.shutdown() 的干净退出才 clearOwn（写入 gracefully_exited 终态墓碑）
  *   - dedupe 检查在 session 文件写入之后（重复 spawn 先覆盖写文件再 throw）
  *   - SCRIPT_DIR 在模块加载时求值 → A-6 必须独立进程 + 启动前设 TMPDIR
  */
