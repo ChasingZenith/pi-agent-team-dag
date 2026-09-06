@@ -155,7 +155,7 @@ export function findForkTargetId(entries: BranchEntry[], leafId: string): string
     // history (only structural entries like model_change / thinking) — fall
     // back to a fresh empty session instead of forking structure-only.
     const hasMessage = path.slice(0, j + 1).some((e) => e.type === "message");
-    return hasMessage ? path[j].id : null;
+    return hasMessage ? (path[j].id ?? null) : null;
   }
   return leafId; // no delegation entry on the path — full inheritance
 }

@@ -17,6 +17,7 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeAgentSpawn } from "../extensions/agent-lifecycle";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fakeSessionManagerCtor, forkSessionManager, freshSessionManager } from "./helpers/fake-session-manager";
 
 const ORIGINAL_TMUX_PANE = process.env.TMUX_PANE;
@@ -171,7 +172,7 @@ test("fork spawn uses the forked session file; retry throws and adds no files", 
     const forkFile = join(sessionDir, "forked.jsonl");
     writeFileSync(forkFile, '{"type":"session","version":3,"id":"f","cwd":"' + cwd + '"}\n');
 
-    const ctx = { model: { provider: "test", id: "test" }, thinkingLevel: "off", sessionManager: forkSessionManager(parentFile, forkFile) };
+    const ctx = { model: { provider: "test", id: "test" }, thinkingLevel: "off", sessionManager: forkSessionManager(parentFile, forkFile) } as ExtensionContext;
     const first = await executeAgentSpawn(
       { name: "fork-worker", llmContext: { context: "fork", systemPrompt: "you are a fork" } },
       cwd,

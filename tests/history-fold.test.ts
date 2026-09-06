@@ -20,7 +20,7 @@ interface FakeEntry {
 	revision: number;
 	value: string;
 	/** Matches the real KvEntry shape history.ts uses. */
-	json<T>(): T;
+	json?<T>(): T;
 }
 
 class FakeKv {

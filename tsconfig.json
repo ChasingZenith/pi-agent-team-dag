@@ -1,3 +1,21 @@
 {
-  "compilerOptions": {}
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": [
+      "bun"
+    ],
+    "strict": true
+  },
+  "include": [
+    "extensions/**/*.ts",
+    "tests/**/*.ts"
+  ],
+  "exclude": [
+    "web"
+  ]
 }

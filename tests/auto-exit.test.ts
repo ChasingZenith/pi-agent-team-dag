@@ -162,7 +162,11 @@ function load(autoExitEnv: string | undefined) {
   const prev = process.env.PI_AGENT_AUTO_EXIT;
   if (autoExitEnv === undefined) delete process.env.PI_AGENT_AUTO_EXIT;
   else process.env.PI_AGENT_AUTO_EXIT = autoExitEnv;
-  const h = makeHarness();
+  const h = makeHarness() as ReturnType<typeof makeHarness> & {
+    emitAgentEnd: (messages: any[]) => void;
+    emitSettled: () => void;
+    run: (messages: any[]) => void;
+  };
   const ctx = { shutdown: () => h.calls.push("shutdown") };
   autoExitExtension(h.pi);
   h.emitAgentEnd = (messages: any[]) => h.emit("agent_end", { messages });

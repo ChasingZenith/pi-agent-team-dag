@@ -182,7 +182,7 @@ async function testShutdownAndDirRebuild(): Promise<void> {
   check("A-7a", tmuxWindowCount(SESSION) === base + 2, `2 agents spawned → windows ${tmuxWindowCount(SESSION)}`);
   check("A-7b", isAgentNameTaken("a-7x") && isAgentNameTaken("a-7y"), "both names taken");
 
-  await handlers["session_shutdown"]();
+  await handlers["session_shutdown"]({}, {});
   await sleep(1000);
   check("A-7c", tmuxWindowCount(SESSION) === base, `session_shutdown killed both windows (${tmuxWindowCount(SESSION)})`);
   check("A-7d", isAgentNameTaken("a-7x") === false && isAgentNameTaken("a-7y") === false, "registry cleared ×2");

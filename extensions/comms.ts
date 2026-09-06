@@ -626,12 +626,12 @@ ${a.message}`);
 					lines.push(`  ${id} to ${li.target} — ${li.summary} — "(content not recorded)"`);
 				}
 				if (lines.length === 0) {
-					return { content: [{ type: "text" as const, text: "comms_outbox: no sends recorded" }] };
+					return { content: [{ type: "text" as const, text: "comms_outbox: no sends recorded" }], details: undefined };
 				}
 				const header = total > records.length
 					? `comms_outbox: ${total} send(s) — showing latest ${records.length}`
 					: `comms_outbox: ${total} send(s)`;
-				return { content: [{ type: "text" as const, text: `${header}\n${lines.join("\n")}` }] };
+				return { content: [{ type: "text" as const, text: `${header}\n${lines.join("\n")}` }], details: undefined };
 			}
 
 			// Detail mode: status derives from the persisted record (survives
@@ -640,6 +640,7 @@ ${a.message}`);
 			if (!rec) {
 				return {
 					content: [{ type: "text" as const, text: "comms_outbox: unknown msg_id — no history record (never sent, or evicted from the history bucket)" }],
+					details: undefined,
 				};
 			}
 			const s = history.deriveOutStatus(rec);
@@ -656,7 +657,7 @@ ${a.message}`);
 			if (s.reason === "replied" && rec.reply) {
 				text += `\nreplied by ${rec.reply.sender} — reply msg_id ${rec.reply.msg_id}`;
 			}
-			return { content: [{ type: "text" as const, text }] };
+			return { content: [{ type: "text" as const, text }], details: undefined };
 		},
 		renderCall(args, theme) {
 			const a = args;
@@ -700,6 +701,7 @@ ${a.message}`);
 				if (records.length === 0) {
 					return {
 						content: [{ type: "text" as const, text: "comms_inbox: no received messages recorded" }],
+						details: undefined,
 					};
 				}
 				const live = new Map<string, ActiveReminder>();
@@ -725,6 +727,7 @@ ${a.message}`);
 				if (lines.length === 0) {
 					return {
 						content: [{ type: "text" as const, text: "comms_inbox: no received messages recorded" }],
+						details: undefined,
 					};
 				}
 				const header = total > records.length
@@ -732,6 +735,7 @@ ${a.message}`);
 					: `comms_inbox: ${total} message(s)`;
 				return {
 					content: [{ type: "text" as const, text: `${header}\n${lines.join("\n")}` }],
+					details: undefined,
 				};
 			}
 
@@ -739,6 +743,7 @@ ${a.message}`);
 			if (!rec) {
 				return {
 					content: [{ type: "text" as const, text: "comms_inbox: unknown msg_id — no history record (never received, or evicted from the history bucket)" }],
+					details: undefined,
 				};
 			}
 			let text = `comms_inbox: ${msgId} from ${rec.sender}`;
@@ -750,7 +755,7 @@ ${a.message}`);
 			if (remindS > 0) text += ` · remind ${fmtMs(remindS * 1000)}`;
 			text += `\nreceived at ${new Date(rec.ts).toISOString()}`;
 			text += `\nmessage: ${rec.message}`;
-			return { content: [{ type: "text" as const, text }] };
+			return { content: [{ type: "text" as const, text }], details: undefined };
 		},
 		renderCall(args, theme) {
 			const a = args;

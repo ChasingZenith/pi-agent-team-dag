@@ -42,7 +42,7 @@ function createTask(id: string, opts: { kind?: string; deps?: string[] } = {}): 
 // ━━ waitingDispatchees ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 describe("waitingDispatchees — who to notify when an item's status changes", () => {
-  function item(id: string, deps: string[], dispatched?: string) {
+  function item(id: string, deps: string[] = [], dispatched?: string) {
     return createTask(id, { deps });
   }
 
@@ -50,8 +50,8 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
     const a = item("a");
     const b = createTask("b", { kind: "module", deps: ["a"] });
     const c = createTask("c", { kind: "module", deps: ["a"] });
-    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
-    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c" } });
+    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b", dispatched_by: ME, dispatch_msg_id: "m1" } });
+    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c", dispatched_by: ME, dispatch_msg_id: "m1" } });
     // Undispatched dependents: d depends on a but nobody owns it.
     createTask("d", { kind: "module", deps: ["a"] });
     void a;
@@ -73,7 +73,7 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
     item("a");
     createTask("b", { kind: "module", deps: ["a"] });
     const unrelated = createTask("x");
-    setTaskStatus(CWD, "x", "dispatched", { dispatched_to: { name: "worker-x" } });
+    setTaskStatus(CWD, "x", "dispatched", { dispatched_to: { name: "worker-x", dispatched_by: ME, dispatch_msg_id: "m1" } });
     void unrelated;
 
     const items = ["a", "b", "x"].map((id) => readTask(CWD, id)!);
@@ -85,13 +85,13 @@ describe("waitingDispatchees — who to notify when an item's status changes", (
     item("a");
     createTask("b", { kind: "module", deps: ["a"] });
     createTask("c", { kind: "module", deps: ["b"] });
-    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c" } });
+    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c", dispatched_by: ME, dispatch_msg_id: "m1" } });
 
     // c depends on b, not on a — a's change does not notify c's dispatchee.
     expect(waitingDispatchees(["a", "b", "c"].map((id) => readTask(CWD, id)!), "a")).toEqual([]);
 
     // Direct dependent b gets a dispatchee — now a's change notifies it.
-    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
+    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b", dispatched_by: ME, dispatch_msg_id: "m1" } });
     expect(waitingDispatchees(["a", "b", "c"].map((id) => readTask(CWD, id)!), "a")).toEqual(["worker-b"]);
   });
 });
@@ -102,7 +102,7 @@ describe("dispatcheesOf — who to notify when items get unlocked (done/cancelle
   it("returns the dispatchees of the given items themselves", () => {
     createTask("a");
     createTask("b", { kind: "module", deps: ["a"] });
-    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
+    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b", dispatched_by: ME, dispatch_msg_id: "m1" } });
 
     const items = ["a", "b"].map((id) => readTask(CWD, id)!);
     expect(dispatcheesOf(items, ["b"])).toEqual(["worker-b"]);
@@ -120,8 +120,8 @@ describe("dispatcheesOf — who to notify when items get unlocked (done/cancelle
     createTask("a");
     createTask("b", { kind: "module", deps: ["a"] });
     createTask("c", { kind: "module", deps: ["a"] });
-    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
-    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-b" } });
+    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b", dispatched_by: ME, dispatch_msg_id: "m1" } });
+    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-b", dispatched_by: ME, dispatch_msg_id: "m1" } });
 
     const items = ["a", "b", "c"].map((id) => readTask(CWD, id)!);
     expect(dispatcheesOf(items, ["b", "c"])).toEqual(["worker-b"]);
@@ -134,8 +134,8 @@ describe("dispatcheesOf — who to notify when items get unlocked (done/cancelle
     createTask("a");
     createTask("b", { kind: "module", deps: ["a"] });
     createTask("c", { kind: "module", deps: ["b"] });
-    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b" } });
-    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c" } });
+    setTaskStatus(CWD, "b", "dispatched", { dispatched_to: { name: "worker-b", dispatched_by: ME, dispatch_msg_id: "m1" } });
+    setTaskStatus(CWD, "c", "dispatched", { dispatched_to: { name: "worker-c", dispatched_by: ME, dispatch_msg_id: "m1" } });
 
     const items = ["a", "b", "c"].map((id) => readTask(CWD, id)!);
     // unlocked = [b]; the waiter is b's dispatchee:

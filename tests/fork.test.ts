@@ -134,7 +134,10 @@ function makeParent(opts: {
     getSessionFile: () => opts.file,
     getLeafId: () => opts.leafId ?? null,
   };
-  if (opts.engine) base.openSession = () => opts.engine;
+  if (opts.engine) {
+    const engine = opts.engine;
+    base.openSession = () => engine;
+  }
   return base;
 }
 
@@ -331,7 +334,7 @@ function makePreloadEngine() {
         },
         appendMessage(message: unknown): string {
           calls.push("message");
-          entries.push({ type: "message", id: `m${entries.length}`, parentId: "tl", message });
+          entries.push({ type: "message", id: `m${entries.length}`, parentId: "tl", message: message as any });
           return `m${entries.length}`;
         },
         getHeader: () => ({ type: "session", version: 3, id: "s", cwd }),

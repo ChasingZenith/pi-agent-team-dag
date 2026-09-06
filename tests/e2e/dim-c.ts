@@ -208,7 +208,7 @@ async function phase1(): Promise<void> {
 async function kvDump(subnet: string): Promise<void> {
   const nc = await connectE2e();
   const kvC = await nc.jetstream().views.kv(BUCKETS.profiles, { history: 1 });
-  const out: Record<string, unknown> = { profiles: {} };
+  const out: { profiles: Record<string, unknown> } = { profiles: {} };
   const prefix = `a.${subnet}.`;
   const keys: string[] = [];
   try {
@@ -216,7 +216,7 @@ async function kvDump(subnet: string): Promise<void> {
     for await (const k of kiter) {
       if (k.startsWith(prefix)) keys.push(k);
     }
-    await kiter.stop().catch(() => {});
+    try { await kiter.stop(); } catch { /* already closed */ }
   } catch (e) {
     console.log(`[kv-dump] keys() failed for profiles: ${String(e)}`);
   }
