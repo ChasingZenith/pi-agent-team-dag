@@ -846,12 +846,18 @@ export default function (pi: ExtensionAPI) {
           description: "System prompt for the agent. Passed via --system-prompt.",
         })),
         messages: Type.Optional(Type.Array(Type.Object({
-          role: Type.Enum({ user: "user", assistant: "assistant" }),
+          role: Type.Union([
+            Type.Literal("user"),
+            Type.Literal("assistant"),
+          ]),
           content: Type.String(),
         }), {
           description: "Initial conversation messages. Ignored when context is \"fork\". Preloaded messages do NOT start the agent's first turn at boot — the first turn is triggered by the first comms message that arrives.",
         })),
-        context: Type.Optional(Type.Enum({ fresh: "fresh", fork: "fork" }, {
+        context: Type.Optional(Type.Union([
+          Type.Literal("fresh"),
+          Type.Literal("fork"),
+        ], {
           description:
             "Context source (default \"fresh\"): \"fresh\" starts a clean " +
             "session (empty, or preloaded from messages); \"fork\" inherits " +
@@ -907,7 +913,7 @@ export default function (pi: ExtensionAPI) {
       return executeAgentSpawn(
         {
           name: params.name,
-          llmContext: (params as any).llmContext ?? {},
+          llmContext: params.llmContext ?? {},
           model: params.model,
           autoExit: params.autoExit === true,
         },

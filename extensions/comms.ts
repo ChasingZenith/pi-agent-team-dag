@@ -492,7 +492,7 @@ export default function (pi: ExtensionAPI) {
 			"REPLYING TO A RECEIVED MESSAGE — REQUIRED FOR PEER-TO-PEER REPLIES\n" +
 			"To reply an inbound message from a peer, call this tool with `target` set to the peer name from the message framing and `reply_to_msg_id` set to that message's `msg_id`. For ANY received message that asks you to do something or hands you work — a question, a request, a dispatch, a commission, a confirmation request, or anything you were asked to carry out — you MUST reply with this tool (unless the message explicitly provides a different reply method, e.g. a delegated `task_submit_report`). Send the completion notice via this tool so the requester is woken and knows the outcome. A valid `reply_to_msg_id` lets the sender associate your message with the original request and stop any reminder for it. Omit `reply_to_msg_id` only when sending a new message that is not a reply.",
 		parameters: Type.Object({
-			target: Type.Optional(Type.String({ description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
+			target: Type.Optional(Type.String({ minLength: 1, description: "Peer name (CASE-SENSITIVE, scoped to your subnet; unique per subnet). Set either target or targets." })),
 			targets: Type.Optional(Type.Array(Type.String(), { description: "Group send: multiple peer names (CASE-SENSITIVE). Set either target or targets; one msg_id is returned per recipient." })),
 			message: Type.String({ description: "The message to send (or your reply content when reply_to_msg_id is set)." }),
 			remind_s: Type.Optional(Type.Number({
@@ -510,20 +510,22 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
-			const p = params as any;
-			const targets = Array.isArray(p.targets) && p.targets.length > 0
-				? p.targets.map((s: unknown) => String(s).trim()).filter(Boolean)
-				: typeof p.target === "string" && p.target.length > 0
+			const p = params;
+			// target/targets are mutually exclusive recipient selectors (business
+			// rule, not expressible in the TypeBox schema), verified at runtime.
+			const targets = p.targets && p.targets.length > 0
+				? p.targets.map((s: string) => s.trim()).filter(Boolean)
+				: p.target					// schema enforces minLength 1
 					? [p.target]
 					: [];
 			if (targets.length === 0) throw new Error("comms_send: provide either target or targets");
 
-			const replyToMsgId = typeof p.reply_to_msg_id === "string" && p.reply_to_msg_id.length > 0 ? p.reply_to_msg_id : undefined;
+			const replyToMsgId = p.reply_to_msg_id || undefined;
 			// Default 0 = no reminder; only remind_s > 0 arms one. (A later
 			// comms_remind can still arm a reminder on the sent message.)
-			const remindS = typeof p.remind_s === "number" ? p.remind_s : 0;
+			const remindS = p.remind_s ?? 0;
 			// Delivery mode at the target (schema-enforced union; omitted → target default "steer").
-			const deliverAs = typeof p.deliver_as === "string" ? p.deliver_as as DeliverAsValue : undefined;
+			const deliverAs = p.deliver_as ?? undefined;
 
 			const results: Array<{ target: string; msg_id: string; target_status: string }> = [];
 			const errors: Array<{ target: string; error: string }> = [];
@@ -551,19 +553,19 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 		renderCall(args, theme) {
-			const a = args as any;
-			const targets = Array.isArray(a.targets) && a.targets.length ? a.targets : a.target ? [a.target] : [];
+			const a = args;
+			const targets = a.targets && a.targets.length ? a.targets : a.target ? [a.target] : [];
 			const tgt = targets && targets.length > 0 ? targets.join(", ") : "?";
 			const lines = [
 				theme.fg("toolTitle", theme.bold("comms_send ")) + theme.fg("accent", `to ${tgt}`),
 			];
 			// Show every input param block-style. The message is placed on its own
 			// following lines, so multi-line messages render naturally.
-			if (typeof a.message === "string" && a.message.length > 0) lines.push(`  message:
+			if (a.message) lines.push(`  message:
 ${a.message}`);
-			if (typeof a.remind_s === "number") lines.push(`  remind_s: ${a.remind_s}`);
-			if (typeof a.reply_to_msg_id === "string" && a.reply_to_msg_id.length > 0) lines.push(`  reply_to_msg_id: ${a.reply_to_msg_id}`);
-			if (typeof a.deliver_as === "string" && a.deliver_as.length > 0) lines.push(`  deliver_as: ${a.deliver_as}`);
+			if (a.remind_s !== undefined) lines.push(`  remind_s: ${a.remind_s}`);
+			if (a.reply_to_msg_id) lines.push(`  reply_to_msg_id: ${a.reply_to_msg_id}`);
+			if (a.deliver_as) lines.push(`  deliver_as: ${a.deliver_as}`);
 			return new Text(lines.join("\n"), 0, 0);
 		},
 	});
@@ -595,10 +597,10 @@ ${a.message}`);
 		}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
-			const p = params as any;
+			const p = params;
 			const self = identity;
-			const msgId = typeof p.msg_id === "string" && p.msg_id.length > 0 ? p.msg_id : undefined;
-			const limit = typeof p.limit === "number" && p.limit > 0 ? Math.min(p.limit, 100) : 10;
+			const msgId = p.msg_id || undefined;
+			const limit = p.limit ? Math.min(p.limit, 100) : 10;
 
 			// List mode: recent sends (newest first). Status derives from the
 			// persisted record (survives restarts); the live reminder table only
@@ -657,8 +659,8 @@ ${a.message}`);
 			return { content: [{ type: "text" as const, text }] };
 		},
 		renderCall(args, theme) {
-			const a = args as any;
-			const msgId = typeof a.msg_id === "string" && a.msg_id ? a.msg_id : "(recent)";
+			const a = args;
+			const msgId = a.msg_id || "(recent)";
 			return new Text(theme.fg("toolTitle", theme.bold("comms_outbox ")) + theme.fg("accent", msgId), 0, 0);
 		},
 	});
@@ -685,10 +687,10 @@ ${a.message}`);
 		}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
-			const p = params as any;
+			const p = params;
 			const self = identity;
-			const msgId = typeof p.msg_id === "string" && p.msg_id.length > 0 ? p.msg_id : undefined;
-			const limit = typeof p.limit === "number" && p.limit > 0 ? Math.min(p.limit, 100) : 10;
+			const msgId = p.msg_id || undefined;
+			const limit = p.limit ? Math.min(p.limit, 100) : 10;
 
 			// List mode: recent received messages, newest first. Reminder markers
 			// overlay the live table exactly like outbox — reminders can be armed
@@ -751,8 +753,8 @@ ${a.message}`);
 			return { content: [{ type: "text" as const, text }] };
 		},
 		renderCall(args, theme) {
-			const a = args as any;
-			const msgId = typeof a.msg_id === "string" && a.msg_id ? a.msg_id : "(recent)";
+			const a = args;
+			const msgId = a.msg_id || "(recent)";
 			return new Text(theme.fg("toolTitle", theme.bold("comms_inbox ")) + theme.fg("accent", msgId), 0, 0);
 		},
 	});
@@ -784,8 +786,8 @@ pi.registerTool({
 	}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
-			const msgId = (params as any).msg_id as string;
-			const remindS = Math.floor((params as any).remind_s as number);
+			const msgId = params.msg_id;
+			const remindS = Math.floor(params.remind_s);
 			const res = await messaging.remind(identity, msgId, remindS);
 			const outcome = res.outcome;
 			const text = outcome === "reminded"
@@ -801,10 +803,10 @@ pi.registerTool({
 			};
 		},
 		renderCall(args, theme) {
-			const a = args as any;
-			const msgId = a.msg_id ?? "?";
+			const a = args;
+			const msgId = a.msg_id;
 			// Wording mirrors the result content ("remind every 300 s").
-			const s = typeof a.remind_s === "number" && a.remind_s > 0
+			const s = a.remind_s > 0
 				? ` · remind every ${a.remind_s} s`
 				: " · stop";
 			return new Text(theme.fg("toolTitle", theme.bold("comms_remind ")) + theme.fg("accent", msgId + s), 0, 0);
@@ -831,10 +833,10 @@ pi.registerTool({
 		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
 
-			const stored = await updateProfile({ current_task: (params as any).current_task });
+			const stored = await updateProfile({ current_task: params.current_task });
 
 			const updated: string[] = [];
-			if ((params as any).current_task !== undefined) updated.push("current_task");
+			if (params.current_task !== undefined) updated.push("current_task");
 
 			return {
 				content: [{
@@ -846,7 +848,7 @@ pi.registerTool({
 		},
 		renderCall(args, theme, context) {
 			const fields: string[] = [];
-			if ((args as any).current_task) fields.push("task");
+			if (args.current_task) fields.push("task");
 			const tags = fields && fields.length > 0 ? fields.join(", ") : "?";
 			const text =
 				theme.fg("toolTitle", theme.bold("comms_update_profile ")) + theme.fg("accent", tags);
@@ -854,7 +856,7 @@ pi.registerTool({
 				return new Text(text, 0, 0);
 			}
 			// Expanded: the declared current_task value.
-			const task = (args as any).current_task as string | undefined;
+			const task = args.current_task;
 			return new Text(text + (task ? `\ncurrent_task: ${task}` : ""), 0, 0);
 		},
 	});
