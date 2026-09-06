@@ -1186,11 +1186,14 @@ function normalizeIntoSubgraphDeps(cwd: string, childId: string, childKind: Task
  * description, report and everything a worker anchors on is untouched — so a
  * parent being actively driven is never disturbed by a child joining its subgraph.
  *
- * CONCURRENCY (no global lock — per-owner compare-and-swap): each parent re-read
- * is done FRESH at write time (not from the snapshot taken at the child commit),
- * so if another writer appended to the same parent meanwhile, we re-read again
- * and re-append — the union is idempotent, so no child is ever lost silently.
- * A parent re-commit only succeeds on a consistent read within the same call.
+ * CONCURRENCY (locked-free optimistic retry): each parent is read FRESH, the
+ * candidate deps computed, then re-committed with struct_version used as a CAS
+ * token — if the on-disk struct_version moved since our read, another writer
+ * already changed the edge arrays, so we re-read and retry. Node's rename is
+ * not an atomic check-and-swap, so this narrows but cannot provably close the
+ * window between the version re-check and the rename; it eliminates the common
+ * two-children-lost-update by retrying on mismatch. The union is idempotent, so
+ * a retry merely re-appends this child on top of the competitor's edge.
  *
  * Returns the ids of the parents actually modified (deps/subgraph_deps changed).
  */
@@ -1205,36 +1208,96 @@ function wireIntoParents(
 ): string[] {
 	const wired: string[] = [];
 	for (const t of intoDeps) {
-		const fresh = tryReadTaskFile(cwd, t);
-		if (!fresh) continue; // vanished concurrently — skip (validation passed earlier)
-		if (fresh.status === "done" || fresh.status === "cancelled") {
-			throw new Error(
-				`tasks: into_deps target "${t}" is ${fresh.status} (terminal) — a finished parent cannot gain a new child; reopen/undo it first`,
-			);
-		}
-		if (fresh.deps.includes(childId)) continue; // already wired — idempotent
-		const newDeps = [...fresh.deps, childId].sort();
-		assertSubgraphDepOutsideSubgraph(cwd, t, newDeps, fresh.subgraph_deps);
-		assertNoCycle(cwd, t, newDeps, fresh.subgraph_deps);
-		writeWiredParent(cwd, fresh, { deps: newDeps }, updatedBy, changeSummary);
-		wired.push(t);
+		if (wireChildIntoParent(cwd, t, childId, "deps", updatedBy, changeSummary)) wired.push(t);
 	}
 	for (const t of intoSubgraphDeps) {
-		const fresh = tryReadTaskFile(cwd, t);
-		if (!fresh) continue;
-		if (fresh.status === "done" || fresh.status === "cancelled") {
-			throw new Error(
-				`tasks: into_subgraph_deps target "${t}" is ${fresh.status} (terminal) — a finished module cannot gain a new gate; reopen/undo it first`,
-			);
-		}
-		if (fresh.subgraph_deps.includes(childId)) continue;
-		const newGates = [...fresh.subgraph_deps, childId].sort();
-		assertSubgraphDepOutsideSubgraph(cwd, t, fresh.deps, newGates);
-		assertNoCycle(cwd, t, fresh.deps, newGates);
-		writeWiredParent(cwd, fresh, { subgraph_deps: newGates }, updatedBy, changeSummary);
-		wired.push(t);
+		if (wireChildIntoParent(cwd, t, childId, "subgraph_deps", updatedBy, changeSummary)) wired.push(t);
 	}
 	return wired;
+}
+
+const WIRING_CAS_RETRIES = 5;
+
+/**
+ * Optimistically wire childId into a single parent's edge array. Reads fresh,
+ * computes the candidate, then re-commits guarded by struct_version as the CAS
+ * token: if the on-disk struct_version moved since our read, the edge arrays
+ * were changed by another writer, so we re-read and retry. Returns true when
+ * this call actually extended the parent (a concurrent retry that found the
+ * child already present returns false). Retries give up after a bounded count:
+ * a sustained storm means someone keeps committing this parent, which is better
+ * surfaced as an error than the child silently dropped.
+ */
+function wireChildIntoParent(
+	cwd: string,
+	parentId: string,
+	childId: string,
+	field: "deps" | "subgraph_deps",
+	updatedBy: string,
+	changeSummary: string,
+): boolean {
+	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
+		const fresh = tryReadTaskFile(cwd, parentId);
+		if (!fresh) return false; // vanished concurrently — skip (validation passed earlier)
+		if (fresh.status === "done" || fresh.status === "cancelled") {
+			throw new Error(
+				`tasks: into_${field === "deps" ? "deps" : "subgraph_deps"} target "${parentId}" is ${fresh.status} (terminal) — a finished parent cannot gain a new child; reopen/undo it first`,
+			);
+		}
+		const arr = field === "deps" ? fresh.deps : fresh.subgraph_deps;
+		if (arr.includes(childId)) return false; // already wired — idempotent
+		const newArr = [...arr, childId].sort();
+		if (field === "deps") {
+			assertSubgraphDepOutsideSubgraph(cwd, parentId, newArr, fresh.subgraph_deps);
+			assertNoCycle(cwd, parentId, newArr, fresh.subgraph_deps);
+		} else {
+			assertSubgraphDepOutsideSubgraph(cwd, parentId, fresh.deps, newArr);
+			assertNoCycle(cwd, parentId, fresh.deps, newArr);
+		}
+		if (writeWiredParentCas(cwd, fresh, field, newArr, updatedBy, changeSummary)) return true;
+		// struct_version moved — another writer changed this parent; re-read and retry
+	}
+	throw new Error(
+		`tasks: could not wire "${childId}" into "${parentId}" — the parent was re-committed ${WIRING_CAS_RETRIES} times while wiring (another agent keeps updating it); retry later`,
+	);
+}
+
+/**
+ * CAS guard for the direct-commit write path: true only when the on-disk
+ * (version, struct_version) still equal the base this commit was computed from.
+ * `version` guards against a concurrent content commit; `struct_version` guards
+ * against a concurrent wiring/edge change (which bumps `struct_version` but not
+ * `version` — the expected_version check above only covers the former). Returns
+ * false when stale so the update path re-reads and recomputes.
+ */
+function commitStillCurrent(cwd: string, id: string, base: Task): boolean {
+	const current = tryReadTaskFile(cwd, id);
+	return !!current && current.version === base.version && current.struct_version === base.struct_version;
+}
+
+/**
+ * CAS commit of one parent's edge array. Re-reads the file and writes only if
+ * the on-disk struct_version still equals the snapshot we computed the candidate
+ * from; otherwise returns false so the caller retries on a fresh read.
+ *
+ * The check and the rename are two separate syscalls (rename is not an atomic
+ * compare-and-swap), so a writer could still slip between them; the CAS only
+ * makes the competitor's change *detectable* on the next re-read, which is the
+ * optimistic contract — eventually one writer's append is observed by the
+ * retrying one instead of being silently overwritten.
+ */
+function writeWiredParentCas(
+	cwd: string,
+	base: Task,
+	field: "deps" | "subgraph_deps",
+	newArr: string[],
+	updatedBy: string,
+	changeSummary: string,
+): boolean {
+	const current = tryReadTaskFile(cwd, base.id);
+	if (!current || current.struct_version !== base.struct_version) return false;
+	writeWiredParent(cwd, current, field === "deps" ? { deps: newArr } : { subgraph_deps: newArr }, updatedBy, changeSummary);
+	return true;
 }
 
 /**
@@ -1437,118 +1500,134 @@ export function commitTask(
 	const descScope = opts.scope === "description" || opts.scope === "all";
 	const draftPresent = existsSync(draftToml);
 
-	let title = existing.title;
-	let deps = existing.deps;
-	let moduleDeps = existing.subgraph_deps;
-	let infoRefs = existing.info_refs;
-	let kind = existing.kind;
-	let intoDeps: string[] = [];
-	let intoSubgraphDeps: string[] = [];
-	if (metaScope && draftPresent) {
-		const patch = parseDraftToml(cwd, draftToml, clean);
-		if (patch.title !== undefined) {
-			if (!patch.title.trim()) {
-				throw new Error(`tasks: draft title for "${clean}" is empty — provide a non-empty title or omit the field`);
+	// CAS retry loop: `existing` (the expected_version check above) is the base this update is
+	// computed from, but a concurrent writer can change the task between that read and this write
+	// — a wiring bumps `struct_version` without bumping `version` (the check above only guards
+	// `version`), so it would be silently clobbered. Re-verify (version, struct_version) is still
+	// current right before the write; on a mismatch, re-read the base and recompute. This closes
+	// the direct-commit-vs-wiring lost-update; the rename is still not an atomic CAS, so a writer
+	// can slip between the verify and the rename — the optimistic contract, as in the wiring path.
+	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
+		const base = attempt === 0 ? existing : tryReadTaskFile(cwd, clean);
+		if (!base) throw new Error(`tasks: task_commit "${clean}": task disappeared mid-commit`);
+
+		let title = base.title;
+		let deps = base.deps;
+		let moduleDeps = base.subgraph_deps;
+		let infoRefs = base.info_refs;
+		let kind = base.kind;
+		let intoDeps: string[] = [];
+		let intoSubgraphDeps: string[] = [];
+		if (metaScope && draftPresent) {
+			const patch = parseDraftToml(cwd, draftToml, clean);
+			if (patch.title !== undefined) {
+				if (!patch.title.trim()) {
+					throw new Error(`tasks: draft title for "${clean}" is empty — provide a non-empty title or omit the field`);
+				}
+				title = patch.title.trim();
 			}
-			title = patch.title.trim();
+			if (patch.deps !== undefined) deps = normalizeDeps(cwd, clean, patch.deps);
+			if (patch.subgraph_deps !== undefined) moduleDeps = normalizeSubgraphDeps(cwd, patch.subgraph_deps);
+			if (patch.info_refs !== undefined) infoRefs = normalizeInfoRefs(cwd, clean, patch.info_refs);
+			if (patch.kind !== undefined) kind = patch.kind;
+			if (patch.deps !== undefined || patch.subgraph_deps !== undefined) {
+				assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
+				assertNoCycle(cwd, clean, deps, moduleDeps);
+			}
+			kind = resolveKind(kind, deps, moduleDeps, infoRefs);
+			// Wiring directives on an EXISTING node: parents must exist & be legal; applied after commit.
+			intoDeps = normalizeIntoDeps(cwd, clean, kind, patch.into_deps ?? []);
+			intoSubgraphDeps = normalizeIntoSubgraphDeps(cwd, clean, kind, patch.into_subgraph_deps ?? []);
 		}
-		if (patch.deps !== undefined) deps = normalizeDeps(cwd, clean, patch.deps);
-		if (patch.subgraph_deps !== undefined) moduleDeps = normalizeSubgraphDeps(cwd, patch.subgraph_deps);
-		if (patch.info_refs !== undefined) infoRefs = normalizeInfoRefs(cwd, clean, patch.info_refs);
-		if (patch.kind !== undefined) kind = patch.kind;
-		if (patch.deps !== undefined || patch.subgraph_deps !== undefined) {
-			assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
-			assertNoCycle(cwd, clean, deps, moduleDeps);
+
+		const description = descScope && existsSync(draftDesc)
+			? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
+			: base.description;
+
+		const contentChanged: string[] = [];
+		const structChanged: string[] = [];
+		if (title !== base.title) contentChanged.push("title");
+		if (infoRefs.join("|") !== base.info_refs.join("|")) contentChanged.push("info_refs");
+		if (kind !== base.kind) contentChanged.push("kind");
+		if (description !== base.description) contentChanged.push("description");
+		if (deps.join("|") !== base.deps.join("|")) structChanged.push("deps");
+		if (moduleDeps.join("|") !== base.subgraph_deps.join("|")) structChanged.push("subgraph_deps");
+		// A pure into_* commit (no content/structure change) is a VALID commit: it wires an existing
+		// node into a parent. The wiring itself is applied after the child is committed.
+		const hasWiring = intoDeps.length > 0 || intoSubgraphDeps.length > 0;
+		const changed = [...contentChanged, ...structChanged];
+		if (changed.length === 0 && !hasWiring) {
+			throw new Error(
+				`tasks: task_commit "${clean}": no changes to commit — draft content is identical to v${base.version}; nothing to do`,
+			);
 		}
-		kind = resolveKind(kind, deps, moduleDeps, infoRefs);
-		// Wiring directives on an EXISTING node: parents must exist & be legal; applied after commit.
-		intoDeps = normalizeIntoDeps(cwd, clean, kind, patch.into_deps ?? []);
-		intoSubgraphDeps = normalizeIntoSubgraphDeps(cwd, clean, kind, patch.into_subgraph_deps ?? []);
+
+		const now = new Date().toISOString();
+		const updatedBy = opts.updated_by ?? "unknown";
+		// Content changes bump `version` (the worker's contract anchor); structural changes (deps /
+		// subgraph_deps) bump `struct_version` only — wiring never disturbs a consumer holding a
+		// stale content version. A mixed commit bumps both. Snapshots (history/<id>.v<N>/) are only
+		// written on a content change, since structure-only changes leave the description contract and
+		// the report anchor untouched.
+		const newVersion = contentChanged.length > 0 ? base.version + 1 : base.version;
+		const newStructVersion = structChanged.length > 0 ? base.struct_version + 1 : base.struct_version;
+		const newItem: Task = {
+			...base,
+			title,
+			deps,
+			subgraph_deps: moduleDeps,
+			info_refs: infoRefs,
+			kind,
+			description,
+			version: newVersion,
+			struct_version: newStructVersion,
+			struct_changed_at: structChanged.length > 0 ? now : base.struct_changed_at,
+			updated_at: now,
+			updated_by: updatedBy,
+			history: [
+				{
+					changed_items: changed,
+					version: newVersion,
+					event: "",
+					updated_at: now,
+					updated_by: updatedBy,
+					change_summary: opts.change_summary?.trim() || `updated: ${changed.join(", ")}`,
+				},
+				...base.history,
+			].slice(0, HISTORY_CAP),
+		};
+		delete (newItem as Partial<Task>).integrity_warnings;
+		delete (newItem as Partial<Task>).report_for_version;
+
+		if (commitStillCurrent(cwd, clean, base)) {
+			// old version durable before the new one becomes visible — only on a content change (a
+			// structure-only change leaves the version and the description.md the same).
+			if (contentChanged.length > 0) {
+				writeTaskSnapshot(cwd, base);
+				writeMetadataAndDescription(cwd, newItem);
+			} else {
+				writeMetadataOnly(cwd, newItem);
+			}
+
+			const consumed = consumeDrafts([
+				...(metaScope && draftPresent ? [draftToml] : []),
+				...(descScope && existsSync(draftDesc) ? [draftDesc] : []),
+			]);
+			// Wire this node into its declared parents (structure-only on the parents; this node's own
+			// commit, content or not, is already done). Only meaningful when into directives were present.
+			if (hasWiring) {
+				wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
+			}
+			return {
+				item: readTask(cwd, clean) ?? newItem,
+				created: false,
+				changed_items: [...changed, ...(hasWiring ? ["wiring"] : [])],
+				consumed: consumed.map((p) => relative(cwd, p)),
+			};
+		}
+		// base was stale — re-read and recompute on the next iteration
 	}
-
-	const description = descScope && existsSync(draftDesc)
-		? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
-		: existing.description;
-
-	const contentChanged: string[] = [];
-	const structChanged: string[] = [];
-	if (title !== existing.title) contentChanged.push("title");
-	if (infoRefs.join("|") !== existing.info_refs.join("|")) contentChanged.push("info_refs");
-	if (kind !== existing.kind) contentChanged.push("kind");
-	if (description !== existing.description) contentChanged.push("description");
-	if (deps.join("|") !== existing.deps.join("|")) structChanged.push("deps");
-	if (moduleDeps.join("|") !== existing.subgraph_deps.join("|")) structChanged.push("subgraph_deps");
-	// A pure into_* commit (no content/structure change) is a VALID commit: it wires an existing
-	// node into a parent. The wiring itself is applied after the child is committed.
-	const hasWiring = intoDeps.length > 0 || intoSubgraphDeps.length > 0;
-	const changed = [...contentChanged, ...structChanged];
-	if (changed.length === 0 && !hasWiring) {
-		throw new Error(
-			`tasks: task_commit "${clean}": no changes to commit — draft content is identical to v${existing.version}; nothing to do`,
-		);
-	}
-
-	const now = new Date().toISOString();
-	const updatedBy = opts.updated_by ?? "unknown";
-	// Content changes bump `version` (the worker's contract anchor); structural changes (deps /
-	// subgraph_deps) bump `struct_version` only — wiring never disturbs a consumer holding a
-	// stale content version. A mixed commit bumps both. Snapshots (history/<id>.v<N>/) are only
-	// written on a content change, since structure-only changes leave the description contract and
-	// the report anchor untouched.
-	const newVersion = contentChanged.length > 0 ? existing.version + 1 : existing.version;
-	const newStructVersion = structChanged.length > 0 ? existing.struct_version + 1 : existing.struct_version;
-	const newItem: Task = {
-		...existing,
-		title,
-		deps,
-		subgraph_deps: moduleDeps,
-		info_refs: infoRefs,
-		kind,
-		description,
-		version: newVersion,
-		struct_version: newStructVersion,
-		struct_changed_at: structChanged.length > 0 ? now : existing.struct_changed_at,
-		updated_at: now,
-		updated_by: updatedBy,
-		history: [
-			{
-				changed_items: changed,
-				version: newVersion,
-				event: "",
-				updated_at: now,
-				updated_by: updatedBy,
-				change_summary: opts.change_summary?.trim() || `updated: ${changed.join(", ")}`,
-			},
-			...existing.history,
-		].slice(0, HISTORY_CAP),
-	};
-	delete (newItem as Partial<Task>).integrity_warnings;
-	delete (newItem as Partial<Task>).report_for_version;
-
-	// old version durable before the new one becomes visible — only on a content change (a
-	// structure-only change leaves the version and the description.md the same).
-	if (contentChanged.length > 0) {
-		writeTaskSnapshot(cwd, existing);
-		writeMetadataAndDescription(cwd, newItem);
-	} else {
-		writeMetadataOnly(cwd, newItem);
-	}
-
-	const consumed = consumeDrafts([
-		...(metaScope && draftPresent ? [draftToml] : []),
-		...(descScope && existsSync(draftDesc) ? [draftDesc] : []),
-	]);
-	// Wire this node into its declared parents (structure-only on the parents; this node's own
-	// commit, content or not, is already done). Only meaningful when into directives were present.
-	if (hasWiring) {
-		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
-	}
-	return {
-		item: readTask(cwd, clean) ?? newItem,
-		created: false,
-		changed_items: [...changed, ...(hasWiring ? ["wiring"] : [])],
-		consumed: consumed.map((p) => relative(cwd, p)),
-	};
+	throw new Error(`tasks: task_commit "${clean}": base changed ${WIRING_CAS_RETRIES} times while committing; try again`);
 }
 
 // ---------------------------------------------------------------------------
