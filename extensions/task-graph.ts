@@ -152,15 +152,8 @@ export default function (pi: ExtensionAPI) {
 	const STATUSES: TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled", "worker_offline"];
 	/** Which long-form content task_read loads; mirrors the TypeBox union on fields. */
 	type ReadFields = "description" | "report" | "full";
-	const STATUS_GLYPH: Record<TaskStatus, string> = {
-		pending: "◻",
-		dispatched: "◔",
-		active: "▶",
-		done: "✓",
-		blocked: "⛔",
-		cancelled: "⊘",
-		worker_offline: "✚",
-	};
+	// Shared with renderGraph — one glyph set, not two.
+	const STATUS_GLYPH = graph.STATUS_GLYPHS;
 
 	/** Number of the caller's existing draft files. Used to indicate "you have N uncommitted
 	 *  draft(s) for this task" in task_read. */

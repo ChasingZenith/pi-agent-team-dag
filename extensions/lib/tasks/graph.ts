@@ -373,7 +373,8 @@ function collectCycles(graph: DepGraph<Task>): string[][] {
 // Rendering
 // ---------------------------------------------------------------------------
 
-const STATUS_GLYPHS: Record<TaskStatus, string> = {
+/** Single source of truth for the on-disk status glyphs, shared by renderGraph and the shell tools. */
+export const STATUS_GLYPHS: Record<TaskStatus, string> = {
 	pending: "◻",
 	dispatched: "◔",
 	active: "◐",
