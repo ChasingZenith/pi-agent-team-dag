@@ -869,11 +869,12 @@ function consumeDrafts(paths: string[]): string[] {
  * Parse a metadata DRAFT toml. Patch semantics: only the fields present in the
  * draft change — title / deps / subgraph_deps / kind / info_refs; absent fields
  * keep their current value (update) or default (create). `into_deps` /
- * `into_subgraph_deps` are COMMIT-TIME DIRECTIVES (see commitTask): they declare
- * which existing parents this node should be wired into (this id appended to the
- * parent's deps / subgraph_deps), consumed by the commit and NEVER stored on this
- * node. Machine-managed fields (status, version, struct_version, history,
- * timestamps, hashes, dispatched_to, execution_session) are ignored if present.
+ * `into_subgraph_deps` / `into_info_ref` are COMMIT-TIME DIRECTIVES (see
+ * commitTask): they declare which existing parents this node should be wired into
+ * (this id appended to the parent's deps / subgraph_deps / info_refs), consumed by
+ * the commit and NEVER stored on this node. Machine-managed fields (status,
+ * version, struct_version, history, timestamps, hashes, dispatched_to,
+ * execution_session) are ignored if present.
  * An `id` in the draft must resolve to the committed task id.
  */
 function parseDraftToml(cwd: string, path: string, cleanId: string): {
@@ -884,6 +885,7 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 	info_refs?: string[];
 	into_deps?: string[];
 	into_subgraph_deps?: string[];
+	into_info_ref?: string[];
 } {
 	let data: unknown;
 	try {
@@ -902,7 +904,7 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 			`tasks: draft id "${d.id}" does not match task "${cleanId}" — fix the draft or the task id`,
 		);
 	}
-	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind; info_refs?: string[]; into_deps?: string[]; into_subgraph_deps?: string[] } = {};
+	const out: { title?: string; deps?: string[]; subgraph_deps?: string[]; kind?: TaskKind; info_refs?: string[]; into_deps?: string[]; into_subgraph_deps?: string[]; into_info_ref?: string[] } = {};
 	if (typeof d.title === "string") out.title = d.title;
 	if (Array.isArray(d.deps) && d.deps.every((x) => typeof x === "string")) out.deps = d.deps;
 	if (Array.isArray(d.subgraph_deps) && d.subgraph_deps.every((x) => typeof x === "string")) {
@@ -916,6 +918,9 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 	}
 	if (Array.isArray(d.into_subgraph_deps) && d.into_subgraph_deps.every((x) => typeof x === "string")) {
 		out.into_subgraph_deps = d.into_subgraph_deps;
+	}
+	if (Array.isArray(d.into_info_ref) && d.into_info_ref.every((x) => typeof x === "string")) {
+		out.into_info_ref = d.into_info_ref;
 	}
 	if (typeof d.kind === "string") out.kind = d.kind as TaskKind;
 	return out;
@@ -1195,6 +1200,44 @@ function normalizeIntoSubgraphDeps(graph: Task[], childId: string, childKind: Ta
 }
 
 /**
+ * Normalize a caller-provided into_info_ref list (commit directive): the child —
+ * which must be a shared information node (kind = "info") — is appended to the
+ * `info_refs` of each target task/module, so those tasks inject this info node's
+ * shared description at read time. Targets must exist and must NOT be `info`
+ * (an info node references no other information — it is itself the source); the
+ * child cannot be a target (self-loop, though impossible since targets must not
+ * be info). Used on the info node's own draft to wire it INTO already-existing
+ * consumers, rather than editing each consumer's info_refs by hand.
+ */
+function normalizeIntoInfoRefs(graph: Task[], childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
+	const targets = [...new Set(rawTargets.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	if (targets.length === 0) return targets;
+	if (childKind !== "info") {
+		throw new Error(
+			`tasks: into_info_ref is only valid for kind "info" — a shared information node declares which tasks consume it; a task/module instead sets its own info_refs directly`,
+		);
+	}
+	const byId = new Map(graph.map((i) => [i.id, i]));
+	for (const t of targets) {
+		if (t === childId) {
+			throw new Error(`tasks: into_info_ref target "${t}" is the child's own id — an info node cannot reference itself`);
+		}
+		const target = byId.get(t);
+		if (!target) {
+			throw new Error(
+				`tasks: into_info_ref target "${t}" does not exist — create the task/module first, then wire this info node into — available tasks: ${availableList(graph)}`,
+			);
+		}
+		if (target.kind === "info") {
+			throw new Error(
+				`tasks: into_info_ref target "${t}" is a shared information node (kind = "info") — info references no other info; wire into a task or module`,
+			);
+		}
+	}
+	return targets;
+}
+
+/**
  * Wire the freshly-committed child into each declared parent: for every into_deps
  * target, append childId to the parent's deps; for every into_subgraph_deps
  * target, append childId to the module's subgraph_deps. Parent writes are
@@ -1231,6 +1274,125 @@ function wireIntoParents(
 		if (wireChildIntoParent(cwd, t, childId, "subgraph_deps", updatedBy, changeSummary)) wired.push(t);
 	}
 	return wired;
+}
+
+/**
+ * Wire the freshly-committed info node into each declaring consumer's info_refs.
+ * Unlike deps/subgraph_deps wiring this is a CONTENT change on the parent: the
+ * parent's info_refs array grows, so its content `version` bumps +1, a snapshot
+ * is archived and the metadata+description true copies are rewritten — an actively
+ * driven consumer that re-reads after this wiring will start seeing the injected
+ * shared description (the whole point of the extension). Returns the ids of the
+ * consumers modified.
+ */
+function wireIntoInfoRefs(
+	cwd: string,
+	childId: string,
+	intoInfoRefs: string[],
+	updatedBy: string,
+	changeSummary: string,
+): string[] {
+	const wired: string[] = [];
+	for (const t of intoInfoRefs) {
+		if (wireChildIntoInfoRef(cwd, t, childId, updatedBy, changeSummary)) wired.push(t);
+	}
+	return wired;
+}
+
+/**
+ * Optimistically append childId to a single consumer's info_refs. Re-reads fresh,
+ * then re-commits guarded by (version, struct_version) as the CAS token — if
+ * either moved since our read, another writer changed this consumer, so we
+ * re-read and retry. Returns true when this call actually extended the consumer's
+ * info_refs (already-present returns false). Checks the same preconditions as
+ * normalizeInfoRefs: the running consumer must not be `info` and must not be
+ * terminal — a task/module consuming a new shared requirement is exactly what an
+ * info_refs grow implies.
+ */
+function wireChildIntoInfoRef(
+	cwd: string,
+	consumerId: string,
+	childId: string,
+	updatedBy: string,
+	changeSummary: string,
+): boolean {
+	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
+		const fresh = tryReadTaskFile(cwd, consumerId);
+		if (!fresh) return false; // vanished concurrently — skip (validation passed earlier)
+		if (fresh.kind === "info") {
+			throw new Error(
+				`tasks: into_info_ref target "${consumerId}" is a shared information node (kind = "info") — info references no other info; wire into a task or module`,
+			);
+		}
+		if (fresh.info_refs.includes(childId)) return false; // already wired — idempotent
+		const newRefs = [...fresh.info_refs, childId].sort();
+		if (writeWiredInfoRefCas(cwd, fresh, newRefs, updatedBy, changeSummary)) return true;
+		// (version, struct_version) moved — another writer changed this consumer; re-read and retry
+	}
+	throw new Error(
+		`tasks: could not wire info "${childId}" into "${consumerId}" — the consumer was re-committed ${WIRING_CAS_RETRIES} times while wiring (another agent keeps updating it); retry later`,
+	);
+}
+
+/**
+ * CAS commit of one consumer's info_refs. Re-reads the file and writes only if
+ * the on-disk (version, struct_version) still equal the snapshot we computed the
+ * candidate from (a content change races on version, a structure change on
+ * struct_version; guard both since either could be bumped concurrently).
+ * Otherwise returns false so the caller retries on a fresh read.
+ */
+function writeWiredInfoRefCas(
+	cwd: string,
+	base: Task,
+	newRefs: string[],
+	updatedBy: string,
+	changeSummary: string,
+): boolean {
+	const current = tryReadTaskFile(cwd, base.id);
+	if (!current || current.version !== base.version || current.struct_version !== base.struct_version) return false;
+	writeWiredInfoRef(cwd, current, newRefs, updatedBy, changeSummary);
+	return true;
+}
+
+/**
+ * Re-write ONE consumer's metadata with an info_refs grow — a CONTENT change, so
+ * the consumer's content `version` bumps +1 (unlike deps wiring's struct_version
+ * only). The old version is snapshotted first (the description contract changed),
+ * then the metadata + description true copies are rewritten so the new description
+ * body file carries the bumped version frontmatter. History gains a summary entry;
+ * the report anchor is untouched (a report for the previous version stays valid
+ * for reference).
+ */
+function writeWiredInfoRef(
+	cwd: string,
+	fresh: Task,
+	newRefs: string[],
+	updatedBy: string,
+	changeSummary: string,
+): void {
+	const now = new Date().toISOString();
+	const newItem: Task = {
+		...fresh,
+		info_refs: newRefs,
+		version: fresh.version + 1,
+		updated_at: now,
+		updated_by: updatedBy,
+		history: [
+			{
+				changed_items: ["info_refs"],
+				version: fresh.version + 1,
+				event: "wiring",
+				updated_at: now,
+				updated_by: updatedBy,
+				change_summary: changeSummary.trim() || "wired: info_refs",
+			},
+			...fresh.history,
+		].slice(0, HISTORY_CAP),
+	};
+	delete (newItem as Partial<Task>).integrity_warnings;
+	delete (newItem as Partial<Task>).report_for_version;
+	writeTaskSnapshot(cwd, fresh);
+	writeMetadataAndDescription(cwd, newItem);
 }
 
 const WIRING_CAS_RETRIES = 5;
@@ -1467,6 +1629,7 @@ export function commitTask(
 		// reference it.
 		const intoDeps = normalizeIntoDeps(graph, clean, kind, draft.into_deps ?? []);
 		const intoSubgraphDeps = normalizeIntoSubgraphDeps(graph, clean, kind, draft.into_subgraph_deps ?? []);
+		const intoInfoRefs = normalizeIntoInfoRefs(graph, clean, kind, draft.into_info_ref ?? []);
 		const description = existsSync(draftDesc)
 			? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
 			: "";
@@ -1508,12 +1671,15 @@ export function commitTask(
 		// empty report stub, uniform three-file layout.
 		atomicWriteFile(taskReportPath(cwd, clean), reportContent);
 		const consumed = consumeDrafts([draftToml, ...(existsSync(draftDesc) ? [draftDesc] : [])]);
-		// Wire the freshly-created child into its declared parents (structure-only, no content bump).
+		// Wire the freshly-created child into its declared parents. deps/subgraph_deps wiring is
+		// structure-only (no content bump); into_info_ref wiring appends this info node to the
+		// consumers' info_refs and DOES bump each consumer's content version.
 		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, opts.updated_by ?? "unknown", "wired new child");
+		wireIntoInfoRefs(cwd, clean, intoInfoRefs, opts.updated_by ?? "unknown", "wired info into consumer");
 		return {
 			item: readTask(cwd, clean) ?? item,
 			created: true,
-			changed_items: ["created"],
+			changed_items: ["created", ...(intoInfoRefs.length > 0 ? ["wiring"] : [])],
 			consumed: consumed.map((p) => relative(cwd, p)),
 		};
 	}
@@ -1547,6 +1713,7 @@ export function commitTask(
 		let kind = base.kind;
 		let intoDeps: string[] = [];
 		let intoSubgraphDeps: string[] = [];
+		let intoInfoRefs: string[] = [];
 		if (metaScope && draftPresent) {
 			const patch = parseDraftToml(cwd, draftToml, clean);
 			if (patch.title !== undefined) {
@@ -1567,6 +1734,7 @@ export function commitTask(
 			// Wiring directives on an EXISTING node: parents must exist & be legal; applied after commit.
 			intoDeps = normalizeIntoDeps(graph, clean, kind, patch.into_deps ?? []);
 			intoSubgraphDeps = normalizeIntoSubgraphDeps(graph, clean, kind, patch.into_subgraph_deps ?? []);
+			intoInfoRefs = normalizeIntoInfoRefs(graph, clean, kind, patch.into_info_ref ?? []);
 		}
 
 		const description = descScope && existsSync(draftDesc)
@@ -1583,7 +1751,7 @@ export function commitTask(
 		if (moduleDeps.join("|") !== base.subgraph_deps.join("|")) structChanged.push("subgraph_deps");
 		// A pure into_* commit (no content/structure change) is a VALID commit: it wires an existing
 		// node into a parent. The wiring itself is applied after the child is committed.
-		const hasWiring = intoDeps.length > 0 || intoSubgraphDeps.length > 0;
+		const hasWiring = intoDeps.length > 0 || intoSubgraphDeps.length > 0 || intoInfoRefs.length > 0;
 		const changed = [...contentChanged, ...structChanged];
 		if (changed.length === 0 && !hasWiring) {
 			throw new Error(
@@ -1646,6 +1814,7 @@ export function commitTask(
 			// commit, content or not, is already done). Only meaningful when into directives were present.
 			if (hasWiring) {
 				wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
+				wireIntoInfoRefs(cwd, clean, intoInfoRefs, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
 			}
 			return {
 				item: readTask(cwd, clean) ?? newItem,

@@ -885,6 +885,47 @@ describe("struct_version + into_* wiring", () => {
     ).toThrow(/kind "info" cannot declare into_deps/);
   });
 
+  it("into_info_ref wires an info node into a consumer's info_refs, bumping the consumer's content version", () => {
+    createTask({ id: "consumer" });
+    // info node commits and declares which existing tasks consume it
+    draft(`draft/${ME}/audit.toml`, `id = 'audit'\ntitle = 'audit'\nkind = 'info'\ninto_info_ref = [ 'consumer' ]`);
+    const r = commitTask(CWD, "audit", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 });
+    expect(r.created).toBe(true);
+    expect(r.changed_items).toContain("wiring");
+    const info = readTask(CWD, "audit")!;
+    // the relation lives on the CONSUMER only — info metadata carries no into_info_ref
+    expect(info.info_refs).toEqual([]);
+    const consumer = readTask(CWD, "consumer")!;
+    expect(consumer.info_refs).toEqual(["audit"]);
+    // info_refs is a CONTENT field → the consumer's content version bumps
+    expect(consumer.version).toBe(2);
+    expect(consumer.struct_version).toBe(1);
+    // the description true copy was rewritten with the bumped version frontmatter
+    expect(readFileSync(taskDescriptionPath(CWD, "consumer"), "utf-8")).toContain("version: 2");
+  });
+
+  it("into_info_ref requires an info node — a task/module cannot declare it", () => {
+    createTask({ id: "consumer" });
+    draft(`draft/${ME}/t.toml`, `id = 't'\ntitle = 't'\ninto_info_ref = [ 'consumer' ]`);
+    expect(() =>
+      commitTask(CWD, "t", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/into_info_ref is only valid for kind "info"/);
+  });
+
+  it("into_info_ref requires an existing consumer; info/info self targets are rejected", () => {
+    draft(`draft/${ME}/i1.toml`, `id = 'i1'\ntitle = 'i1'\nkind = 'info'\ninto_info_ref = [ 'missing' ]`);
+    expect(() =>
+      commitTask(CWD, "i1", { scope: "all", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/into_info_ref target "missing" does not exist/);
+    // an info node cannot be a consumer (info references no other info)
+    createTask({ id: "i2", kind: "info" });
+    createTask({ id: "i3", kind: "info" });
+    draft(`draft/${ME}/i3.toml`, `title = 'i3'\ninto_info_ref = [ 'i2' ]`);
+    expect(() =>
+      commitTask(CWD, "i3", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 }),
+    ).toThrow(/is a shared information node/);
+  });
+
   it("wiring an existing node into a parent (update path) works and does not bump the child content version", () => {
     createTask({ id: "mod", kind: "module" });
     createTask({ id: "node1" });
