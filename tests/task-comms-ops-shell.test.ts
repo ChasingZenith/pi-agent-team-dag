@@ -102,7 +102,9 @@ function makeRuntime(
       started_at: new Date().toISOString(),
     },
     messaging: {
-      send: async (_identity: unknown, target: string, body: string, opts: any) => {
+      // New factory signature — the identity is closed over by the instance,
+      // so send carries (target, body, opts) only.
+      send: async (target: string, body: string, opts: any) => {
         sent.push({ target, body, opts });
         return {
           msg_id: "msg-1234567890abcdef",

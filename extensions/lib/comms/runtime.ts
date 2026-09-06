@@ -23,24 +23,37 @@
  */
 
 import type { Identity, StoredProfile } from "./protocol";
-import type * as messaging from "./messaging";
+import type { MessagingInstance } from "./messaging";
+import type { RegistryInstance } from "./registry";
 
 /** Event channel carrying the shared comms runtime handle (CommsRuntime). */
 export const COMMS_RUNTIME_EVENT = "comms:runtime";
 
 /**
  * The comms runtime shared across extension instances: the comms identity
- * plus the messaging module (send, pending replies, reminders, connection).
- * The identity object is mutated in place by registry.register on a
- * name-collision suffix, and consumers hold the reference — so the handle
- * always reflects the final name, exactly as if it were read late.
+ * plus the live factory instances (messaging, registry). The identity object
+ * is mutated in place by registry.register on a name-collision suffix
+ * (register returns void), and consumers hold the reference — so the handle
+ * always reflects the final name, exactly as if it were read late. register
+ * asserts this in-place contract at its own end.
+ *
+ * Emit contract: the event fires TWICE per session_start — once BEFORE the
+ * NATS connect with a DEGRADED handle (messaging/registry null, updateProfile
+ * throws "comms: not connected") so consumers see the identity immediately and
+ * on any boot failure, and once after the instances are built with the FULL
+ * handle under the same event. Consumers MUST null-guard .messaging/.registry.
  */
 export interface CommsRuntime {
 	identity: Identity;
-	messaging: typeof messaging;
+	/** Null until the boot has built the messaging factory (NATS connected,
+	 *  name registered). Null on every boot-failure path. */
+	messaging: MessagingInstance | null;
+	/** Null until the boot has built the registry factory (same lifecycle). */
+	registry: RegistryInstance | null;
 	/** Update own comms profile — the SAME implementation as the
 	 *  comms_update_profile tool (immediate KV put carrying live metrics).
 	 *  task-comms-ops uses it to auto-track current_task from the task
-	 *  lifecycle (task_start sets it, task_submit_report clears it). */
+	 *  lifecycle (task_start sets it, task_submit_report clears it).
+	 *  Throws "comms: not connected" on a degraded handle. */
 	updateProfile: (patch: { current_task?: string | undefined }) => Promise<StoredProfile>;
 }

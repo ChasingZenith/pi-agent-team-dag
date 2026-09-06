@@ -10,8 +10,10 @@
  *
  * Run: bun test tests/resolve-name.test.ts
  */
-import { describe, expect, test, mock } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { Identity } from "../extensions/lib/comms/protocol";
+import { createRegistry } from "../extensions/lib/comms/registry";
+import { createMessaging } from "../extensions/lib/comms/messaging";
 
 // ━━ fake KV (resolve / send only touch get; the not-found and unreachable
 //    branches both fail BEFORE publish/history, so a minimal surface suffices)
@@ -52,16 +54,29 @@ class FakeKv {
 }
 
 const kv = new FakeKv();
-mock.module("../extensions/lib/comms/nats.ts", () => ({
-	getKvProfiles: () => kv,
-	// The not-found / unreachable branches of send() throw BEFORE publish and
-	// history, so these are never called; stubs satisfy the module import.
-	getJs: () => { throw new Error("not reached"); },
-	getJsm: () => { throw new Error("not reached"); },
-	getKvHistory: () => { throw new Error("not reached"); },
-}));
 
-const { send } = await import("../extensions/lib/comms/messaging");
+// Factory construction with the fake KV injected directly — no module mock.
+const registry = createRegistry({
+	offlineAfterMs: 60_000,
+	reclaimAfterMs: 10 * 60_000,
+	kvProfiles: () => kv as any,
+});
+const messaging = createMessaging({
+	identity: { name: "tester", subnet: "test", cwd: "/tmp", model: "test", started_at: new Date().toISOString() },
+	subnet: "test",
+	messageTtlMs: 30 * 60_000,
+	js: () => { throw new Error("not reached"); },
+	jsm: () => { throw new Error("not reached"); },
+	registry,
+	history: {
+		recordOutbound: async () => {},
+		recordInbound: async () => {},
+		recordReplyIntoOut: async () => {},
+		deleteOutbound: async () => {},
+		getOutbound: async () => null,
+		getInbound: async () => null,
+	},
+});
 
 const identity: Identity = {
 	name: "tester",
@@ -87,19 +102,19 @@ function profile(name: string): Record<string, unknown> {
 describe("send → resolveName error semantics", () => {
 	test("genuine unclaimed name reports 'target not found'", async () => {
 		// No profile for "ghost" — resolveName returns null (key miss).
-		await expect(send(identity, "ghost", "hi")).rejects.toThrow(/target not found/);
+		await expect(messaging.send("ghost", "hi")).rejects.toThrow(/target not found/);
 	});
 
 	test("DEL tombstone reports 'target not found' (unclaimed, not infra)", async () => {
 		kv.setTombstone("a.test.dead");
-		await expect(send(identity, "dead", "hi")).rejects.toThrow(/target not found/);
+		await expect(messaging.send("dead", "hi")).rejects.toThrow(/target not found/);
 	});
 
 	test("kv.get rejecting (NATS down) reports 'cannot reach the registry', NOT 'target not found'", async () => {
 		// A real peer exists, but the registry read fails (infra outage).
 		kv.put("a.test.real", JSON.stringify(profile("real")));
 		kv.failGet = 1;
-		await expect(send(identity, "real", "hi")).rejects.toThrow(/cannot reach the registry/);
-		await expect(send(identity, "real", "hi")).rejects.not.toThrow(/target not found/);
+		await expect(messaging.send("real", "hi")).rejects.toThrow(/cannot reach the registry/);
+		await expect(messaging.send("real", "hi")).rejects.not.toThrow(/target not found/);
 	});
 });

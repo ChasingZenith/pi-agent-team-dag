@@ -62,12 +62,11 @@ import { Type } from "@sinclair/typebox";
 import type { DeliverAsValue, Identity, InboundContext } from "./lib/comms/protocol.ts";
 import { nowIso, ulid, sanitizeAgentName } from "./lib/comms/protocol.ts";
 import { readConfig, readFrontmatterFromArgv } from "./lib/comms/config.ts";
-import { connectNats, ensureStream, closeNats } from "./lib/comms/nats.ts";
-import * as registry from "./lib/comms/registry.ts";
-import * as messaging from "./lib/comms/messaging.ts";
-import type { ActiveReminder } from "./lib/comms/messaging.ts";
-import { setAudit, audit } from "./lib/comms/audit.ts";
-import * as history from "./lib/comms/history.ts";
+import { connectNats, ensureStream, closeNats, getJs, getJsm, getKvProfiles, getKvHistory } from "./lib/comms/nats.ts";
+import { createRegistry, type RegistryInstance } from "./lib/comms/registry.ts";
+import { createMessaging, type ActiveReminder, type MessagingInstance } from "./lib/comms/messaging.ts";
+import { createHistory, flatten, type HistoryInstance } from "./lib/comms/history.ts";
+import type { AuditFn } from "./lib/comms/audit.ts";
 import { COMMS_RUNTIME_EVENT } from "./lib/comms/runtime";
 import { displayName, shouldOwnName } from "./lib/comms/session-name";
 import { abbreviateModel, statusDot } from "./lib/comms/ui/display.ts";
@@ -75,12 +74,13 @@ import { abbreviateModel, statusDot } from "./lib/comms/ui/display.ts";
 // ━━ Identity flags ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Module-level comms identity — set by session_start; the closure reassigns
- * it (registry.register's in-place name-collision suffix). Shared with sibling
- * extensions via pi's event bus (COMMS_RUNTIME_EVENT) — consumers hold the
- * object reference, so the reassignment is visible to them too (each -e
- * extension is its own module graph; pi.events is the only cross-instance
- * channel).
+ * Module-level comms identity — set by session_start; registry.register
+ * mutates it IN PLACE on a name-collision suffix (register returns void, so
+ * there is no reassignment here — the same object reference is passed through).
+ * Shared with sibling extensions via pi's event bus (COMMS_RUNTIME_EVENT) —
+ * consumers hold the object reference, so the mutation is visible to them too
+ * (each -e extension is its own module graph; pi.events is the only
+ * cross-instance channel).
  */
 let identity: Identity | null = null;
 
@@ -141,15 +141,26 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ━━ Module state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	// (identity itself lives at module scope — it reaches sibling extensions
-	// through the pi.events bus (COMMS_RUNTIME_EVENT, see the session_start
-	// publish below); the closure references it directly.)
 
 	let currentCtx: ExtensionContext | null = null;
 	let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 	let uiRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let shuttingDown = false;
 	let bootFailed = false;
+
+	let registryInst: RegistryInstance | null = null;
+	let messagingInst: MessagingInstance | null = null;
+	let historyInst: HistoryInstance | null = null;
+
+	/** Local audit writer — passed INTO the factories (no global sink); also
+	 *  used directly for entry-level audit events. Never throws. */
+	const audit: AuditFn = (event, extra) => {
+		try {
+			pi.appendEntry("comms-log", { event, ts: nowIso(), ...extra });
+		} catch {
+			// best-effort
+		}
+	};
 
 	// UI re-render interval: well below the default offline threshold (60 s)
 	// so derived peer statuses surface within ~75 s of a peer going away,
@@ -168,8 +179,7 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function peerList(): string[] {
 		if (!identity) return [];
-		return registry
-			.getPeers()
+		return (registryInst?.getPeers() ?? [])
 			.filter((p) => p.name !== identity!.name)
 			.map((p) => `${statusDot(p.status)} ${p.name}`);
 	}
@@ -223,9 +233,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
-		setAudit((event, extra) => {
-			pi.appendEntry("comms-log", { event, ts: nowIso(), ...extra });
-		});
 
 		// Runtime config + identity (CLI > frontmatter > defaults).
 		const cfg = readConfig(pi);
@@ -248,13 +255,15 @@ export default function (pi: ExtensionAPI) {
 			current_task: undefined,
 		};
 
-		// Publish the comms runtime (identity + messaging + updateProfile) on
-		// pi's shared event bus for sibling extensions in OTHER module
-		// instances (pi isolates each -e extension's module graph). Fires
-		// before the NATS connect, so a failed boot still publishes the handle
-		// — consumers see the identity while messaging.send throws
-		// "comms: not connected".
-		pi.events.emit(COMMS_RUNTIME_EVENT, { identity, messaging, updateProfile });
+		// Degraded handle first (messaging/registry null): consumers see the
+		// identity immediately and on any boot failure; the full handle is
+		// re-emitted after register. Consumers null-guard .messaging/.registry.
+		pi.events.emit(COMMS_RUNTIME_EVENT, {
+			identity,
+			messaging: null,
+			registry: null,
+			updateProfile,
+		});
 
 		// Connect to NATS.
 		try {
@@ -279,14 +288,16 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Registry tuning: display-offline threshold (fast convergence, cheap to
-		// be wrong) + name-reclaim threshold (conservative — a steal must never
-		// fire on a merely slow agent).
-		registry.setRegistryTuning(cfg.offlineAfterMs, cfg.reclaimAfterMs);
-
-		// Register (name claim + initial profile).
+		// On collision the suffix arrives via in-place mutation of `identity`
+		// (register returns void) — the emitted handle stays valid.
+		registryInst = createRegistry({
+			offlineAfterMs: cfg.offlineAfterMs,
+			reclaimAfterMs: cfg.reclaimAfterMs,
+			kvProfiles: () => getKvProfiles(),
+			audit,
+		});
 		try {
-			identity = await registry.register(identity, {
+			await registryInst.register(identity, {
 				context_used_pct: 0,
 				model: ctx.model?.id ?? identity.model,
 			});
@@ -304,13 +315,14 @@ export default function (pi: ExtensionAPI) {
 		// (shouldOwnName).
 		applySessionName(identity.current_task);
 
-		// Inbound injector (pi.sendMessage wrapper) + consolidated reminder
-		//    injector + messaging config + consumers. Every inbound message is
-		//    injected immediately on arrival as its own turn — single-message
-		//    framing (buildInboundPrompt), deliverAs is the message's own mode
-		//    (a missing mode defaults to "steer"; the mode is never promoted). The
-		//    messaging layer awaits the returned promise and acks (or leaves
-		//    unacked for redelivery) once it settles.
+		// Inbound injector (pi.sendMessage wrapper) + the consolidated reminder
+		//    injector (a createMessaging CONSTRUCTOR arg) + history/messaging
+		//    instance construction + consumers. Every inbound message is injected
+		//    immediately on arrival as its own turn — single-message framing
+		//    (buildInboundPrompt), deliverAs is the message's own mode (a missing
+		//    mode defaults to "steer"; the mode is never promoted). The messaging
+		//    layer awaits the returned promise and acks (or leaves unacked for
+		//    redelivery) once it settles.
 		const injector = async (inbound: InboundContext) => {
 			if (!pi.sendMessage) throw new Error("no session to inject into");
 			return pi.sendMessage(
@@ -323,7 +335,7 @@ export default function (pi: ExtensionAPI) {
 				{ deliverAs: inbound.deliver_as ?? "steer", triggerTurn: true },
 			);
 		};
-		messaging.setRemindInjector((pending: ActiveReminder[]) => {
+		const remindInjector = (pending: ActiveReminder[]) => {
 			if (!pi.sendMessage) return; // is it really needed?
 			const lines = pending.map((x) => {
 				const base =
@@ -355,18 +367,38 @@ export default function (pi: ExtensionAPI) {
 				},
 				{ deliverAs: "followUp", triggerTurn: true },
 			);
+		};
+
+		historyInst = createHistory({
+			messageTtlMs: cfg.messageTtlMs,
+			kvHistory: () => getKvHistory(),
+			audit,
 		});
-		messaging.setMessageTtlMs(cfg.messageTtlMs);
-		history.setHistoryMessageTtlMs(cfg.messageTtlMs); // same TTL drives outbox expired status
-		await messaging.startConsumers(identity, injector);
+		messagingInst = createMessaging({
+			identity,
+			subnet: cfg.subnet,
+			messageTtlMs: cfg.messageTtlMs,
+			js: () => getJs(),
+			jsm: () => getJsm(),
+			registry: registryInst,
+			history: historyInst,
+			remindInjector,
+			audit,
+		});
+
+		// Re-emit the runtime handle: the full one replaces the degraded
+		// pre-connect payload under the same event.
+		pi.events.emit(COMMS_RUNTIME_EVENT, { identity, messaging: messagingInst, registry: registryInst, updateProfile });
+
+		await messagingInst!.startConsumers(injector);
 
 		// Watch the registry (peer cache), re-rendering the footer status and
 		// the belowEditor peers widget whenever the peer set changes
 		// (peers join / leave / go offline). The widget word-wraps at the
 		// terminal width, so all peers stay visible even in a narrow window.
-		// The watch loop self-heals after NATS outages (registry.startWatch).
-		registry.startWatch(identity.subnet);
-		registry.setCacheChangeListener(refreshPeersUi);
+		// The watch loop self-heals after NATS outages.
+		registryInst.startWatch(identity.subnet);
+		registryInst.onCacheChange(refreshPeersUi);
 
 		// Status + peers widget (initial render).
 		refreshPeersUi();
@@ -376,7 +408,7 @@ export default function (pi: ExtensionAPI) {
 			if (!identity || shuttingDown) return;
 			const ctxNow = currentCtx;
 			const pct = Math.round(ctxNow?.getContextUsage()?.percent ?? 0);
-			registry.heartbeat(identity, {
+			registryInst!.heartbeat(identity, {
 				context_used_pct: pct,
 				model: ctxNow?.model?.id ?? identity.model,
 			}).catch((err) => {
@@ -440,7 +472,8 @@ export default function (pi: ExtensionAPI) {
 	 * name follows the profile (applySessionName).
 	 */
 	const updateProfile = async (patch: { current_task?: string | undefined }) => {
-		const stored = await registry.updateOwnProfile(identity!, patch, {
+		if (!registryInst) throw new Error("comms: not connected");
+		const stored = await registryInst.updateOwnProfile(identity!, patch, {
 			context_used_pct: Math.round(currentCtx?.getContextUsage()?.percent ?? 0),
 			model: currentCtx?.model?.id ?? identity!.model,
 		});
@@ -459,7 +492,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_callId, _params) {
 			if (!identity) throw new Error("comms not initialised");
 			const selfIdentity = identity; // narrowed const: usable inside the .map() closure below
-			const peers = registry.getPeers();
+			const peers = registryInst?.getPeers() ?? [];
 
 			const lines = peers.length === 0
 				? "No peer agents found."
@@ -531,7 +564,7 @@ export default function (pi: ExtensionAPI) {
 			const errors: Array<{ target: string; error: string }> = [];
 			for (const t of targets) {
 				try {
-					const res = await messaging.send(identity, t, p.message, { replyToMsgId, remindS, deliverAs });
+					const res = await messagingInst!.send(t, p.message, { replyToMsgId, remindS, deliverAs });
 					results.push({ target: t, msg_id: res.msg_id, target_status: res.target_status });
 				} catch (err: any) {
 					errors.push({ target: t, error: err?.message ?? String(err) });
@@ -606,17 +639,17 @@ ${a.message}`);
 			// persisted record (survives restarts); the live reminder table only
 			// overlays the remind marker on top.
 			if (!msgId) {
-				const { records, total } = await history.listOutbound(self.subnet, self.name, limit);
+				const { records, total } = await historyInst!.listOutbound(self.subnet, self.name, limit);
 				const live = new Map<string, ActiveReminder>();
-				for (const x of messaging.listActiveReminders()) live.set(x.msg_id, x);
+				for (const x of messagingInst!.listActiveReminders()) live.set(x.msg_id, x);
 
 				const lines: string[] = [];
 				for (const rec of records) {
 					const rm = live.get(rec.msg_id);
-					const s = history.deriveOutStatus(rec);
+					const s = historyInst!.deriveOutStatus(rec);
 					const status = (s.reason ? `ended/${s.reason}` : s.state) +
 						(rm ? ` · remind ${fmtMs(rm.remind_s * 1000)}` : "");
-					lines.push(`  ${rec.msg_id} to ${rec.target} — ${status} — "${history.flatten(rec.message)}"`);
+					lines.push(`  ${rec.msg_id} to ${rec.target} — ${status} — "${flatten(rec.message)}"`);
 				}
 				// Active reminders on our sends with no history record yet (sent
 				// before this session's first successful write) — placeholder row.
@@ -636,15 +669,15 @@ ${a.message}`);
 
 			// Detail mode: status derives from the persisted record (survives
 			// restarts); the live reminder table only overlays the remind marker.
-			const rec = await history.getOutbound(self.subnet, self.name, msgId);
+			const rec = await historyInst!.getOutbound(self.subnet, self.name, msgId);
 			if (!rec) {
 				return {
 					content: [{ type: "text" as const, text: "comms_outbox: unknown msg_id — no history record (never sent, or evicted from the history bucket)" }],
 					details: undefined,
 				};
 			}
-			const s = history.deriveOutStatus(rec);
-			const remindS = messaging.getActiveRemindS(msgId) ?? 0;
+			const s = historyInst!.deriveOutStatus(rec);
+			const remindS = messagingInst!.getActiveRemindS(msgId) ?? 0;
 			const statusLabel = s.reason ? `${s.state}/${s.reason}` : s.state;
 			let text = `comms_outbox: ${msgId} to ${rec.target} — ${statusLabel}`;
 			text += `\nsent at ${new Date(rec.ts).toISOString()}`;
@@ -697,7 +730,7 @@ ${a.message}`);
 			// overlay the live table exactly like outbox — reminders can be armed
 			// on received messages too.
 			if (!msgId) {
-				const { records, total } = await history.listInbound(self.subnet, self.name, limit);
+				const { records, total } = await historyInst!.listInbound(self.subnet, self.name, limit);
 				if (records.length === 0) {
 					return {
 						content: [{ type: "text" as const, text: "comms_inbox: no received messages recorded" }],
@@ -705,7 +738,7 @@ ${a.message}`);
 					};
 				}
 				const live = new Map<string, ActiveReminder>();
-				for (const x of messaging.listActiveReminders()) live.set(x.msg_id, x);
+				for (const x of messagingInst!.listActiveReminders()) live.set(x.msg_id, x);
 
 				const lines: string[] = [];
 				for (const rec of records) {
@@ -714,7 +747,7 @@ ${a.message}`);
 						`  ${rec.msg_id} from ${rec.sender}` +
 						(rec.reply_to_msg_id ? ` (reply to ${rec.reply_to_msg_id})` : "") +
 						(rm ? ` · remind ${fmtMs(rm.remind_s * 1000)}` : "") +
-						` — "${history.flatten(rec.message)}"`);
+						` — "${flatten(rec.message)}"`);
 				}
 				// Active reminders on received messages with no history record yet
 				// (before this session's first successful write) — placeholder row,
@@ -739,7 +772,7 @@ ${a.message}`);
 				};
 			}
 
-			const rec = await history.getInbound(self.subnet, self.name, msgId);
+			const rec = await historyInst!.getInbound(self.subnet, self.name, msgId);
 			if (!rec) {
 				return {
 					content: [{ type: "text" as const, text: "comms_inbox: unknown msg_id — no history record (never received, or evicted from the history bucket)" }],
@@ -748,10 +781,10 @@ ${a.message}`);
 			}
 			let text = `comms_inbox: ${msgId} from ${rec.sender}`;
 			if (rec.reply_to_msg_id) {
-				const answered = await history.getOutbound(self.subnet, self.name, rec.reply_to_msg_id);
+				const answered = await historyInst!.getOutbound(self.subnet, self.name, rec.reply_to_msg_id);
 				text += ` (reply to ${rec.reply_to_msg_id}${answered ? ", your send" : ""})`;
 			}
-			const remindS = messaging.getActiveRemindS(msgId) ?? 0;
+			const remindS = messagingInst!.getActiveRemindS(msgId) ?? 0;
 			if (remindS > 0) text += ` · remind ${fmtMs(remindS * 1000)}`;
 			text += `\nreceived at ${new Date(rec.ts).toISOString()}`;
 			text += `\nmessage: ${rec.message}`;
@@ -793,7 +826,7 @@ pi.registerTool({
 			if (!identity) throw new Error("comms not initialised");
 			const msgId = params.msg_id;
 			const remindS = Math.floor(params.remind_s);
-			const res = await messaging.remind(identity, msgId, remindS);
+			const res = await messagingInst!.remind(msgId, remindS);
 			const outcome = res.outcome;
 			const text = outcome === "reminded"
 				? `${msgId} reminded every ${remindS} s`
@@ -886,19 +919,19 @@ pi.registerTool({
 			uiRefreshTimer = null;
 		}
 
-		messaging.setMessagingShuttingDown(true);
-		messaging.clearAllReminders();
+		messagingInst?.setShuttingDown(true);
+		messagingInst?.clearAllReminders();
 
-		if (identity && !bootFailed) {
-			await registry.clearOwn(identity);
+		if (identity && !bootFailed && registryInst) {
+			await registryInst.clearOwn(identity);
 		}
 
 		if (identity) {
 			audit("shutdown", { name: identity.name, started_at: identity.started_at });
 		}
 
-		registry.stopWatch();
-		registry.setCacheChangeListener(null);
+		registryInst?.stopWatch();
+		registryInst?.onCacheChange(null);
 		if (currentCtx?.hasUI) {
 			try { currentCtx.ui.setStatus("comms", ""); } catch { /* ignore */ }
 			try { currentCtx.ui.setWidget("comms-peers", undefined); } catch { /* ignore */ }

@@ -11,8 +11,11 @@
  *   fork-probe      F-1：fork spawn 集成 — 父 fixture → fork 文件 → 真实 pi 子进程加载
  */
 import { executeAgentSpawn, executeAgentSpawnByRole, executeAgentKill, listRoleNames } from "../../extensions/agent-lifecycle/index.ts";
-import * as registry from "../../extensions/lib/comms/registry.ts";
-import * as messaging from "../../extensions/lib/comms/messaging.ts";
+import type { RegistryInstance } from "../../extensions/lib/comms/registry.ts";
+import { createRegistry } from "../../extensions/lib/comms/registry.ts";
+import type { MessagingInstance } from "../../extensions/lib/comms/messaging.ts";
+import { createMessaging } from "../../extensions/lib/comms/messaging.ts";
+import { createHistory } from "../../extensions/lib/comms/history.ts";
 import * as nats from "../../extensions/lib/comms/nats.ts";
 import { readSecretFile, type RuntimeConfig } from "../../extensions/lib/comms/config.ts";
 import {
@@ -243,6 +246,31 @@ async function kvGet(subnet: string, name: string): Promise<void> {
 
 // ━━ wake：给某 agent 发消息（C-5 唤醒验证） ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+// Factory instances built per connection (each helper connects on its own;
+// the factories take lazy accessors, so a fresh instance per connect is fine).
+function registryFor(): RegistryInstance {
+  return createRegistry({
+    offlineAfterMs: 60_000,
+    reclaimAfterMs: 10 * 60_000,
+    kvProfiles: () => nats.getKvProfiles(),
+  });
+}
+
+function messagingFor(identity: Identity): MessagingInstance {
+  return createMessaging({
+    identity,
+    subnet: identity.subnet,
+    messageTtlMs: 1_800_000,
+    js: () => { throw new Error("wake harness does not consume prompts"); },
+    jsm: () => { throw new Error("wake harness does not manage consumers"); },
+    registry: registryFor(),
+    history: createHistory({
+      messageTtlMs: 1_800_000,
+      kvHistory: () => nats.getKvHistory(),
+    }),
+  });
+}
+
 async function wake(name: string, message: string): Promise<void> {
   const cfg = makeConfig("test-c");
   await nats.connectNats(cfg);
@@ -253,7 +281,7 @@ async function wake(name: string, message: string): Promise<void> {
     model: "deepseek/deepseek-v4-flash",
     started_at: new Date().toISOString(),
   };
-  const r = await messaging.send(identity, name, message);
+  const r = await messagingFor(identity).send(name, message);
   console.log(`[wake] sent to ${name}: msg_id=${r.msg_id} target_status=${r.target_status}`);
   await sleep(500);
   await nats.closeNats();
@@ -271,12 +299,12 @@ async function noreplyHarness(subnet: string): Promise<void> {
     model: "deepseek/deepseek-v4-flash",
     started_at: new Date().toISOString(),
   };
-  const reg = await registry.register(identity, { context_used_pct: 5, model: identity.model });
-  console.log(`[noreply-harness] registered as ${reg.name}@${subnet}`);
+  await registryFor().register(identity, { context_used_pct: 5, model: identity.model });
+  console.log(`[noreply-harness] registered as ${identity.name}@${subnet}`);
   let beat = 0;
   const timer = setInterval(async () => {
     try {
-      await registry.heartbeat(identity, { context_used_pct: 5, model: identity.model });
+      await registryFor().heartbeat(identity, { context_used_pct: 5, model: identity.model });
       beat++;
       if (beat % 6 === 0) console.log(`[noreply-harness] heartbeat #${beat}`);
     } catch (e) {
@@ -285,7 +313,7 @@ async function noreplyHarness(subnet: string): Promise<void> {
   }, 5000);
   const shutdown = async () => {
     clearInterval(timer);
-    try { await registry.clearOwn(identity); } catch { /* best effort */ }
+    try { await registryFor().clearOwn(identity); } catch { /* best effort */ }
     await nats.closeNats();
     process.exit(0);
   };

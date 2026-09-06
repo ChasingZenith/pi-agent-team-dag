@@ -16,8 +16,15 @@ import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { executeAgentSpawn } from "../../extensions/agent-lifecycle/index.ts";
-import * as registry from "../../extensions/lib/comms/registry.ts";
-import * as messaging from "../../extensions/lib/comms/messaging.ts";
+import { createRegistry, type RegistryInstance } from "../../extensions/lib/comms/registry.ts";
+import { createMessaging, type ActiveReminder, type MessagingInstance } from "../../extensions/lib/comms/messaging.ts";
+import { createHistory } from "../../extensions/lib/comms/history.ts";
+
+// Module-level factory instances, assigned in main() after the NATS connect
+// (the e2e flow needs the tuned registry + the harness-identity messaging
+// instance; all run* helpers read these bindings).
+let registry: RegistryInstance;
+let messaging: MessagingInstance;
 import {
   statusFromLastSeen,
   nowIso,
@@ -78,15 +85,16 @@ async function dumpKv(): Promise<Record<string, unknown>> {
 }
 
 // ━━ B-6: remind scheduler (consolidated injection, stop stops it) ━━━━━━━━━━
+// The reminder injector is a createMessaging CONSTRUCTOR arg now (no
+// setRemindInjector setter) — the capture array is wired at instance
+// construction in main(), and B-6 asserts on it.
+const b6Captured: { t: number; pending: ActiveReminder[] }[] = [];
+
 async function runB6(harnessId: any): Promise<void> {
-  const captured: { t: number; pending: any[] }[] = [];
-  messaging.setRemindInjector((pending: messaging.ActiveReminder[]) => {
-    captured.push({ t: Date.now(), pending: pending as any });
-    log(`B-6 injector fired: ${pending.length} active — ${pending.map((p) => p.msg_id).join(",")}`);
-  });
+  const captured = b6Captured;
 
   const t0 = Date.now();
-  const r1 = await messaging.send(harnessId, "b-noreply", "hi", { remindS: 1 });
+  const r1 = await messaging.send("b-noreply", "hi", { remindS: 1 });
   check("B-6a", typeof r1.msg_id === "string" && r1.msg_id.length > 0, `send#1 ok msg_id=${r1.msg_id}`);
 
   // ≤40s: first consolidated injection containing msg_id
@@ -101,7 +109,7 @@ async function runB6(harnessId: any): Promise<void> {
   // second active send → next tick must still be exactly ONE injection, merged
   const before = captured.length;
   const lastT = before > 0 ? captured[before - 1].t : 0; // strictly AFTER the first injection
-  const r2 = await messaging.send(harnessId, "b-noreply", "hi again", { remindS: 1 });
+  const r2 = await messaging.send("b-noreply", "hi again", { remindS: 1 });
   await waitFor(
     () => (captured.length > before ? captured[captured.length - 1] : null),
     { timeoutMs: 40_000, stepMs: 500, label: "B-6 second injection" },
@@ -116,8 +124,8 @@ async function runB6(harnessId: any): Promise<void> {
   );
 
   // stop both → no further injections within one full tick (~35s)
-  const d1 = await messaging.remind(harnessId, r1.msg_id, 0);
-  const d2 = await messaging.remind(harnessId, r2.msg_id, 0);
+  const d1 = await messaging.remind(r1.msg_id, 0);
+  const d2 = await messaging.remind(r2.msg_id, 0);
   check("B-6e", d1.outcome === "stopped" && d1.wasArmed, `stop r1 → ${d1.outcome}`);
   check("B-6f", d2.outcome === "stopped" && d2.wasArmed, `stop r2 → ${d2.outcome}`);
   const base = captured.length;
@@ -128,7 +136,8 @@ async function runB6(harnessId: any): Promise<void> {
 
 // ━━ B-9: subnet isolation negative test ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function runB9(harnessId: any): Promise<void> {
-  const dummy = await registry.register(mkIdentity("b-xdummy", "test-a"), {
+  const dummy = mkIdentity("b-xdummy", "test-a");
+  await registry.register(dummy, {
     context_used_pct: 0,
     model: "deepseek-v4-flash",
   });
@@ -137,7 +146,7 @@ async function runB9(harnessId: any): Promise<void> {
   let threw = false;
   let errMsg = "";
   try {
-    await messaging.send(harnessId, "b-xdummy", "hi from test-b");
+    await messaging.send("b-xdummy", "hi from test-b");
   } catch (err: any) {
     threw = true;
     errMsg = err?.message ?? String(err);
@@ -264,14 +273,39 @@ async function main(): Promise<void> {
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(60_000, 30_000);
-  messaging.setSubnet(SUBNET);
-  messaging.setMessageTtlMs(1_800_000);
+  registry = createRegistry({
+    offlineAfterMs: 60_000,
+    reclaimAfterMs: 30_000,
+    kvProfiles: () => getKvProfiles(),
+  });
   log(`connected to ${cfg.natsUrl}, stream COMMS_${SUBNET} ensured`);
 
   // Long-lived identities: b-harness + b-noreply, 10s heartbeats
-  const harnessId = await registry.register(mkIdentity("b-harness"), { context_used_pct: 0, model: "deepseek-v4-flash" });
-  const noReplyId = await registry.register(mkIdentity("b-noreply"), { context_used_pct: 0, model: "deepseek-v4-flash" });
+  const harnessId = mkIdentity("b-harness");
+  const noReplyId = mkIdentity("b-noreply");
+  await registry.register(harnessId, { context_used_pct: 0, model: "deepseek-v4-flash" });
+  await registry.register(noReplyId, { context_used_pct: 0, model: "deepseek-v4-flash" });
+  log(`registered b-harness=${harnessId.name} b-noreply=${noReplyId.name}`);
+
+  // Messaging instance closes over the harness identity BY REFERENCE (the
+  // factory contract); the B-6 reminder injector is a constructor arg.
+  const messagingInst = createMessaging({
+    identity: harnessId,
+    subnet: SUBNET,
+    messageTtlMs: 1_800_000,
+    js: () => { throw new Error("e2e harness does not consume prompts"); },
+    jsm: () => { throw new Error("e2e harness does not manage consumers"); },
+    registry,
+    history: createHistory({
+      messageTtlMs: 1_800_000,
+      kvHistory: () => getKvHistory(),
+    }),
+    remindInjector: (pending) => {
+      b6Captured.push({ t: Date.now(), pending });
+      log(`B-6 injector fired: ${pending.length} active — ${pending.map((p) => p.msg_id).join(",")}`);
+    },
+  });
+  messaging = messagingInst;
   log(`registered b-harness=${harnessId.name} b-noreply=${noReplyId.name}`);
 
   setInterval(() => {

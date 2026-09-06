@@ -141,6 +141,13 @@ function makeHarness() {
     on: (evt: string, h: (...args: any[]) => void) => {
       handlers.set(evt, [...(handlers.get(evt) ?? []), h]);
     },
+    // pi.events bus stub — lets the test inject a CommsRuntime via
+    // h.emit("comms:runtime", handle) to exercise the reminder defense.
+    events: {
+      on: (_evt: string, h: (...args: any[]) => void) => {
+        handlers.set("comms:runtime", [...(handlers.get("comms:runtime") ?? []), h]);
+      },
+    },
     appendEntry: (_name: string, data: any) => {
       entries.push(data);
     },
@@ -235,16 +242,28 @@ describe("extension event flow", () => {
     expect(h.shutdownCount()).toBe(0);
   });
 
-  it("consults listActiveReminders before shutting down — the internal defense", async () => {
-    // The active-reminder defense reads module-level comms state that cannot
-    // be seeded without a live NATS connection (covered by e2e). Here we
-    // verify the guard is wired: with zero active reminders a finished run
-    // proceeds to shutdown, and the extension still loads the real messaging
-    // module (so the guard is the live listActiveReminders, not a stub).
-    const messaging = await import("../extensions/lib/comms/messaging.ts");
+  it("auto-exit degrades safely without a comms runtime (no reminders seen)", async () => {
+    // The active-reminder defense reads the comms runtime handle
+    // (COMMS_RUNTIME_EVENT), not a module import — a direct import would bind
+    // this test file's own module-graph copy of messaging (split-brain). With
+    // NO comms runtime emitted, messaging is null → zero reminders → a
+    // finished run proceeds to shutdown.
     const h = load("1");
     h.run([user(), assistant("stop")]);
     expect(h.shutdownCount()).toBe(1);
-    expect(messaging.listActiveReminders()).toEqual([]);
+  });
+
+  it("stays alive when the comms runtime reports an active reminder", () => {
+    const h = load("1");
+    // A degraded-but-armed runtime: messaging instance reporting one active
+    // reminder — the finished run must NOT shut down.
+    h.emit("comms:runtime", {
+      identity: { name: "t" },
+      messaging: { listActiveReminders: () => [{ msg_id: "x" }] },
+      registry: null,
+      updateProfile: async () => { throw new Error("not connected"); },
+    });
+    h.run([user(), assistant("stop")]);
+    expect(h.shutdownCount()).toBe(0);
   });
 });

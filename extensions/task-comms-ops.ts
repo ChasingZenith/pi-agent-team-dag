@@ -128,6 +128,9 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** One message send through comms — the single access point to messaging.send.
+	 *  Requires the FULL runtime handle (messaging instance built — comms
+	 *  connected + registered); a degraded handle (boot failure) fails the
+	 *  call loudly, which is correct: a dispatch cannot go out without comms.
 	 *  Errors propagate: a failed dispatch must fail the tool call (announce
 	 *  catches per target for best-effort fan-out). */
 	async function sendMessage(
@@ -135,8 +138,10 @@ export default function (pi: ExtensionAPI) {
 		body: string,
 		remindS: number,
 		replyToMsgId?: string,
-	): Promise<Awaited<ReturnType<CommsRuntime["messaging"]["send"]>>> {
-		return commsRuntime().messaging.send(commsIdentity(), target, body, {
+	): Promise<Awaited<ReturnType<NonNullable<CommsRuntime["messaging"]>["send"]>>> {
+		const messaging = commsRuntime().messaging;
+		if (!messaging) throw new Error("task-comms-ops: comms messaging not available — comms boot failed or still connecting");
+		return messaging.send(target, body, {
 			remindS,
 			...(replyToMsgId ? { replyToMsgId } : {}),
 		});

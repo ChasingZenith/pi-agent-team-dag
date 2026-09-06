@@ -18,8 +18,10 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import * as registry from "../../extensions/lib/comms/registry.ts";
-import * as messaging from "../../extensions/lib/comms/messaging.ts";
+import { createRegistry } from "../../extensions/lib/comms/registry.ts";
+import { getKvProfiles } from "../../extensions/lib/comms/nats.ts";
+import { createMessaging } from "../../extensions/lib/comms/messaging.ts";
+import { createHistory } from "../../extensions/lib/comms/history.ts";
 import { nowIso, DEFAULT_NATS_URL, historyOutKey } from "../../extensions/lib/comms/protocol.ts";
 import {
   connectNats,
@@ -73,13 +75,31 @@ async function main(): Promise<void> {
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(60_000, 30_000);
-  messaging.setSubnet(SUBNET);
-  messaging.setMessageTtlMs(1_800_000);
+  const registry = createRegistry({
+    offlineAfterMs: 60_000,
+    reclaimAfterMs: 30_000,
+    kvProfiles: () => getKvProfiles(),
+  });
   log(`connected to ${cfg.natsUrl}, stream COMMS_${SUBNET} ensured`);
 
-  const harnessId = await registry.register(mkIdentity("d-harness"), { context_used_pct: 0, model: "deepseek-v4-flash" });
-  const recipientId = await registry.register(mkIdentity("d-recipient"), { context_used_pct: 0, model: "deepseek-v4-flash" });
+  const harnessId = mkIdentity("d-harness");
+  const recipientId = mkIdentity("d-recipient");
+  await registry.register(harnessId, { context_used_pct: 0, model: "deepseek-v4-flash" });
+  await registry.register(recipientId, { context_used_pct: 0, model: "deepseek-v4-flash" });
+  // Messaging instance closes over the harness identity BY REFERENCE (the
+  // factory contract) — sends use the registered (suffixed) name.
+  const messaging = createMessaging({
+    identity: harnessId,
+    subnet: SUBNET,
+    messageTtlMs: 1_800_000,
+    js: () => { throw new Error("e2e harness does not consume prompts"); },
+    jsm: () => { throw new Error("e2e harness does not manage consumers"); },
+    registry,
+    history: createHistory({
+      messageTtlMs: 1_800_000,
+      kvHistory: () => getKvHistory(),
+    }),
+  });
   log(`registered d-harness=${harnessId.name} d-recipient=${recipientId.name}`);
   registry.startWatch(SUBNET);
   await sleep(2_000);
@@ -96,7 +116,6 @@ async function main(): Promise<void> {
   // A task change notification is just a plain comms_send with no remind_s —
   // the sender composes the announcement body itself (no wrapper tool).
   const ff = await messaging.send(
-    harnessId,
     "d-recipient",
     `[Task Update] item-d1 v1 (active) — updated by d-harness\nChange: created\nRead: task_read(id="item-d1")`,
     { remindS: 0 },
@@ -117,10 +136,10 @@ async function main(): Promise<void> {
   }
 
   // ━━ D-2: control — remind_s-armed send IS registered ━━━━━━━━━━━━━━━━━━━━━━
-  const tracked = await messaging.send(harnessId, "d-recipient", "normal tracked send", { remindS: 60 });
+  const tracked = await messaging.send("d-recipient", "normal tracked send", { remindS: 60 });
   check("D-2a", messaging.listActiveReminders().some((p) => p.msg_id === tracked.msg_id),
     "remind_s=x → in the active reminder list (tracked behavior)");
-  const stopOutcome = await messaging.remind(harnessId, tracked.msg_id, 0);
+  const stopOutcome = await messaging.remind( tracked.msg_id, 0);
   check("D-2b", stopOutcome.outcome === "stopped", `remind(…, 0) stops it (got ${stopOutcome.outcome})`);
 
   // ━━ summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

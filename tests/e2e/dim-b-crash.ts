@@ -16,14 +16,14 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { executeAgentSpawn } from "../../extensions/agent-lifecycle/index.ts";
-import * as registry from "../../extensions/lib/comms/registry.ts";
+import { createRegistry } from "../../extensions/lib/comms/registry.ts";
+import { connectNats, ensureStream, getKvProfiles } from "../../extensions/lib/comms/nats.ts";
 import {
   statusFromLastSeen,
   nowIso,
   DEFAULT_NATS_URL,
   profileKey,
 } from "../../extensions/lib/comms/protocol.ts";
-import { connectNats, ensureStream, getKvProfiles } from "../../extensions/lib/comms/nats.ts";
 import { resolveToken, waitFor, sleep, readJsonl, kvRead } from "./helpers.ts";
 
 const ROOT = process.cwd();
@@ -52,7 +52,11 @@ async function main(): Promise<void> {
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
-  registry.setRegistryTuning(60_000, 30_000);
+  const registry = createRegistry({
+    offlineAfterMs: 60_000,
+    reclaimAfterMs: 30_000,
+    kvProfiles: () => getKvProfiles(),
+  });
 
   const fakeCtx = { model: { provider: "deepseek", id: "deepseek-v4-flash" }, thinkingLevel: "off" } as any;
   const spawnRes = await executeAgentSpawn(

@@ -27,6 +27,15 @@
  * spawner-declared simple one-shot tasks (agent_spawn autoExit: true); this
  * defense is the second layer.
  *
+ * The reminder state is read through the COMMS_RUNTIME_EVENT handle (the
+ * comms messaging FACTORY INSTANCE), never via a direct module import: pi
+ * loads each -e extension as its own module graph, so an import of
+ * lib/comms/messaging from here would bind a DIFFERENT instance whose
+ * reminders map is never populated by comms.ts — a silent split-brain that
+ * made this defense a no-op. Null messaging (comms not booted / boot
+ * failed) counts as "no reminders": there is no comms conversation to wait
+ * for.
+ *
  * Usage:
  *   PI_AGENT_AUTO_EXIT=1 pi -e extensions/auto-exit.ts -e extensions/comms.ts ...
  *
@@ -39,7 +48,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { listActiveReminders } from "./lib/comms/messaging";
+import { COMMS_RUNTIME_EVENT, type CommsRuntime } from "./lib/comms/runtime";
 
 // ---------------------------------------------------------------------------
 // Pure helpers — exported for testing
@@ -113,6 +122,13 @@ export default function (pi: ExtensionAPI) {
   const autoExit = process.env.PI_AGENT_AUTO_EXIT === "1";
   if (!autoExit) return; // Nothing to do — agent stays interactive.
 
+  // The comms runtime handle (see the split-brain note in the header). The
+  // full handle replaces the degraded one when comms finishes booting.
+  let comms: CommsRuntime | null = null;
+  pi.events.on(COMMS_RUNTIME_EVENT, (rt) => {
+    comms = rt as CommsRuntime;
+  });
+
   /** The last run's messages. agent_settled carries no messages, so they are
    *  recorded at every agent_end; runs happen sequentially, so by the time
    *  agent_settled fires this is always the FINAL run (any retry / compaction
@@ -133,8 +149,9 @@ export default function (pi: ExtensionAPI) {
     // for something external (a reply to a send, or a received message it
     // chose to follow up) — mid-conversation, not done. Never exit while any
     // active reminder exists (stopped / answered / expired reminders are
-    // already out of the list).
-    if (listActiveReminders().length > 0) return;
+    // already out of the list). Null messaging = comms never booted = no
+    // conversation to wait for.
+    if ((comms?.messaging?.listActiveReminders() ?? []).length > 0) return;
 
     // Record why we exit (visible in the session JSONL for later debugging).
     const error = findLatestAssistantError(lastRunMessages);

@@ -9,7 +9,8 @@
  *
  * Run: bun test tests/history-fold.test.ts
  */
-import { describe, expect, test, mock } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import { createHistory } from "../extensions/lib/comms/history";
 import type { Identity } from "../extensions/lib/comms/protocol";
 
 // ━━ fake KV (minimal surface history.ts actually uses) ━━━━━━━━━━━━━━━━━━━━━
@@ -82,14 +83,13 @@ class FakeKv {
 }
 
 const kv = new FakeKv();
-mock.module("../extensions/lib/comms/nats.ts", () => ({
-	getKvHistory: () => kv,
-	getKvProfiles: () => {
-		throw new Error("not used in this test");
-	},
-}));
 
-const { recordReplyIntoOut } = await import("../extensions/lib/comms/history");
+// Factory construction with the fake KV injected directly — no module mock.
+const history = createHistory({
+	messageTtlMs: 30 * 60_000,
+	kvHistory: () => kv as any,
+});
+const recordReplyIntoOut = history.recordReplyIntoOut.bind(history);
 
 const identity: Identity = {
 	name: "tester",
@@ -123,14 +123,14 @@ describe("recordReplyIntoOut (reply fold)", () => {
 	test("folds the reply into an existing out record via revision-checked update", async () => {
 		const msgId = "01FOLDTEST0001";
 		seedOut(msgId);
-		await recordReplyIntoOut(identity, msgId, reply);
+		await history.recordReplyIntoOut(identity, msgId, reply);
 		const rec = kv.json<any>(outKey(msgId));
 		expect(rec.reply).toEqual(reply);
 		expect(rec.message).toBe("hello"); // rest of the record intact
 	});
 
 	test("no-op (no write) when the out record does not exist", async () => {
-		await recordReplyIntoOut(identity, "01FOLDTEST0002", reply);
+		await history.recordReplyIntoOut(identity, "01FOLDTEST0002", reply);
 		expect(kv.value(outKey("01FOLDTEST0002"))).toBeUndefined();
 	});
 
@@ -139,15 +139,15 @@ describe("recordReplyIntoOut (reply fold)", () => {
 		seedOut(msgId);
 		// simulate deletion by replacing the entry with a DEL tombstone
 		kv.setTombstone(outKey(msgId));
-		await recordReplyIntoOut(identity, msgId, reply);
+		await history.recordReplyIntoOut(identity, msgId, reply);
 		expect(kv.json<any>(outKey(msgId))?.reply ?? "deleted").toBe("deleted");
 	});
 
 	test("is idempotent — redelivery overwrites the same reply value", async () => {
 		const msgId = "01FOLDTEST0004";
 		seedOut(msgId);
-		await recordReplyIntoOut(identity, msgId, reply);
-		await recordReplyIntoOut(identity, msgId, reply);
+		await history.recordReplyIntoOut(identity, msgId, reply);
+		await history.recordReplyIntoOut(identity, msgId, reply);
 		expect(kv.json<any>(outKey(msgId)).reply).toEqual(reply);
 	});
 
@@ -155,7 +155,7 @@ describe("recordReplyIntoOut (reply fold)", () => {
 		const msgId = "01FOLDTEST0005";
 		seedOut(msgId);
 		kv.conflictUpdate = 2; // first two updates lose the revision race
-		await recordReplyIntoOut(identity, msgId, reply);
+		await history.recordReplyIntoOut(identity, msgId, reply);
 		expect(kv.json<any>(outKey(msgId)).reply).toEqual(reply);
 	});
 
@@ -164,7 +164,7 @@ describe("recordReplyIntoOut (reply fold)", () => {
 		seedOut(msgId);
 		kv.failGet = 2;
 		kv.failUpdate = 1;
-		await recordReplyIntoOut(identity, msgId, reply);
+		await history.recordReplyIntoOut(identity, msgId, reply);
 		expect(kv.json<any>(outKey(msgId)).reply).toEqual(reply);
 	});
 
@@ -172,7 +172,7 @@ describe("recordReplyIntoOut (reply fold)", () => {
 		const msgId = "01FOLDTEST0007";
 		seedOut(msgId);
 		kv.failGet = 100; // every attempt fails
-		await recordReplyIntoOut(identity, msgId, reply); // must not throw
+		await history.recordReplyIntoOut(identity, msgId, reply); // must not throw
 		expect(kv.json<any>(outKey(msgId))?.reply).toBeUndefined();
 	});
 
@@ -180,6 +180,6 @@ describe("recordReplyIntoOut (reply fold)", () => {
 		const msgId = "01FOLDTEST0008";
 		seedOut(msgId);
 		kv.setCorrupt(outKey(msgId));
-		await recordReplyIntoOut(identity, msgId, reply); // must not throw or loop forever
+		await history.recordReplyIntoOut(identity, msgId, reply); // must not throw or loop forever
 	});
 });
