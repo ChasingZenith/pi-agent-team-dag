@@ -150,6 +150,8 @@ export default function (pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
 
 	const STATUSES: TaskStatus[] = ["pending", "dispatched", "active", "done", "blocked", "cancelled", "worker_offline"];
+	/** Which long-form content task_read loads; mirrors the TypeBox union on fields. */
+	type ReadFields = "description" | "report" | "full";
 	const STATUS_GLYPH: Record<TaskStatus, string> = {
 		pending: "◻",
 		dispatched: "◔",
@@ -671,8 +673,7 @@ pi.registerTool({
 						Type.Literal("description"),
 						Type.Literal("report"),
 						Type.Literal("full"),
-					],
-					{
+					],					{
 						description:
 							'Which long-form content to load in addition to the metadata. If the fields parameter is ' +
 							'omitted, returns only the metadata + graph context — no long-form content (the omitted ' +
@@ -683,8 +684,8 @@ pi.registerTool({
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate) {
-			const p = params as { id: string; version?: number; fields?: string };
-			const fields = p.fields ?? "core";
+			const p = params as { id: string; version?: number; fields?: ReadFields };
+			const fields = p.fields;
 			const me = commsName();
 			const item = store.readTask(cwd, p.id);
 			if (!item) {
