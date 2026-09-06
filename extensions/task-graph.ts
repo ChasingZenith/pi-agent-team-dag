@@ -485,6 +485,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Task Checkout",
 		description:
 			"Check out a working copy of a task's content for editing — Step 1 of any content change. " +
+			"The description draft copies the task's OWN body only: content shared via info_refs is NOT copied into the draft (it stays referenced and is injected automatically when the task is READ) — so editing and committing never duplicates shared requirements into the task. " +
 			"An existing draft is kept untouched (check out a fresh task id, or clear it manually). " +
 			"For METADATA changes to an existing task, use scope=\"metadata\" — it scaffolds a metadata draft carrying " +
 			"the CURRENT title / deps / subgraph_deps / info_refs / kind as COMMENTED templates; uncomment-and-edit " +
@@ -789,7 +790,8 @@ pi.registerTool({
 		description:
 			"Read one task: metadata + graph context (deps, subgraph_deps, dispatched_to, execution_session, " +
 			"dependents, readiness, change history) plus optionally " +
-			"the long-form content. Reading and editing are separate: READ here (fields= loads the content); to EDIT, task_checkout prepares your draft, write/edit modifies it, and task_commit / task_submit_report commit it — content is changed ONLY through those tools, never by touching task storage directly.",
+			"the long-form content. Reading and editing are separate: READ here (fields= loads the content); to EDIT, task_checkout prepares your draft, write/edit modifies it, and task_commit / task_submit_report commit it — content is changed ONLY through those tools, never by touching task storage directly. " +
+			"The description loaded via fields=\"description\" is the EFFECTIVE description: content shared via info_refs is injected before the task's own body — your checkout draft will contain only the task's own body, without the injected shared content.",
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the item to read (use task_list to see all items).",
