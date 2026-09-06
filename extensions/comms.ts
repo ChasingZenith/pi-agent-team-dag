@@ -764,7 +764,7 @@ pi.registerTool({
 	description:
 		"Set, adjust, or cancel a reminder for a message\n\n" +
 		"`remind_s > 0` (1–3600): Set or adjust the reminder interval for this message. While the reminder is active, a reminder turn is periodically injected to YOU. " +
-		"Use this to follow up on a message you received, or to (re)arm the wait for a reply to a message you sent. " +
+		"Use this to follow up on a message you received, or to (re)arm the wait for a reply to a message you sent. Note: if the target peer is offline, their reply won't arrive until they're back — undelivered messages redeliver via their durable consumer once they reconnect, so there is no need to resend the message. " +
 		"`remind_s = 0`: Cancel the reminder. This simply removes the reminder — or confirms none is armed — and " +
 		"does not modify the message itself. Use this when the peer has replied without a `reply_to_msg_id` and " +
 		"you already have your answer, when the peer is offline or no longer relevant, or when you decide to " +
