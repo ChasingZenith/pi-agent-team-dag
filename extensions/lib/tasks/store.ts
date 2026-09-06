@@ -1408,17 +1408,19 @@ export function commitTask(
 			report_for_version: 1,
 			history: [],
 		};
-		// snapshot v1 (so every version is archivable), then the true copies.
+		// snapshot v1 (so every version is archivable), then the live true copies. Compute
+		// every hash up front so the metadata toml carries the report hash on its single
+		// write — no second toml rewrite to patch a hash that wasn't known yet.
 		writeTaskSnapshot(cwd, item);
-		writeMetadataAndDescription(cwd, item);
-		// empty report stub, uniform three-file layout.
+		const descContent = renderBodyFile({ version: 1 }, description);
 		const reportContent = renderBodyFile({ for_version: 1 }, "");
-		atomicWriteFile(taskReportPath(cwd, clean), reportContent);
-		// metadata must carry the report hash too — rewrite after the stub exists.
 		atomicWriteFile(
 			taskTomlPath(cwd, clean),
-			serializeMetadata({ ...item, description_sha256: sha256(renderBodyFile({ version: 1 }, description)), report_sha256: sha256(reportContent) }),
+			serializeMetadata({ ...item, description_sha256: sha256(descContent), report_sha256: sha256(reportContent) }),
 		);
+		atomicWriteFile(taskDescriptionPath(cwd, clean), descContent);
+		// empty report stub, uniform three-file layout.
+		atomicWriteFile(taskReportPath(cwd, clean), reportContent);
 		const consumed = consumeDrafts([draftToml, ...(existsSync(draftDesc) ? [draftDesc] : [])]);
 		// Wire the freshly-created child into its declared parents (structure-only, no content bump).
 		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, opts.updated_by ?? "unknown", "wired new child");
