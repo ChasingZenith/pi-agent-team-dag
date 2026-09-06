@@ -1,13 +1,13 @@
 /**
  * comms — shared protocol (types + subject/stream/bucket templates + constants).
  *
- * Pure module: no I/O, no pi imports. Imported by the client extension
- * (extensions/comms.ts + extensions/lib/comms/*) and by the server side
- * (scripts/comms-nats/up.sh). This is the single source of truth for the
- * NATS/JetStream topology. The subnet dimension (a comms network's
- * independent communication domain — agents in different subnets can't see
- * each other) is parameterised through every template function below; the
- * default subnet is "subnet0":
+ * Pure protocol module: no I/O, no pi imports. Imported by the client
+ * extension (extensions/comms.ts + extensions/lib/comms/*). This is the
+ * single source of truth for the NATS/JetStream topology. The server
+ * filesystem layout lives in paths.ts, not here. The subnet dimension (a
+ * comms network's independent communication domain — agents in different
+ * subnets can't see each other) is parameterised through every template
+ * function below; the default subnet is "subnet0":
  *
  *   stream  COMMS_<subnet>             subjects <subnet>.msg.>
  *   bucket  comms_profiles               keys a.<subnet>.<name> (profile = lifecycle
@@ -37,27 +37,9 @@
  */
 
 import type { JsMsg } from "nats";
-import * as os from "node:os";
-import * as path from "node:path";
 import * as crypto from "node:crypto";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/**
- * Root of all comms state. PI_COMMS_DIR overrides the default so tests
- * and the bash launcher (scripts/comms-nats/up.sh) can redirect the whole
- * directory in one place. `just check-paths` verifies up.sh matches.
- */
-export const COMMS_DIR =
-	process.env.PI_COMMS_DIR ?? path.join(os.homedir(), ".pi", "comms");
-/** Single secret file for the local NATS server. */
-export const SECRET_FILE = path.join(COMMS_DIR, "server.secret.json");
-/** Where up.sh caches the downloaded nats-server binary. */
-export const BIN_DIR = path.join(COMMS_DIR, "bin");
-/** Where up.sh writes the nats-server runtime config. */
-export const SERVER_CONF_FILE = path.join(COMMS_DIR, "nats-server.conf");
-/** Where up.sh points JetStream storage. */
-export const JETSTREAM_DIR = path.join(COMMS_DIR, "jetstream");
 
 export const DEFAULT_NATS_URL = "nats://127.0.0.1:4222";
 /** Default communication domain. Agents in different subnets are isolated

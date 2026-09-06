@@ -14,11 +14,11 @@
 #    connections on the port, print banner;
 #  - SIGINT/SIGTERM: stop the child, unlink the secret only if we own it.
 #
-# Paths mirror extensions/lib/comms/protocol.ts — that module is the
+# Paths mirror extensions/lib/comms/paths.ts — that module is the
 # single source of truth for the DIRECTORY LAYOUT; COMMS_DIR here is the
 # only duplicated literal (default ~/.pi/comms). Both sides honour the
 # PI_COMMS_DIR override, and `just check-paths` verifies they stayed in
-# sync. Keep the derived names identical to protocol.ts when changing them.
+# sync. Keep the derived names identical to paths.ts when changing them.
 #
 # Env:
 #   PI_COMMS_DIR         (override the ~/.pi/comms root; default)

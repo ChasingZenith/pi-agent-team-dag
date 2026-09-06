@@ -14,8 +14,8 @@ import {
 	DEFAULT_OFFLINE_AFTER_MS,
 	DEFAULT_RECLAIM_AFTER_MS,
 	DEFAULT_SUBNET,
-	SECRET_FILE,
 } from "./protocol.ts";
+import { SECRET_FILE } from "./paths.ts";
 
 export interface RuntimeConfig {
 	natsUrl: string;

@@ -16,10 +16,10 @@ import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   DEFAULT_NATS_URL,
-  SECRET_FILE,
   KV_BUCKET_PROFILES,
   KV_BUCKET_HISTORY,
 } from "../../extensions/lib/comms/protocol.ts";
+import { SECRET_FILE } from "../../extensions/lib/comms/paths.ts";
 
 export const BUCKETS = { profiles: KV_BUCKET_PROFILES, history: KV_BUCKET_HISTORY };
 

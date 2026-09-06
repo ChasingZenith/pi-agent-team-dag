@@ -16,14 +16,14 @@ comms-server:
 comms-server-lan:
     PI_COMMS_HOST=0.0.0.0 bash scripts/comms-nats/up.sh
 
-# Verify up.sh path constants still match extensions/lib/comms/protocol.ts
+# Verify up.sh path constants still match extensions/lib/comms/paths.ts
 check-paths:
     #!/usr/bin/env bash
     set -euo pipefail
     root="{{justfile_directory()}}"
     from_sh="$(bash "$root/scripts/comms-nats/up.sh" --paths)"
     from_ts="$(node --input-type=module -e "
-        import * as p from 'file://$root/extensions/lib/comms/protocol.ts';
+        import * as p from 'file://$root/extensions/lib/comms/paths.ts';
         console.log([p.COMMS_DIR, p.BIN_DIR, p.JETSTREAM_DIR, p.SECRET_FILE, p.SERVER_CONF_FILE].join('\n'));
     ")"
     if [[ "$from_sh" != "$from_ts" ]]; then
