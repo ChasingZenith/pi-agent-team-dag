@@ -26,6 +26,7 @@
  * PI_COMMS_HISTORY_TTL_MS requires deleting the bucket.
  */
 
+import type { KvEntry } from "nats";
 import type { Identity, InboundContext } from "./protocol.ts";
 import {
 	historyInKey,
@@ -38,6 +39,13 @@ import { audit } from "./audit.ts";
 
 /** Message TTL (same value as messaging's) — drives the expired status. */
 let messageTtlMs = 0;
+
+const FOLD_ATTEMPTS = 5;
+const FOLD_RETRY_DELAY_MS = 50;
+
+function foldSleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export function setHistoryMessageTtlMs(ms: number): void {
 	messageTtlMs = ms;
@@ -117,17 +125,49 @@ export async function recordInbound(identity: Identity, inbound: InboundContext)
 }
 
 /**
- * Fold a reply into the matching out record (idempotent — redeliveries
- * overwrite the same key). No-op when the out record is absent: a foreign or
- * already-expired msg_id must not fabricate an out record out of nothing.
+ * Fold a reply into the matching out record; no-op when the record is absent
+ * (a foreign msg_id must not fabricate one — and cannot be a race: send()
+ * records before publishing, so any reply necessarily finds the record).
+ * Revision-checked update: concurrent replies to the same msg_id would
+ * otherwise last-write-win. Best-effort — the reply content itself is always
+ * persisted as its own in record; bounded retry then give up (audited).
  */
 export async function recordReplyIntoOut(identity: Identity, replyToMsgId: string, reply: OutReply): Promise<void> {
 	const key = historyOutKey(identity.subnet, identity.name, replyToMsgId);
-	const entry = await getKvHistory().get(key);
-	if (!entry) return;
-	const rec = entry.json<HistoryOutRecord>();
-	rec.reply = reply;
-	await getKvHistory().put(key, JSON.stringify(rec));
+	for (let attempt = 1; ; attempt++) {
+		let entry: KvEntry | null;
+		try {
+			entry = await getKvHistory().get(key);
+		} catch (err: any) {
+			if (attempt >= FOLD_ATTEMPTS) {
+				audit("history_read_failed", { direction: "reply", msg_id: reply.msg_id, reply_to: replyToMsgId, reason: err?.message ?? String(err) });
+				return;
+			}
+			await foldSleep(FOLD_RETRY_DELAY_MS);
+			continue;
+		}
+		if (!entry || entry.operation === "DEL") return; // foreign/expired id
+		let rec: HistoryOutRecord;
+		try {
+			rec = entry.json<HistoryOutRecord>();
+		} catch {
+			// retrying cannot fix a corrupt record
+			audit("history_read_failed", { direction: "reply", msg_id: reply.msg_id, reply_to: replyToMsgId, reason: "corrupt out record" });
+			return;
+		}
+		rec.reply = reply;
+		try {
+			await getKvHistory().update(key, JSON.stringify(rec), entry.revision);
+			return;
+		} catch (err: any) {
+			// revision conflict (concurrent fold) or transient failure — re-read and retry
+			if (attempt >= FOLD_ATTEMPTS) {
+				audit("reply_fold_lost", { msg_id: reply.msg_id, reply_to: replyToMsgId, reason: err?.message ?? String(err) });
+				return;
+			}
+			await foldSleep(FOLD_RETRY_DELAY_MS);
+		}
+	}
 }
 
 // ━━ Reads ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

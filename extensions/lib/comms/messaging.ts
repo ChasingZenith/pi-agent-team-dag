@@ -64,12 +64,13 @@ import {
 	MAX_DELIVER,
 	msgSubject,
 	msgSubjectPrefix,
+	historyOutKey,
 	parseDeliverAs,
 	promptDurable,
 	streamName,
 	ulid,
 } from "./protocol.ts";
-import { getJs, getJsm } from "./nats.ts";
+import { getJs, getJsm, getKvHistory } from "./nats.ts";
 import { resolveName, statusOfName, statusOfProfile } from "./registry.ts";
 import { audit } from "./audit.ts";
 import { createReminderScheduler, fifoEvict, type ReminderEntry } from "./reminder.ts";
@@ -442,16 +443,24 @@ export async function send(
 		deliver_as: opts?.deliverAs,
 	};
 
-	const pub = await getJs().publish(msgSubject(identity.subnet, target, msgId), JSON.stringify(payload), { msgID: msgId });
-	if (!pub) {
-		throw new Error(`comms: message publish to ${target} was not acknowledged`);
+	// Record BEFORE publishing: the record is then durable before any reply
+	// can exist, so the reply fold in recordReplyIntoOut never races this
+	// write. Residual window: a transient recordOutbound failure whose KV
+	// recovers before the reply's fold read — degraded outbox state, not lost
+	// messages (the reply itself is always in the inbox).
+	try {
+		await history.recordOutbound(identity, target, msgId, message, opts?.replyToMsgId ?? null);
+	} catch (err: any) {
+		audit("history_write_failed", { direction: "out", msg_id: msgId, reason: err?.message ?? String(err) });
 	}
 
-	// Persist the outbound content (best-effort — history must never fail a
-	// send that already published): comms_outbox re-reads this after a
-	// compact or restart, when the in-memory pending table is gone.
-	void history.recordOutbound(identity, target, msgId, message, opts?.replyToMsgId ?? null)
-		.catch((err: any) => audit("history_write_failed", { direction: "out", msg_id: msgId, reason: err?.message ?? String(err) }));
+	const pub = await getJs().publish(msgSubject(identity.subnet, target, msgId), JSON.stringify(payload), { msgID: msgId });
+	if (!pub) {
+		// Remove the ghost "waiting" record the pre-publish write just created.
+		void getKvHistory().delete(historyOutKey(identity.subnet, identity.name, msgId))
+			.catch((err: any) => audit("history_write_failed", { direction: "out", msg_id: msgId, reason: `ghost cleanup: ${err?.message ?? String(err)}` }));
+		throw new Error(`comms: message publish to ${target} was not acknowledged`);
+	}
 
 	// Target status for the caller (comms_send's target_status): derived from
 	// the profile snapshot resolveName just returned. The message is queued
