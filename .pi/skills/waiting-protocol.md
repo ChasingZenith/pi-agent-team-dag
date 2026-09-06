@@ -14,7 +14,7 @@ When waiting, output one line stating that you are waiting, then end your turn u
 ## What Wakes You
 
 1. Inbound comms message — automatically injected (steer: at the next LLM-call boundary; followUp: after the current turn ends) — a peer's reply to your `comms_send` (using `reply_to_msg_id`).
-2. Reminder turn — when `remind_s > 0`, a consolidated reminder is injected every `remind_s` seconds. This is your only scheduled check-in. Use it to act on pending work (see "When a Reminder Fires" below).
+2. Reminder turn — when `remind_s > 0`, a consolidated reminder is injected every `remind_s` seconds. This is your only scheduled verification turn (a reminder wake-up on YOUR side to check the peer's status — the peer does not actively report back on this cadence). Use it to act on pending work (see "When a Reminder Fires" below).
 
 ## What NOT to Do While Waiting
 

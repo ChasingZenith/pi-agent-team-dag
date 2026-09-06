@@ -196,7 +196,9 @@ export default function (pi: ExtensionAPI) {
 			remind_s: Type.Number({
 				description:
 					"Reminder interval in seconds for the delegation message (minimum 1 — the dispatch always needs a reminder, it cannot be 0). " +
-					"This is the ONLY reminder for the task: while the worker is dispatched/active and you wait for its task_start / task_submit_report, the reminder turn is your scheduled check-in to detect a missing/offline worker, re-dispatch, or escalate.",
+					"Set it to roughly the task's EXPECTED completion time by the agent — NOT a human work estimate. Agentic agents work far faster than a human. Estimate by agent throughput, so a too-high value delays your staleness check and a too-low value spams reminder turns; ~60–600 s is common for a focused unit. " +
+					"It is your natural verification point and the base of the staleness rule (a task still dispatched/active after ≈ 3 × remind_s with no report is stalled; probe, then escalate under skill recover-worker). " +
+					"This is the ONLY reminder for the task: while the worker is dispatched/active and you wait for its task_start / task_submit_report, the reminder turn is your scheduled verification point to detect a missing/offline worker, re-dispatch, or escalate.",
 				minimum: 1,
 			}),
 		}),

@@ -70,17 +70,19 @@ Do not skip delegation layers: never request fresh Planners for multiple module 
 
 ## Task Reminders
 
-`task_dispatch` requires `remind_s`—your only scheduled verification point while awaiting `task_submit_report`. Since `task_submit_report` automatically replies to the delegation and cancels that scheduled check, use that verification turn to detect an offline worker, re-dispatch, or escalate under `worker-offline-recovery` skill
+`task_dispatch` requires `remind_s`—your only scheduled verification point while awaiting `task_submit_report`. Set it to roughly the task's expected completion time by the AGENT TEAM — NOT a human-work estimate (agentic agents finish in minutes what a human would take hours over, so estimate by agent throughput, not human effort). Since `task_submit_report` automatically replies to the delegation and cancels that scheduled check, use that verification turn to spot a lost or stalled worker: check each dispatched/active task's `in status` age (task_read / task_ready_set); `> 3 × remind_s` = stalled. Then re-dispatch or escalate under `recover-worker`, resuming the ladder rung recorded in the node's change history.
 
 ## Background
 
-Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`. Recover a task whose worker went offline via skill `worker-offline-recovery`.
+Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`. Recover a task whose worker is lost — went offline or shows online but stopped responding — via skill `recover-worker`.
 
 ## Report Review & Discrepancy Handling
 
 ### Worker Offline Recovery
 
-A dispatched/active task may lose its worker (crash, SIGKILL, machine dies). Detect it from a comms reminder reporting the recipient `(offline)`; it is `worker_offline`, NOT `blocked` (the executor disappeared — a recoverable failure, not a plan contradiction). Read the skill `worker-offline-recovery` for the full two-role protocol (set `worker_offline`, ask TP to restart via its `execution_session`, re-dispatch the SAME agent after the restart, worker reports first then waits for your decision to continue or stop).
+A dispatched/active task may lose its worker — the comms reminder reports the recipient `(offline)` on a `task_dispatch`, OR the worker shows online but has not progressed for `> 3 × remind_s` (no report / no `task_start`; read the task's `in status` age). Either is `worker_offline`, NOT `blocked` (the executor disappeared — a recoverable failure, not a plan contradiction).
+
+The full two-role protocol is in skill `recover-worker` (read it, do not improvise). Its decision wedge: **set `worker_offline` recording the rung, resume the old session first (or spawn fresh if it stays silent), re-dispatch, and never redo a rung already reached.**
 
 
 When an agent submits a report via `task_submit_report`, evaluate it against the plan and choose the appropriate action path:

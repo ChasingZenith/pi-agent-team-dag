@@ -237,6 +237,8 @@ export interface TaskSummary {
 	updated_by: string;
 	/** Current responsible agent, when dispatched. */
 	dispatched_to: TaskDispatch | null;
+	/** Milliseconds since the item entered its CURRENT status (staleness signal). */
+	status_since_ms: number;
 	/** Number of dependency edges. */
 	depCount: number;
 	/** Subgraph gate ids declared by this item (modules only). */
@@ -251,6 +253,20 @@ export interface TaskSummary {
 
 /** Max history entries kept (summaries only). */
 export const HISTORY_CAP = 10;
+
+/**
+ * Milliseconds since the task entered its CURRENT status — derived from the
+ * NEWEST history entry that changed status (the transition that set it); if
+ * no such entry survives in the capped history, falls back to updated_at.
+ * Surfaces staleness: a dispatched/active task sitting too long (no report,
+ * no start) is exactly what a manager must notice on a reminder turn, so the
+ * read tools expose this age next to the status.
+ */
+export function statusSinceMs(item: Task, now = Date.now()): number {
+	const statusEntry = item.history.find((h) => h.changed_items.includes("status"));
+	const at = Date.parse(statusEntry ? statusEntry.updated_at : item.updated_at);
+	return Number.isNaN(at) ? 0 : Math.max(0, now - at);
+}
 
 // ---------------------------------------------------------------------------
 // Paths / ids
@@ -2140,6 +2156,7 @@ export function listTasks(cwd: string): TaskSummary[] {
 				updated_at: item.updated_at,
 				updated_by: item.updated_by,
 				dispatched_to: item.dispatched_to,
+				status_since_ms: statusSinceMs(item),
 				depCount: item.deps.length,
 				subgraph_deps: item.subgraph_deps,
 				info_refs: item.info_refs,

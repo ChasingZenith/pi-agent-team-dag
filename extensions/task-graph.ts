@@ -81,6 +81,16 @@ function expandedContent(result: { content?: Array<{ type: string; text?: string
 	return t?.type === "text" && t.text ? t.text : fallback;
 }
 
+/** Human age of a ms duration — "45 s" up to a minute, then "N min", then "N h". */
+function fmtAge(ms: number): string {
+	const sec = Math.floor(ms / 1_000);
+	if (sec < 60) return `${Math.max(0, sec)} s`;
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min} min`;
+	const hr = Math.floor(min / 60);
+	return `${hr} h`;
+}
+
 /** TOML-inline array of simple ids (for metadata draft templates). */
 function tomlInlineArray(ids: string[]): string {
 	return ids.length ? `[ ${ids.map((x) => `"${x}"`).join(", ")} ]` : "[]";
@@ -187,12 +197,19 @@ export default function (pi: ExtensionAPI) {
 		const { archived, fields, live } = opts;
 		const glyph = STATUS_GLYPH[item.status] ?? "◻";
 		const statusLine = `${glyph} ${item.status}`;
+		// Staleness signal: how long the item has sat in its CURRENT status. A
+		// dispatched/active task with no report for a long age is exactly what a
+		// manager must notice on a reminder turn, so surface both the age and the
+		// timestamp the status was entered.
+		const statusAgeMs = store.statusSinceMs(item);
+		const statusSinceIso = new Date(Date.now() - statusAgeMs).toISOString();
 		const lines: string[] = [
 			archived
 				? `task_read: ${item.id} v${item.version} — ARCHIVED SNAPSHOT — ${statusLine} — by ${item.updated_by} at ${item.updated_at}`
 				: `id: ${item.id} v${item.version} — ${statusLine} — updated by ${item.updated_by} at ${item.updated_at}`,
 			`title: ${item.title}`,
 			`kind: ${item.kind}`,
+			`in status: ${fmtAge(statusAgeMs)} (since ${statusSinceIso})`,
 			`deps: ${item.deps.length > 0 ? item.deps.join(", ") : "(none)"}`,
 		];
 		// Live-only: the soft structural signal — tells a consumer the subgraph
@@ -685,8 +702,9 @@ pi.registerTool({
 				description:
 					"New status to set. pending; dispatched (delegation sent, owner recorded, work not yet started — " +
 					"set together with dispatched_to); active (in progress — the dispatched worker moves its item here via task_start); " +
-					"done; blocked (reality is blocking progress); cancelled; worker_offline (the executing worker went offline/dead mid-flight — " +
-					"a recoverable failure distinct from blocked: the coordinator re-dispatches to a restarted agent after restart). " +
+					"done; blocked (reality is blocking progress); cancelled; worker_offline (the executing worker went offline/dead mid-flight, or is online but unresponsive after a status probe — " +
+					"a recoverable failure distinct from blocked: the coordinator re-dispatches to a restarted agent after restart. " +
+					"Write the recovery rung reached (session_resume / fresh_spawn) into change_summary — it is the durable probe state on the node's history). " +
 					"done can be reopened (done → active); cancelled can be undone (cancelled → pending). " +
 					"A task can only be marked done when all deps are done/cancelled — otherwise the transition is rejected with the missing deps listed.",
 			},
@@ -956,6 +974,9 @@ pi.registerTool({
 				];
 				if (s.depCount > 0) parts.push(`${s.depCount} dep(s)`);
 				if (s.dispatched_to) parts.push(`dispatched: ${s.dispatched_to.name}`);
+				// Staleness: only meaningful for the non-terminal, non-pending states
+				// where the item is waiting on a worker (dispatched / active).
+				if (s.status === "dispatched" || s.status === "active") parts.push(`in ${s.status} ${fmtAge(s.status_since_ms)}`);
 				if (readyIds.has(s.id)) parts.push("ready");
 				if (s.kind === "module") parts.push("[module]");
 				if (s.kind === "info") parts.push("[info]");
@@ -1068,6 +1089,20 @@ pi.registerTool({
 			lines.push(`Pending (deps not yet satisfied):`);
 			if (notReady.length > 0) {
 				lines.push(...notReady.map((x) => `  ◻ ${x.item.id} — missing: ${x.missing.join(", ")}`));
+			} else {
+				lines.push("  (none)");
+			}
+			// In-flight but possibly stalled: dispatched/active items in scope with
+			// no report. Their age is the staleness signal — a worker that went
+			// offline or is silently wedged gives no progress, so the manager sees
+			// exactly which live task has gone quiet.
+			const stalled = scope
+				.filter((i) => i.status === "dispatched" || i.status === "active")
+				.map((i) => ({ id: i.id, title: i.title, status: i.status, age: store.statusSinceMs(i) }))
+				.sort((a, b) => b.age - a.age);
+			lines.push(`In-flight (dispatched/active) — age = time in current status:`);
+			if (stalled.length > 0) {
+				lines.push(...stalled.map((x) => `  ${x.status === "active" ? "●" : "◻"} ${x.id} (${x.title}) · ${fmtAge(x.age)} in ${x.status}`));
 			} else {
 				lines.push("  (none)");
 			}
