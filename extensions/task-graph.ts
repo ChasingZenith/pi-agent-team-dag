@@ -61,10 +61,7 @@ import * as graph from "./lib/tasks/graph";
 import {
 	availableIds,
 	broadcastLine,
-	cycleError,
 	loadAllItems,
-	missingDepsError,
-	missingSubgraphDepsError,
 	notFoundError,
 } from "./lib/tasks/shell";
 
