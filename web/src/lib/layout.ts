@@ -77,7 +77,9 @@ export function buildNodesEdges(graph: GraphResponse): TaskLayout {
 				source: dep,
 				target: gi.item.id,
 				type: "smoothstep",
-				style: inCycle ? { stroke: "#ef4444", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke: "#94a3b8", strokeWidth: 1.5 },
+				style: inCycle
+					? "stroke:#ef4444;stroke-width:2;stroke-dasharray:6 4"
+					: "stroke:#94a3b8;stroke-width:1.5",
 				markerEnd: inCycle ? undefined : { type: "arrowclosed" as const, color: "#94a3b8", width: 14, height: 14 },
 			};
 		}),
@@ -100,7 +102,9 @@ export function buildNodesEdges(graph: GraphResponse): TaskLayout {
 				source: gate,
 				target: gi.item.id,
 				type: "smoothstep",
-				style: inCycle ? { stroke: "#ef4444", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke: "#a855f7", strokeWidth: 4 },
+				style: inCycle
+					? "stroke:#ef4444;stroke-width:2;stroke-dasharray:6 4"
+					: "stroke:#a855f7;stroke-width:4",
 				markerEnd: inCycle ? undefined : { type: "arrowclosed" as const, color: "#a855f7", width: 18, height: 18 },
 			};
 		}),

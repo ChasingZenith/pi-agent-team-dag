@@ -206,10 +206,6 @@
 		color: #0f172a;
 		font-weight: 700;
 	}
-	.tag.dim {
-		background: #1e293b;
-		color: #64748b;
-	}
 	.close {
 		border: none;
 		background: none;

@@ -43,7 +43,7 @@
 	<Handle
 		{type}
 		{position}
-		style={{ visibility: "hidden", width: 1, height: 1, minWidth: 0, minHeight: 0, border: "none" }}
+		style="visibility:hidden;width:1px;height:1px;min-width:0;min-height:0;border:none"
 	/>
 {/snippet}
 
