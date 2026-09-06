@@ -107,7 +107,7 @@ extensions: /abs/path/to/ext.ts,./rel-to-cwd/ext.ts
 | 函数 | 说明 |
 |------|------|
 | `interpolate(template, vars)` | 通用 `{{}}` 插值——替换模板中的占位符 |
-| `SESSION_PATH` | 模板常量：`"{{sessionDir}}/{{agentName}}.json"` |
+| `SESSION_PATH` | 模板常量：`"{{sessionDir}}/{{agentName}}.jsonl"` |
 | `parseAgentFile(path)` | 解析单个 agent .md 文件 |
 | `scanAgentDirs(cwd)` | 扫描 `.pi/agents/`、`agents/`、`.claude/agents/` |
 | `roleDirsFromArgv(argv)` | 收集 argv 中全部 `--role-dir`（可重复，两种写法均可） |

@@ -56,7 +56,7 @@ function deepEq<T>(a: T, b: T): boolean {
 
 
 function sessionPath(name: string): string {
-  return join(ROOT, ".pi", "agent-sessions", `${agentFileStem(name)}.json`);
+  return join(ROOT, ".pi", "agent-sessions", `${agentFileStem(name)}.jsonl`);
 }
 function launchPath(name: string): string {
   return join(SCRIPT_DIR, `launch-${agentFileStem(name)}.sh`);

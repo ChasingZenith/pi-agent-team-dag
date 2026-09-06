@@ -44,7 +44,7 @@ export interface LaunchScriptParams {
   agentName: string;
   /** Model override in provider/model format. */
   model: string;
-  /** Path to the session .json file. */
+  /** Path to the session .jsonl file. */
   sessionFile: string;
   /** Whether to set PI_AGENT_AUTO_EXIT=1. */
   autoExit: boolean;

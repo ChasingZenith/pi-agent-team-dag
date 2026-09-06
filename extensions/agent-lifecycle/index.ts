@@ -245,7 +245,7 @@ export async function executeAgentSpawn(
   // to the same stem ("Foo Bar" vs "foo-bar") never share a session file.
   const sessionDir = join(cwd, ".pi", "agent-sessions");
   mkdirSync(sessionDir, { recursive: true });
-  // Fresh spawns keep a stable name (<stem>-<hash>.json); fork spawns
+  // Fresh spawns keep a stable name (<stem>-<hash>.jsonl); fork spawns
   // REPLACE this with the library-generated branch path (<ts>_<uuid>.jsonl).
   let sessionFile = interpolate(SESSION_PATH, {
     sessionDir,

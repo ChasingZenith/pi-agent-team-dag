@@ -252,7 +252,7 @@ export function forkSession(
  * SessionManager so the format (header, id chain, model/thinking entries) is
  * library-generated.
  *
- * The stable path (`<stem>-<hash>.json`) is preserved: SessionManager.open
+ * The stable path (`<stem>-<hash>.jsonl`) is preserved: SessionManager.open
  * on a non-existent path performs a newSession pinned to that exact file.
  * The write is atomic (temp + rename) — a failed write never leaves a
  * truncated session and a live agent's fd never observes a half-written state.

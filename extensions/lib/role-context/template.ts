@@ -589,4 +589,4 @@ export function llmContextFromRole(role: string, name: string): LLMContext | nul
 // ---------------------------------------------------------------------------
 
 /** Template for agent session file path. */
-export const SESSION_PATH = "{{sessionDir}}/{{agentName}}.json";
+export const SESSION_PATH = "{{sessionDir}}/{{agentName}}.jsonl";

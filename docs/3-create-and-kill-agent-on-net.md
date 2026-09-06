@@ -135,7 +135,7 @@ agent-lifecycle 提供 **2 个工具**：
 - **上下文生成**：LLM 直调 `agent_spawn` 时直接构造 `llmContext: { systemPrompt: "..." }`——agent 的第一轮由到达的首条 comms 消息触发（comms_send 送达即触发 turn），无需初始 user 消息，任务在 spawn 后经 comms_send 送达（代码侧角色模板上下文见 §4）。
 - **行为**：
   1. 校验 tmux 环境（`checkTmux()`）
-  2. 通过 `interpolate(SESSION_PATH, ...)` 构建 session 文件路径（fresh 保留稳定名 `<stem>-<hash>.json`）
+  2. 通过 `interpolate(SESSION_PATH, ...)` 构建 session 文件路径（fresh 保留稳定名 `<stem>-<hash>.jsonl`）
   3. **Session 文件三分支**（fork / 预载细节见 docs/2 §4）：
      - `context: "fork"` → `forkSession()` 分支 spawner 会话（`<ts>_<uuid>.jsonl`，由库生成）；整个活跃路径都是委派流量（无历史可继承）时回退空文件自举
      - `messages` 非空 → `writePreloadedSessionFile()`（SessionManager 预载，保留稳定路径）
@@ -251,7 +251,7 @@ const moduleAgents = new Map<string, AgentState>();
 interface AgentState {
   name: string;         // agent 名称
   windowId: string;      // tmux window ID
-  sessionFile: string;   // session .json 文件路径
+  sessionFile: string;   // session .jsonl 文件路径
   status: "spawning" | "online" | "offline" | "error";
   startedAt: string;     // ISO 时间戳
 }
