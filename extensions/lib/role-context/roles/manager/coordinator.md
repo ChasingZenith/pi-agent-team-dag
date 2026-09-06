@@ -23,7 +23,7 @@ All team sourcing must go through TP (`target="teammate-provider"`). Send reques
 * Task exists in task dependence graph: `comms_send(target="teammate-provider", message="Find a teammate/planner/coordinator to work on a task: <task_id>", remind_s=300)`
 * Task NOT in task dependence graph: `comms_send(target="teammate-provider", message="Find a teammate/planner to work/plan on a task: <background_summary_supplementary>", remind_s=300)`
 
-After sending a request, wait for TP's response — per skill `waiting-protocol` (end your turn; the reply is injected, never poll comms_outbox / task_list while waiting). The response will contain the identifier(s) of the assigned agent(s). You then use these identifiers in `task_dispatch` – do not send work instructions directly via comms to the agent. For a module child that needs its own execution loop, ask for a `coordinator` (the node needs a sub‑Coordinator to own it and drive its subgraph).
+After sending a request, wait for TP's response — per skill `waiting-protocol` (end your turn; the reply is injected, never poll comms_outbox / task_list while waiting). The response will contain the identifier(s) of the assigned agent(s). You then use these identifiers in `task_dispatch` – do not send work instructions directly via comms to dispatch EXECUTION agents (assignments go through `task_dispatch`). EXCEPTION: a Planner is not a dispatched worker — you instruct it via `comms_send`, per the Module-task branch below. For a module child that needs its own execution loop, ask for a `coordinator` (the node needs a sub‑Coordinator to own it and drive its subgraph).
 
 Requests for different tasks are sent concurrently in one round — TP handles each independently; never serialize your requests.
 
@@ -58,10 +58,9 @@ Do not skip delegation layers: never request fresh Planners for multiple module 
    * Module Tasks — first determine WHOSE node this is:
      - If the module is the node assigned to YOU (you own it) and it has no subgraph yet (initial planning needed):
        1. Request a Planner from TP (message: "Find a planner to plan task: <task_id>").
-       2. Wait for TP response, extract Planner ID.
-       3. Instruct the Planner via `comms_send` to generate the subgraph (provide necessary background).
-       4. After the Planner reports completion (via `task_submit_report` or comms), use `task_ready_set` to fetch new ready tasks from the generated subgraph.
-       5. Then dispatch those ready tasks using the Unit/Module rules above.
+       2. When TP replies with the Planner ID, immediately — in the SAME turn — `comms_send` the Planner to build the subgraph for <task_id>: include the task_id and have it `task_read(id=...)` for the full description + acceptance criteria. TP's relay is at most a summary, never a substitute — send your own instruction even if TP claims it briefed the Planner. The Planner counts as started only after it acks (comms reply or its own `task_start`); no ack within ~3× the remind_s you set on the TP request → re-request a Planner from TP, do not wait indefinitely.
+       3. After the Planner reports completion (via `task_submit_report` or comms), use `task_ready_set` to fetch new ready tasks from the generated subgraph.
+       4. Then dispatch those ready tasks using the Unit/Module rules above.
      - If the module is a CHILD in your subgraph (not the node you own): you do NOT plan it — delegate the whole node to a sub‑Coordinator per Layered Planning above (TP → `coordinator` role → `task_dispatch`). The sub‑Coordinator will request its OWN Planner for that module's subgraph when it starts.
      - If the module already has a subgraph (children tasks exist): 
        1. Request a sub‑Coordinator from TP, wait for response, extract sub‑Coordinator ID.
