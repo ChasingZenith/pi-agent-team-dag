@@ -925,21 +925,26 @@ function parseDraftToml(cwd: string, path: string, cleanId: string): {
 // Deps / graph validation
 // ---------------------------------------------------------------------------
 
+/** Comma-joined ids of a graph snapshot, for the teaching error messages. */
+function availableList(graph: Task[]): string {
+	return graph.map((i) => i.id).join(", ") || "(none)";
+}
+
 /**
  * Normalize a caller-provided dep list: sanitize each id, deduplicate, sort.
- * Every dep must resolve to an existing item; a dep that is the item's own id
- * is a self-loop and rejected with the cycle error format.
+ * Every dep must resolve to an item in the graph snapshot; a dep that is the
+ * item's own id is a self-loop and rejected with the cycle error format.
  */
-function normalizeDeps(cwd: string, itemId: string, rawDeps: string[]): string[] {
+function normalizeDeps(graph: Task[], itemId: string, rawDeps: string[]): string[] {
 	const deps = [...new Set(rawDeps.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	const ids = new Set(graph.map((i) => i.id));
 	for (const dep of deps) {
 		if (dep === itemId) {
 			throw new Error(`tasks: would create a dependency cycle: ${itemId} → ${itemId}`);
 		}
-		if (!tryReadTaskFile(cwd, dep)) {
-			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
+		if (!ids.has(dep)) {
 			throw new Error(
-				`tasks: dep "${dep}" does not exist — create it first — available tasks: ${available}`,
+				`tasks: dep "${dep}" does not exist — create it first — available tasks: ${availableList(graph)}`,
 			);
 		}
 	}
@@ -953,13 +958,13 @@ function normalizeDeps(cwd: string, itemId: string, rawDeps: string[]): string[]
  * subgraph — are checked by assertSubgraphDepOutsideSubgraph; cycles that only
  * arise BETWEEN gates are caught by assertNoCycle.
  */
-function normalizeSubgraphDeps(cwd: string, rawGates: string[]): string[] {
+function normalizeSubgraphDeps(graph: Task[], rawGates: string[]): string[] {
 	const gates = [...new Set(rawGates.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	const ids = new Set(graph.map((i) => i.id));
 	for (const gate of gates) {
-		if (!tryReadTaskFile(cwd, gate)) {
-			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
+		if (!ids.has(gate)) {
 			throw new Error(
-				`tasks: subgraph_deps gate "${gate}" does not exist — create it first — available tasks: ${available}`,
+				`tasks: subgraph_deps gate "${gate}" does not exist — create it first — available tasks: ${availableList(graph)}`,
 			);
 		}
 	}
@@ -973,19 +978,19 @@ function normalizeSubgraphDeps(cwd: string, rawGates: string[]): string[] {
  * time), so it may not point at a task or module. A ref to the item's own id
  * is rejected as a self-reference.
  */
-function normalizeInfoRefs(cwd: string, itemId: string, rawRefs: string[]): string[] {
+function normalizeInfoRefs(graph: Task[], itemId: string, rawRefs: string[]): string[] {
 	const refs = [...new Set(rawRefs.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
+	const byId = new Map(graph.map((i) => [i.id, i]));
 	for (const ref of refs) {
 		if (ref === itemId) {
 			throw new Error(
 				`tasks: info_ref "${ref}" is the item's own id — an info ref must point at a shared information node, not at itself`,
 			);
 		}
-		const target = tryReadTaskFile(cwd, ref);
+		const target = byId.get(ref);
 		if (!target) {
-			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
 			throw new Error(
-				`tasks: info_ref "${ref}" does not exist — create the shared information node first (kind = "info") — available tasks: ${available}`,
+				`tasks: info_ref "${ref}" does not exist — create the shared information node first (kind = "info") — available tasks: ${availableList(graph)}`,
 			);
 		}
 		if (target.kind !== "info") {
@@ -1002,9 +1007,8 @@ function normalizeInfoRefs(cwd: string, itemId: string, rawRefs: string[]): stri
  * create a self-loop at expansion time — rejected here with the cycle
  * teaching. Cross-gate cycles are left to assertNoCycle.
  */
-function assertSubgraphDepOutsideSubgraph(cwd: string, itemId: string, deps: string[], gates: string[]): void {
+function assertSubgraphDepOutsideSubgraph(items: Task[], itemId: string, deps: string[], gates: string[]): void {
 	if (gates.length === 0) return;
-	const items = loadAllItems(cwd);
 	const idx = items.findIndex((i) => i.id === itemId);
 	const overlay: Task[] =
 		idx >= 0
@@ -1019,14 +1023,28 @@ function assertSubgraphDepOutsideSubgraph(cwd: string, itemId: string, deps: str
 	}
 }
 
-/** All parseable items in the directory (metadata only, no bodies), sorted by id. */
-function loadAllItems(cwd: string): Task[] {
+/**
+ * The whole stored graph in ONE directory scan — one metadata parse per file,
+ * no body reads, sorted by id. The per-invocation read primitive: every write
+ * path (validation, wiring, status) loads this ONCE and passes Task[] down
+ * instead of re-reading the directory per dep / per check. Bodies are absent
+ * — callers that need a description or report read that task via readTask.
+ * Corrupted files are skipped (readTask surfaces them on direct access).
+ */
+export function loadGraph(cwd: string): Task[] {
+	const dir = tasksDir(cwd);
+	if (!existsSync(dir)) return [];
 	const items: Task[] = [];
-	for (const summary of listTasks(cwd)) {
-		const item = tryReadTaskFile(cwd, summary.id);
-		if (item) items.push(item);
+	for (const file of readdirSync(dir)) {
+		if (!file.endsWith(".toml")) continue;
+		try {
+			const item = parseTask(readFileSync(join(dir, file), "utf-8"));
+			if (item) items.push(item);
+		} catch {
+			// corrupted — skipped, readTask surfaces it on direct access
+		}
 	}
-	return items;
+	return items.sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /**
@@ -1036,8 +1054,7 @@ function loadAllItems(cwd: string): Task[] {
  * The graph is built with subgraph_deps expanded, so cross-gate cycles are
  * caught too. The check runs on the in-memory overlay — nothing is written.
  */
-function assertNoCycle(cwd: string, itemId: string, deps: string[], moduleDeps: string[] = []): void {
-	const items = loadAllItems(cwd);
+function assertNoCycle(items: Task[], itemId: string, deps: string[], moduleDeps: string[] = []): void {
 	const idx = items.findIndex((i) => i.id === itemId);
 	const withTarget: Task[] =
 		idx >= 0
@@ -1114,7 +1131,7 @@ function resolveKind(
  * parent). The child itself (and info nodes generally) cannot be a dep of
  * anything except a task/module parent; a `info` child cannot be wired at all.
  */
-function normalizeIntoDeps(cwd: string, childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
+function normalizeIntoDeps(graph: Task[], childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
 	const targets = [...new Set(rawTargets.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
 	if (targets.length === 0) return targets;
 	if (childKind === "info") {
@@ -1122,15 +1139,15 @@ function normalizeIntoDeps(cwd: string, childId: string, childKind: TaskKind, ra
 			`tasks: kind "info" cannot declare into_deps — a shared information node is pure content, it can never be a task's dependency`,
 		);
 	}
+	const byId = new Map(graph.map((i) => [i.id, i]));
 	for (const t of targets) {
 		if (t === childId) {
 			throw new Error(`tasks: into_deps target "${t}" is the child's own id — a node cannot be its own parent (self-loop)`);
 		}
-		const target = tryReadTaskFile(cwd, t);
+		const target = byId.get(t);
 		if (!target) {
-			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
 			throw new Error(
-				`tasks: into_deps target "${t}" does not exist — create it first (a parent must exist before a child wires into it) — available tasks: ${available}`,
+				`tasks: into_deps target "${t}" does not exist — create it first (a parent must exist before a child wires into it) — available tasks: ${availableList(graph)}`,
 			);
 		}
 		if (target.kind === "info") {
@@ -1149,7 +1166,7 @@ function normalizeIntoDeps(cwd: string, childId: string, childKind: TaskKind, ra
  * cannot be `info`. A gate must sit OUTSIDE the module's own subgraph, so the
  * child may not be the module or within its transitive deps.
  */
-function normalizeIntoSubgraphDeps(cwd: string, childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
+function normalizeIntoSubgraphDeps(graph: Task[], childId: string, childKind: TaskKind, rawTargets: string[]): string[] {
 	const targets = [...new Set(rawTargets.map((d) => sanitizeTaskId(d)).filter(Boolean))].sort();
 	if (targets.length === 0) return targets;
 	if (childKind === "info") {
@@ -1157,15 +1174,15 @@ function normalizeIntoSubgraphDeps(cwd: string, childId: string, childKind: Task
 			`tasks: kind "info" cannot declare into_subgraph_deps — a shared information node gates nothing`,
 		);
 	}
+	const byId = new Map(graph.map((i) => [i.id, i]));
 	for (const t of targets) {
 		if (t === childId) {
 			throw new Error(`tasks: into_subgraph_deps target "${t}" is the child's own id — a module cannot gate on itself`);
 		}
-		const target = tryReadTaskFile(cwd, t);
+		const target = byId.get(t);
 		if (!target) {
-			const available = listTasks(cwd).map((w) => w.id).join(", ") || "(none)";
 			throw new Error(
-				`tasks: into_subgraph_deps target "${t}" does not exist — create the module first, then gate it on this node — available tasks: ${available}`,
+				`tasks: into_subgraph_deps target "${t}" does not exist — create the module first, then gate it on this node — available tasks: ${availableList(graph)}`,
 			);
 		}
 		if (target.kind !== "module") {
@@ -1247,12 +1264,16 @@ function wireChildIntoParent(
 		const arr = field === "deps" ? fresh.deps : fresh.subgraph_deps;
 		if (arr.includes(childId)) return false; // already wired — idempotent
 		const newArr = [...arr, childId].sort();
+		// The graph snapshot is taken alongside the fresh parent read; a concurrent
+		// commit changing OTHER nodes between snapshot and write is caught by the
+		// struct_version CAS below (and re-run here on retry).
+		const graph = loadGraph(cwd);
 		if (field === "deps") {
-			assertSubgraphDepOutsideSubgraph(cwd, parentId, newArr, fresh.subgraph_deps);
-			assertNoCycle(cwd, parentId, newArr, fresh.subgraph_deps);
+			assertSubgraphDepOutsideSubgraph(graph, parentId, newArr, fresh.subgraph_deps);
+			assertNoCycle(graph, parentId, newArr, fresh.subgraph_deps);
 		} else {
-			assertSubgraphDepOutsideSubgraph(cwd, parentId, fresh.deps, newArr);
-			assertNoCycle(cwd, parentId, fresh.deps, newArr);
+			assertSubgraphDepOutsideSubgraph(graph, parentId, fresh.deps, newArr);
+			assertNoCycle(graph, parentId, fresh.deps, newArr);
 		}
 		if (writeWiredParentCas(cwd, fresh, field, newArr, updatedBy, changeSummary)) return true;
 		// struct_version moved — another writer changed this parent; re-read and retry
@@ -1427,23 +1448,25 @@ export function commitTask(
 			);
 		}
 		const draft = parseDraftToml(cwd, draftToml, clean);
+		// Create has no retry loop — one snapshot covers every validation below.
+		const graph = loadGraph(cwd);
 		const title = draft.title?.trim() ?? "";
 		if (!title) {
 			throw new Error(
 				`tasks: draft ${relative(cwd, draftToml)} is missing title — write title = '...' (required for creation)`,
 			);
 		}
-		const deps = normalizeDeps(cwd, clean, draft.deps ?? []);
-		const moduleDeps = normalizeSubgraphDeps(cwd, draft.subgraph_deps ?? []);
-		const infoRefs = normalizeInfoRefs(cwd, clean, draft.info_refs ?? []);
-		assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
-		assertNoCycle(cwd, clean, deps, moduleDeps);
+		const deps = normalizeDeps(graph, clean, draft.deps ?? []);
+		const moduleDeps = normalizeSubgraphDeps(graph, draft.subgraph_deps ?? []);
+		const infoRefs = normalizeInfoRefs(graph, clean, draft.info_refs ?? []);
+		assertSubgraphDepOutsideSubgraph(graph, clean, deps, moduleDeps);
+		assertNoCycle(graph, clean, deps, moduleDeps);
 		const kind = resolveKind(draft.kind, deps, moduleDeps, infoRefs);
 		// Wiring directives: validated before the child exists (parents must exist & be legal), but
 		// APPLIED after the child is committed — the child must be a real dep before any parent can
 		// reference it.
-		const intoDeps = normalizeIntoDeps(cwd, clean, kind, draft.into_deps ?? []);
-		const intoSubgraphDeps = normalizeIntoSubgraphDeps(cwd, clean, kind, draft.into_subgraph_deps ?? []);
+		const intoDeps = normalizeIntoDeps(graph, clean, kind, draft.into_deps ?? []);
+		const intoSubgraphDeps = normalizeIntoSubgraphDeps(graph, clean, kind, draft.into_subgraph_deps ?? []);
 		const description = existsSync(draftDesc)
 			? parseBodyFile(readFileSync(draftDesc, "utf-8")).body
 			: "";
@@ -1510,6 +1533,12 @@ export function commitTask(
 	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
 		const base = attempt === 0 ? existing : tryReadTaskFile(cwd, clean);
 		if (!base) throw new Error(`tasks: task_commit "${clean}": task disappeared mid-commit`);
+		// Each attempt re-loads the graph alongside the fresh base: a concurrent
+		// commit may have changed a DIFFERENT node between attempts (an edge that,
+		// combined with this commit's new deps, closes a cycle), and
+		// commitStillCurrent only re-checks this node's own version — the graph
+		// check must see the same moment the base read does.
+		const graph = loadGraph(cwd);
 
 		let title = base.title;
 		let deps = base.deps;
@@ -1526,18 +1555,18 @@ export function commitTask(
 				}
 				title = patch.title.trim();
 			}
-			if (patch.deps !== undefined) deps = normalizeDeps(cwd, clean, patch.deps);
-			if (patch.subgraph_deps !== undefined) moduleDeps = normalizeSubgraphDeps(cwd, patch.subgraph_deps);
-			if (patch.info_refs !== undefined) infoRefs = normalizeInfoRefs(cwd, clean, patch.info_refs);
+			if (patch.deps !== undefined) deps = normalizeDeps(graph, clean, patch.deps);
+			if (patch.subgraph_deps !== undefined) moduleDeps = normalizeSubgraphDeps(graph, patch.subgraph_deps);
+			if (patch.info_refs !== undefined) infoRefs = normalizeInfoRefs(graph, clean, patch.info_refs);
 			if (patch.kind !== undefined) kind = patch.kind;
 			if (patch.deps !== undefined || patch.subgraph_deps !== undefined) {
-				assertSubgraphDepOutsideSubgraph(cwd, clean, deps, moduleDeps);
-				assertNoCycle(cwd, clean, deps, moduleDeps);
+				assertSubgraphDepOutsideSubgraph(graph, clean, deps, moduleDeps);
+				assertNoCycle(graph, clean, deps, moduleDeps);
 			}
 			kind = resolveKind(kind, deps, moduleDeps, infoRefs);
 			// Wiring directives on an EXISTING node: parents must exist & be legal; applied after commit.
-			intoDeps = normalizeIntoDeps(cwd, clean, kind, patch.into_deps ?? []);
-			intoSubgraphDeps = normalizeIntoSubgraphDeps(cwd, clean, kind, patch.into_subgraph_deps ?? []);
+			intoDeps = normalizeIntoDeps(graph, clean, kind, patch.into_deps ?? []);
+			intoSubgraphDeps = normalizeIntoSubgraphDeps(graph, clean, kind, patch.into_subgraph_deps ?? []);
 		}
 
 		const description = descScope && existsSync(draftDesc)
@@ -1717,7 +1746,7 @@ export function setTaskStatus(
 
 	// Snapshot the graph BEFORE the write: the unlocked set is "what THIS
 	// change newly unlocks", which requires the pre-change state.
-	const preItems = loadAllItems(cwd);
+	const preItems = loadGraph(cwd);
 	if (status === "done") {
 		const byId = new Map(preItems.map((i) => [i.id, i]));
 		// Effective deps: the item's own deps plus the gates of every module

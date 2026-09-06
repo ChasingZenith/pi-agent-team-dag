@@ -16,14 +16,10 @@
 import * as store from "./store";
 import type { Task } from "./store";
 
-/** Load every stored item as a full Task, keyed by id. */
+/** Load every stored item (metadata only — one directory scan via the
+ *  store's loadGraph primitive), keyed by id. */
 export function loadAllItems(cwd: string): Map<string, Task> {
-	const byId = new Map<string, Task>();
-	for (const s of store.listTasks(cwd)) {
-		const item = store.readTask(cwd, s.id);
-		if (item) byId.set(item.id, item);
-	}
-	return byId;
+	return new Map(store.loadGraph(cwd).map((i) => [i.id, i]));
 }
 
 /** Comma-joined ids of every stored item ("(none)" when empty). */
