@@ -291,23 +291,24 @@ export function getPeers(): AgentProfile[] {
 }
 
 /**
- * Resolve a peer name to its holder's profile. Returns null only when the
- * name is unclaimed. A gracefully_exited holder is returned as-is (lifecycle
- * "gracefully_exited") so callers can give a precise reason instead of a
- * generic "not found"; a crashed (living + stale) holder also resolves —
- * messages still queue on the stream and redeliver on restart.
+ * Resolve a peer name to its holder's profile. Returns null only for an
+ * unclaimed name — a genuine key miss, never a failed read. A
+ * gracefully_exited holder is returned as-is so callers can give a precise
+ * reason instead of a generic "not found"; a crashed (living + stale) holder
+ * also resolves — messages still queue on the stream and redeliver on
+ * restart.
+ *
+ * A read failure (NATS down, JetStream timeout) propagates: callers must
+ * report "comms unreachable, retry later" rather than a missing-target
+ * error, which would send an agent down the wrong recovery path.
  */
 export async function resolveName(subnet: string, name: string): Promise<StoredProfile | null> {
-	try {
-		const entry = await getKvProfiles().get(profileKey(subnet, name));
-		// A deleted key comes back as a DEL tombstone entry (non-null).
-		if (!entry || entry.operation === "DEL") return null;
-		const profile = entry.json<StoredProfile>();
-		if (!profile || typeof profile.name !== "string") return null;
-		return profile;
-	} catch {
-		return null;
-	}
+	const entry = await getKvProfiles().get(profileKey(subnet, name));
+	// A deleted key comes back as a DEL tombstone entry (non-null).
+	if (!entry || entry.operation === "DEL") return null;
+	const profile = entry.json<StoredProfile>();
+	if (!profile || typeof profile.name !== "string") return null;
+	return profile;
 }
 
 /**

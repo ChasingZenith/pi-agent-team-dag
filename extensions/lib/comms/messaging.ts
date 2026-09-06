@@ -72,6 +72,7 @@ import {
 } from "./protocol.ts";
 import { getJs, getJsm, getKvHistory } from "./nats.ts";
 import { resolveName, statusOfName, statusOfProfile } from "./registry.ts";
+import type { StoredProfile } from "./protocol.ts";
 import { audit } from "./audit.ts";
 import { createReminderScheduler, fifoEvict, type ReminderEntry } from "./reminder.ts";
 import * as history from "./history.ts";
@@ -416,7 +417,17 @@ export async function send(
 	// stale) holder still resolves: the message address is the NAME itself
 	// (stable across restarts), so a message published to a dead agent is
 	// queued by the stream up to its TTL and redelivered on restart.
-	const resolved = await resolveName(identity.subnet, target);
+	// resolveName throws on registry-read failure — that must surface as
+	// "comms unreachable", not "target not found" (null means key miss only).
+	let resolved: StoredProfile | null;
+	try {
+		resolved = await resolveName(identity.subnet, target);
+	} catch (err: any) {
+		throw new Error(
+			`comms: cannot reach the registry (NATS) to resolve ${target} — target existence unknown; ` +
+			`retry later (${err?.message ?? String(err)})`,
+		);
+	}
 	if (!resolved) {
 		throw new Error(
 			`comms: target not found: ${target} — check the exact name via comms_list_peer ` +
