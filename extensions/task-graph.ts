@@ -167,6 +167,149 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
+	 * One renderer for the task_read VIEW of a single task — shared by the live
+	 * record and the archived snapshot. Only the live record has live-graph
+	 * facts (readiness, dependents, drafts, integrity, injected-info
+	 * description) and the stale-report marker; those are gated on `live`, which
+	 * is omitted for an archived read. Everything else (structure lines,
+	 * on-demand field loading, report digest, history) is identical — and must
+	 * STAY identical, or the two read paths drift.
+	 */
+	function renderTaskView(
+		item: Task,
+		opts: {
+			archived: boolean;
+			fields?: ReadFields;
+			/** The id the caller actually supplied — the sanitize note compares it to the stored id. */
+			requestedId: string;
+			live?: { dependents: string[]; isReady: boolean; missing: string[] };
+		},
+	): string {
+		const { archived, fields, live } = opts;
+		const glyph = STATUS_GLYPH[item.status] ?? "◻";
+		const statusLine = `${glyph} ${item.status}`;
+		const lines: string[] = [
+			archived
+				? `task_read: ${item.id} v${item.version} — ARCHIVED SNAPSHOT — ${statusLine} — by ${item.updated_by} at ${item.updated_at}`
+				: `id: ${item.id} v${item.version} — ${statusLine} — updated by ${item.updated_by} at ${item.updated_at}`,
+			`title: ${item.title}`,
+			`kind: ${item.kind}`,
+			`deps: ${item.deps.length > 0 ? item.deps.join(", ") : "(none)"}`,
+		];
+		// Live-only: the soft structural signal — tells a consumer the subgraph
+		// grew WITHOUT forcing a re-read (content `version` is unchanged, so any
+		// report anchor still holds). Past versions need no such signal.
+		if (live && item.struct_version > 1 && item.struct_changed_at) {
+			lines.push(`subgraph changed (struct v${item.struct_version}) @ ${item.struct_changed_at} — deps/subgraph_deps grew; content version ${item.version} unchanged`);
+		}
+		if (item.subgraph_deps.length > 0) {
+			lines.push(`subgraph_deps: ${item.subgraph_deps.join(", ")} (subgraph gates — the whole subgraph waits for these)`);
+		}
+		if (item.info_refs.length > 0) {
+			lines.push(`info_refs: ${item.info_refs.join(", ")} (shared information injected into this item's description)`);
+		}
+		lines.push(
+			`dispatched_to: ${item.dispatched_to ? item.dispatched_to.name : "(none)"}`,
+			`execution_session: ${item.execution_session ? item.execution_session.session_id : "(none — the worker records it at task_start)"}`,
+		);
+		const descLen = item.description?.length ?? 0;
+		const reportLen = item.completion_report?.length ?? 0;
+		const isInfo = item.kind === "info";
+		if (live) {
+			let readyLine: string;
+			if (item.status === "done") {
+				readyLine = "ready: no — already done";
+			} else if (live.isReady) {
+				readyLine = "ready: yes — dispatchable in parallel";
+			} else if (live.missing.length > 0) {
+				readyLine = `ready: no — missing deps: ${live.missing.join(", ")}`;
+			} else {
+				readyLine = "ready: no";
+			}
+			lines.push(
+				`dependents: ${live.dependents.length > 0 ? live.dependents.join(", ") : "(none)"}`,
+				isInfo ? "ready: none — shared information (pure content, never dispatched)" : readyLine,
+				`description (v${item.version}): ${descLen} chars`,
+				`completion report (for description v${item.report_for_version ?? "?"}): ${reportLen} chars`,
+			);
+			const draftCount = callerDraftCount(item.id);
+			if (draftCount > 0) {
+				lines.push(`you have ${draftCount} uncommitted draft(s) for this task`);
+			}
+			if (item.integrity_warnings && item.integrity_warnings.length > 0) {
+				for (const w of item.integrity_warnings) lines.push(`⚠ integrity: ${w}`);
+			}
+		}
+		// Long bodies — loaded on demand. The live description is the EFFECTIVE
+		// one: shared info (info_refs) injected, then the item's own body. (Editing
+		// via task_checkout uses the raw own-description, keeping shared content
+		// referenced, not copied.) An archived snapshot reads its own stored body.
+		// Lazy: each call re-reads every info_ref from disk, so views that don't
+		// show the description (summary / fields="report") must not pay for it.
+		const shownDescription = () => (live ? store.effectiveDescription(cwd, item) : item.description);
+		const versionSuffix = archived ? `, version=${item.version}` : "";
+		if (fields === "description") {
+			const d = shownDescription();
+			lines.push(d ? `description: ${d}` : "description: (none)");
+			if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}"${versionSuffix}, fields="report")`);
+		} else if (fields === "report") {
+			if (item.completion_report) {
+				const stale = !archived && (item.report_for_version ?? item.version) < item.version;
+				const flagged = archived
+					? ""
+					: ` — ⚠ STALE: the task is now v${item.version}`;
+				lines.push(
+					`── Completion report (for description v${item.report_for_version ?? "?"}${stale ? flagged : ""}) ──`,
+					item.completion_report,
+				);
+			} else {
+				lines.push("completion report: (none)");
+			}
+			if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}"${versionSuffix}, fields="description")`);
+		} else if (fields === "full") {
+			const d = shownDescription();
+			if (d) lines.push(`description: ${d}`);
+			if (item.completion_report) {
+				const stale = !archived && (item.report_for_version ?? item.version) < item.version;
+				const flagged = archived
+					? ""
+					: ` — ⚠ STALE: the task is now v${item.version}`;
+				lines.push(
+					`── Completion report (for description v${item.report_for_version ?? "?"}${stale ? flagged : ""}${live ? " — written by the dispatched agent; the manager reads it before task_complete)" : ""}) ──`,
+					item.completion_report,
+				);
+			}
+		} else {
+			if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}"${versionSuffix}, fields="description")`);
+			if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}"${versionSuffix}, fields="report")`);
+		}
+		// The store digests the completion report by its first line (the history
+		// entry that wrote it repeats that text).
+		const reportShown = fields === "report" || fields === "full";
+		const reportDigest =
+			reportShown && item.completion_report
+				? item.completion_report.split("\n")[0].replace(/\s+/g, " ").trim()
+				: null;
+		const historyLines = item.history.map((h) => {
+			const summary =
+				reportDigest && h.change_summary === reportDigest
+					? "(completion report digest — see the report above)"
+					: h.change_summary;
+			return `  v${h.version} [${h.changed_items.join(", ") || h.event || "update"}] ${h.updated_at} by ${h.updated_by} — ${summary}`;
+		});
+		lines.push(
+			archived ? `── Change history (as of v${item.version}) ──` : "── Change history ──",
+			historyLines.length > 0 ? historyLines.join("\n") : "  (none)",
+		);
+		if (!archived && item.version > 1) {
+			lines.push(`archived snapshots: v1..v${item.version - 1} — task_read(id, version=<n>) to read one`);
+		}
+		const idNote = store.sanitizedIdNote(opts.requestedId);
+		if (idNote) lines.push(idNote);
+		return lines.join("\n");
+	}
+
+	/**
 	 * Full-graph health check — the SAME check task_list runs, extracted so any
 	 * tool can surface structure problems next to its own result: every cycle,
 	 * every dangling dep (dep or subgraph gate id with no item), and every
@@ -709,67 +852,9 @@ pi.registerTool({
 						details: { id: p.id, found: false },
 					};
 				}
-				const glyph = STATUS_GLYPH[snap.status] ?? "◻";
-				const statusLine = `${glyph} ${snap.status}`;
-				const lines = [
-					`task_read: ${snap.id} v${snap.version} — ARCHIVED SNAPSHOT — ${statusLine} — by ${snap.updated_by} at ${snap.updated_at}`,
-					`title: ${snap.title}`,
-					`kind: ${snap.kind}`,
-					`deps: ${snap.deps.length > 0 ? snap.deps.join(", ") : "(none)"}`,
-				];
-				if (snap.subgraph_deps.length > 0) {
-					lines.push(`subgraph_deps: ${snap.subgraph_deps.join(", ")} (subgraph gates — whole subgraph waits for these)`);
-				}
-				if (snap.info_refs.length > 0) {
-					lines.push(`info_refs: ${snap.info_refs.join(", ")} (shared information injected into this item's description)`);
-				}
-				if (snap.dispatched_to) {
-					lines.push(`dispatched_to: ${snap.dispatched_to.name}`);
-				}
-				if (snap.execution_session) {
-					lines.push(`execution_session: ${snap.execution_session.session_id}`);
-				}
-				const descLen = snap.description?.length;
-				const reportLen = snap.completion_report?.length;
-				if (fields === "description") {
-					lines.push(snap.description ? `description: ${snap.description}` : "description: (none)");
-					if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="report")`);
-				} else if (fields === "report") {
-					if (snap.completion_report) lines.push(`── Completion report (for description v${snap.report_for_version ?? "?"}) ──`, snap.completion_report);
-					else lines.push("completion report: (none)");
-					if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="description")`);
-				} else if (fields === "full") {
-					if (snap.description) lines.push(`description: ${snap.description}`);
-					if (snap.completion_report) {
-						lines.push(
-							`── Completion report (for description v${snap.report_for_version ?? "?"}) ──`,
-							snap.completion_report,
-						);
-					}
-				} else {
-					if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="description")`);
-					if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${snap.id}", version=${snap.version}, fields="report")`);
-				}
-				const reportShown = fields === "report" || fields === "full";
-				const reportDigest =
-					reportShown && snap.completion_report
-						? snap.completion_report.split("\n")[0].replace(/\s+/g, " ").trim()
-						: null;
-				const historyLines = snap.history.map((h) => {
-					const summary =
-						reportDigest && h.change_summary === reportDigest
-							? "(completion report digest — see the report above)"
-							: h.change_summary;
-					return `  v${h.version} [${h.changed_items.join(", ") || h.event || "update"}] ${h.updated_at} by ${h.updated_by} — ${summary}`;
-				});
-				lines.push(
-					`── Change history (as of v${snap.version}) ──`,
-					historyLines.length > 0 ? historyLines.join("\n") : "  (none)",
-				);
-				const archivedIdNote = store.sanitizedIdNote(p.id);
-				if (archivedIdNote) lines.push(archivedIdNote);
+				const text = renderTaskView(snap, { archived: true, fields, requestedId: p.id });
 				return {
-					content: [{ type: "text" as const, text: lines.join("\n") }],
+					content: [{ type: "text" as const, text }],
 					details: {
 						found: true,
 						archived: true,
@@ -778,8 +863,6 @@ pi.registerTool({
 					},
 				};
 			}
-			const glyph = STATUS_GLYPH[item.status] ?? "◻";
-			const statusLine = `${glyph} ${item.status}`;
 			const byId = loadAllItems(cwd);
 			const itemsArr = [...byId.values()];
 			const dependents = graph.dependentsOf(itemsArr, item.id);
@@ -787,111 +870,9 @@ pi.registerTool({
 			const isReady = rs.ready.some((x) => x.id === item.id);
 			const notReadyInfo = rs.notReady.find((x) => x.item.id === item.id);
 			const missing = notReadyInfo ? notReadyInfo.missing : [];
-
-			let readyLine: string;
-			if (item.status === "done") {
-				readyLine = "ready: no — already done";
-			} else if (isReady) {
-				readyLine = "ready: yes — dispatchable in parallel";
-			} else if (missing.length > 0) {
-				readyLine = `ready: no — missing deps: ${missing.join(", ")}`;
-			} else {
-				readyLine = "ready: no";
-			}
-			const lines = [
-				`id: ${item.id} v${item.version} — ${statusLine} — updated by ${item.updated_by} at ${item.updated_at}`,
-				`title: ${item.title}`,
-				`kind: ${item.kind}`,
-				`deps: ${item.deps.length > 0 ? item.deps.join(", ") : "(none)"}`,
-			];
-			// Soft structural signal: the subgraph (deps / subgraph_deps) has changed since a past
-			// content version — tells a consumer the graph grew WITHOUT forcing a re-read (content
-			// `version` is unchanged, so any report anchor still holds).
-			if (item.struct_version > 1 && item.struct_changed_at) {
-				lines.push(`subgraph changed (struct v${item.struct_version}) @ ${item.struct_changed_at} — deps/subgraph_deps grew; content version ${item.version} unchanged`);
-			}
-			if (item.subgraph_deps.length > 0) {
-				lines.push(`subgraph_deps: ${item.subgraph_deps.join(", ")} (subgraph gates — the whole subgraph waits for these)`);
-			}
-			if (item.info_refs.length > 0) {
-				lines.push(`info_refs: ${item.info_refs.join(", ")} (shared information injected into this item's description)`);
-			}
-			const descLen = item.description?.length ?? 0;
-			const reportLen = item.completion_report?.length ?? 0;
-			const isInfo = item.kind === "info";
-			lines.push(
-				`dispatched_to: ${item.dispatched_to ? item.dispatched_to.name : "(none)"}`,
-				`execution_session: ${item.execution_session ? `${item.execution_session.session_id}` : "(none — the worker records it at task_start)"}`,
-				`dependents: ${dependents.length > 0 ? dependents.join(", ") : "(none)"}`,
-				isInfo ? "ready: none — shared information (pure content, never dispatched)" : readyLine,
-				`description (v${item.version}): ${descLen} chars`,
-				`completion report (for description v${item.report_for_version ?? "?"}): ${reportLen} chars`,
-			);
-			const draftCount = callerDraftCount(item.id);
-			if (draftCount > 0) {
-				lines.push(
-					`you have ${draftCount} uncommitted draft(s) for this task`,
-				);
-			}
-			if (item.integrity_warnings && item.integrity_warnings.length > 0) {
-				for (const w of item.integrity_warnings) lines.push(`⚠ integrity: ${w}`);
-			}
-			// Long bodies — loaded on demand. The description is the EFFECTIVE one:
-			// shared info (info_refs) injected, then the item's own body — so a
-			// worker reading a task sees shared requirements written once plus
-			// the task-specific part. (Editing via task_checkout uses the raw
-			// own-description, keeping shared content referenced, not copied.)
-			const effective = store.effectiveDescription(cwd, item);
-			if (fields === "description") {
-				lines.push(effective ? `description: ${effective}` : "description: (none)");
-				if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}", fields="report")`);
-			} else if (fields === "report") {
-				if (item.completion_report)
-					lines.push(
-						`── Completion report (for description v${item.report_for_version}${item.report_for_version < item.version ? ` — ⚠ STALE: the task is now v${item.version}` : ""}) ──`,
-						item.completion_report,
-					);
-				else lines.push("completion report: (none)");
-				if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}", fields="description")`);
-			} else if (fields === "full") {
-				if (effective) lines.push(`description: ${effective}`);
-				if (item.completion_report) {
-					lines.push(
-						`── Completion report (for description v${item.report_for_version}${item.report_for_version < item.version ? ` — ⚠ STALE: the task is now v${item.version}` : ""} — written by the dispatched agent; the manager reads it before task_complete) ──`,
-						item.completion_report,
-					);
-				}
-			} else {
-				if (descLen) lines.push(`description: omitted (${descLen} chars) — load with task_read(id="${item.id}", fields="description")`);
-				if (reportLen) lines.push(`completion report: omitted (${reportLen} chars) — load with task_read(id="${item.id}", fields="report")`);
-			}
-			// The store digests the completion report by its first line (the
-			// history entry that wrote it repeats that text).
-			const reportShown = fields === "report" || fields === "full";
-			const reportDigest =
-				reportShown && item.completion_report
-					? item.completion_report.split("\n")[0].replace(/\s+/g, " ").trim()
-					: null;
-			const historyLines = item.history.map((h) => {
-				const summary =
-					reportDigest && h.change_summary === reportDigest
-						? "(completion report digest — see the report above)"
-						: h.change_summary;
-				return `  v${h.version} [${h.changed_items.join(", ") || h.event || "update"}] ${h.updated_at} by ${h.updated_by} — ${summary}`;
-			});
-			lines.push(
-				`── Change history ──`,
-				historyLines.length > 0 ? historyLines.join("\n") : "  (none)",
-			);
-			if (item.version > 1) {
-				lines.push(
-					`archived snapshots: v1..v${item.version - 1} — task_read(id, version=<n>) to read one`,
-				);
-			}
-			const idNote = store.sanitizedIdNote(p.id);
-			if (idNote) lines.push(idNote);
+			const text = renderTaskView(item, { archived: false, fields, requestedId: p.id, live: { dependents, isReady, missing } });
 			return {
-				content: [{ type: "text" as const, text: lines.join("\n") }],
+				content: [{ type: "text" as const, text }],
 				details: {
 					found: true,
 					item: { id: item.id, status: item.status, version: item.version, struct_version: item.struct_version },
