@@ -11,6 +11,10 @@ A pi extension providing Networked agent-to-agent communication (`comms` on NATS
 - `docs/` — Feature documentation (overview & index: `docs/0-overview.md`; each module doc covers only its own design/function)
 - `.pi/agent-sessions/` — Ephemeral session files (gitignored)
 
+## Coding Guidelines
+
+- Comments and docs should not restate what the code already shows. Keep only what code cannot express: the WHY behind a decision, and invariants (constraints between values/components that must hold, e.g. "X must stay smaller than Y").
+
 ## Conventions
 - Documentation in `doc/` should only contain description for the latest version. Don't mention any thing about changes.
 - Checks: `bun test` for the test suite (tests/*.test.ts, bun:test). Type check with `bunx tsc --noEmit` — never `npx tsc` (tsc is not installed);
