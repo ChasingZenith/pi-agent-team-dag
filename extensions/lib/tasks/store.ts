@@ -664,9 +664,8 @@ function loadBodies(cwd: string, item: Task): Task {
 	} else if (item.report_sha256 !== null) {
 		warnings.push(`${item.id}.report.md is missing — the true copy was deleted`);
 	}
-	// the report anchor is mandatory: a missing / un-anchored true copy falls
-	// back to the current version (an un-anchored report is treated as current).
-	if (item.report_for_version === undefined) item.report_for_version = item.version;
+	// Invariant: report_for_version is always set — parseTask seeds it from d.version and the
+	// report branch above re-seeds from the body frontmatter (pf.for_version ?? item.version).
 	if (warnings.length > 0) item.integrity_warnings = warnings;
 	return item;
 }
@@ -790,7 +789,7 @@ export function readTaskVersion(cwd: string, id: string, version: number): Task 
 		item.completion_report = pf.body.trim() ? pf.body : null;
 		item.report_for_version = pf.for_version ?? item.version;
 	}
-	if (item.report_for_version === undefined) item.report_for_version = item.version;
+	// report_for_version is always set by parseTask / the report branch above.
 	return item;
 }
 
