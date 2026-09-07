@@ -10,10 +10,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/comms.ts",
-      "./extensions/task-graph.ts",
-      "./extensions/task-comms-ops.ts",
-      "./extensions/agent-lifecycle/index.ts"
+      "./extensions/comms.ts"
     ]
   },
   "devDependencies": {
