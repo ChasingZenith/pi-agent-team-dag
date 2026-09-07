@@ -55,6 +55,9 @@ export interface RegistryInstance {
 	register(identity: Identity, extra: ProfileHeartbeatExtra): Promise<void>;
 	heartbeat(identity: Identity, extra: ProfileHeartbeatExtra): Promise<StoredProfile>;
 	updateOwnProfile(identity: Identity, patch: { current_task?: string | undefined }, live?: ProfileHeartbeatExtra): Promise<StoredProfile>;
+	/** Explicitly vacate a name so a coordinated same-name re-register (restart)
+	 *  can reclaim it IMMEDIATELY instead of waiting for reclaimAfterMs. Best-effort. */
+	releaseName(subnet: string, name: string): Promise<void>;
 	startWatch(subnet: string): void;
 	stopWatch(): void;
 	getPeers(): AgentProfile[];
@@ -402,6 +405,36 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 		}
 	}
 
+	/**
+	 * Explicitly vacate a name for a coordinated same-name re-register (agent
+	 * restart): writes a terminal `gracefully_exited` tombstone for the given
+	 * name — the same immutable terminal state clearOwn creates for the holder's
+	 * own name — so register's collision path steals it RACE-FREE immediately
+	 * (terminal state cannot flip between read and write). This is the escape
+	 * hatch for a restart that must keep its exact name, instead of waiting out
+	 * the conservative reclaimAfterMs (which would suffix the name).
+	 *
+	 * Best-effort: a failure (holder unreadable / revision raced / NATS down)
+	 * only leaves the name to be reclaimed by the ordinary conservative path.
+	 */
+	async function releaseName(subnet: string, name: string): Promise<void> {
+		try {
+			const key = profileKey(subnet, name);
+			const entry = await kv().get(key);
+			// Already free (key miss) or a DEL tombstone — register reclaims them.
+			if (!entry || entry.operation === "DEL") return;
+			const holder = entry.json<StoredProfile>();
+			if (!holder || typeof holder.name !== "string") return;
+			// Revision-checked update: if another register stole the name between
+			// our read and write, the revision mismatches and we abandon (no
+			// clobber of a fresh holder).
+			const tombstone: StoredProfile = { ...holder, lifecycle: "gracefully_exited" };
+			await kv().update(key, JSON.stringify(tombstone), entry.revision);
+		} catch {
+			// best-effort — falls back to the ordinary reclaim path
+		}
+	}
+
 	function onCacheChange(cb: (() => void) | null): void {
 		onChange = cb;
 	}
@@ -410,6 +443,7 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 		register,
 		heartbeat,
 		updateOwnProfile,
+		releaseName,
 		startWatch,
 		stopWatch,
 		getPeers,

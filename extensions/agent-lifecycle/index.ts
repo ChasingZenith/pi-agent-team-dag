@@ -57,6 +57,13 @@ import { checkTmux, tmuxNewWindow, tmuxKillWindow } from "../lib/tmux";
 import { agentFileStem, writeAndSendScript } from "../lib/launch-script";
 import { forkSession, writePreloadedSessionFile } from "../lib/role-context/fork";
 import { sanitizeAgentName } from "../lib/comms/protocol";
+import { COMMS_RUNTIME_EVENT, type CommsRuntime } from "../lib/comms/runtime";
+import type { RegistryInstance } from "../lib/comms/registry";
+
+// Comms handle shared by the ext peer bus (comms.ts emits it): the restart
+// path uses registry.releaseName to vacate the dead agent's name so a
+// same-name re-register reclaims it immediately instead of suffixing.
+let commsRegistry: { registry: RegistryInstance; subnet: string } | null = null;
 
 // Expanded (ctrl+O) rendering: show the full call args — the same information
 // the LLM sees in its context.
@@ -702,6 +709,16 @@ export async function executeAgentRestart(
   llmCtx.skills = manifest.skills;
   llmCtx.extensions = manifest.extensions;
 
+  // Vacate the dead agent's name in the comms registry so the re-register
+  // below reclaims it immediately (stays SAME name) instead of suffixing to
+  // <name>2 after the conservative reclaimAfterMs. The kill above reaped the
+  // old process, but its comms profile stays `living` with a recent
+  // last_seen_at — unreclaimable, so register would suffix. Best-effort:
+  // without comms up, the name may still get a suffix and restart still works.
+  if (commsRegistry) {
+    await commsRegistry.registry.releaseName(commsRegistry.subnet, cname);
+  }
+
   const spawnResult = await executeAgentSpawn(
     {
       name,
@@ -800,6 +817,17 @@ export function isAgentNameTaken(name: string): boolean {
 export default function (pi: ExtensionAPI) {
   // ---- State ----
   let cwd = process.cwd();
+
+  // Subscribe at factory time so the full (post-connect) comms handle is
+  // captured for restart's name release (see module-level commsRegistry).
+  pi.events.on(COMMS_RUNTIME_EVENT, (rt) => {
+    const r = rt as CommsRuntime;
+    // Null-guard: the event emits once degraded (registry null, boot failure)
+    // then once full. Only the full handle exposes the live registry.
+    if (r.registry) {
+      commsRegistry = { registry: r.registry, subnet: r.identity.subnet };
+    }
+  });
 
   // ---- Flags ----
   // --role-dir registers extra role template directories (repeatable, highest
