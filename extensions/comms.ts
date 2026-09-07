@@ -491,11 +491,16 @@ export default function (pi: ExtensionAPI) {
 			"List peer agents on the comms hub for YOUR subnet: each peer's name, status, model, " +
 			"live context-window usage, and current task. Your own entry is marked with a \"(you)\" suffix. " +
 			"Status symbols: ● online · ✗ stale (no heartbeat for ~60 s) · ~ exited.",
-		parameters: Type.Object({}),
-		async execute(_callId, _params) {
+		parameters: Type.Object({
+			include_exited: Type.Optional(Type.Boolean({
+				description: "Exited agents are hidden by default — pass include_exited: true to list them too. " + "Also list gracefully-exited agents (default false — they are hidden).",
+			})),
+		}),
+		async execute(_callId, params) {
 			if (!identity) throw new Error("comms not initialised");
 			const selfIdentity = identity; // narrowed const: usable inside the .map() closure below
-			const peers = registryInst?.getPeers() ?? [];
+			const all = registryInst?.getPeers() ?? [];
+			const peers = params.include_exited ? all : all.filter((a) => a.status !== "exited");
 
 			const lines = peers.length === 0
 				? "No peer agents found."

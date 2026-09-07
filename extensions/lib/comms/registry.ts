@@ -309,9 +309,19 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 
 	// ━━ Queries ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+	/** Display rank so the peer list sorts online → stale → exited. Exited is
+	 *  last: a tombstone is the least actionable, so it sinks to the bottom. */
+	function statusRank(status: AgentStatus): number {
+		if (status === "online") return 0;
+		if (status === "stale") return 1;
+		return 2;
+	}
+
 	/** Live peer profiles (status derived from lifecycle + last_seen_at), for
 	 *  comms_list_peer. Terminal (gracefully_exited) entries are included — they
-	 *  are the tombstones that let the UI distinguish a clean exit from a crash. */
+	 *  are the tombstones that let the UI distinguish a clean exit from a crash.
+	 *  Sorted online → stale → exited (name tiebreak) so the TUI widget and the
+	 *  tool both show the actionable peers first. */
 	function getPeers(): AgentProfile[] {
 		const out: AgentProfile[] = [];
 		for (const profile of cache.values()) {
@@ -320,6 +330,7 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 				status: statusFromProfile(profile, staleAfterMs),
 			});
 		}
+		out.sort((a, b) => (statusRank(a.status) - statusRank(b.status)) || a.name.localeCompare(b.name));
 		return out;
 	}
 
