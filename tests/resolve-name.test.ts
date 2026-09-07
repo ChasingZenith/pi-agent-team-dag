@@ -57,7 +57,7 @@ const kv = new FakeKv();
 
 // Factory construction with the fake KV injected directly — no module mock.
 const registry = createRegistry({
-	offlineAfterMs: 60_000,
+	staleAfterMs: 60_000,
 	reclaimAfterMs: 10 * 60_000,
 	kvProfiles: () => kv as any,
 });

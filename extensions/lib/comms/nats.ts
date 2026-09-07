@@ -80,7 +80,7 @@ export async function connectNats(cfg: RuntimeConfig): Promise<void> {
 	jsm = await jsc.jetstreamManager();
 
 	// Two KV buckets (see protocol.ts):
-	//   comms_profiles   — permanent lifecycle records (no TTL; offline/exited
+	//   comms_profiles   — permanent lifecycle records (no TTL; stale/exited
 	//                  stay visible; status derived from lifecycle+last_seen_at;
 	//                  the name claim lives in the same entry — reclaim is
 	//                  reader-driven, no lease bucket).

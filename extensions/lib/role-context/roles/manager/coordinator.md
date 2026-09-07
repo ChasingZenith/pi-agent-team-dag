@@ -79,7 +79,7 @@ Know about the task dependence graph through skill `task-graph-background`, the 
 
 ### Worker Offline Recovery
 
-A dispatched/active task may lose its worker — the comms reminder reports the recipient `(offline)` on a `task_dispatch`, OR the worker shows online but has not progressed for `> 3 × remind_s` (no report / no `task_start`; read the task's `in status` age). Either is `worker_offline`, NOT `blocked` (the executor disappeared — a recoverable failure, not a plan contradiction).
+A dispatched/active task may lose its worker — the comms reminder reports the recipient `(stale)` on a `task_dispatch`, OR the worker shows online but has not progressed for `> 3 × remind_s` (no report / no `task_start`; read the task's `in status` age). Either is `worker_offline`, NOT `blocked` (the executor disappeared — a recoverable failure, not a plan contradiction).
 
 The full two-role protocol is in skill `recover-worker` (read it, do not improvise). Its decision wedge: **set `worker_offline` recording the rung, resume the old session first (or spawn fresh if it stays silent), re-dispatch, and never redo a rung already reached.**
 

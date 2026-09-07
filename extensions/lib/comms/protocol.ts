@@ -11,7 +11,7 @@
  *
  *   stream  COMMS_<subnet>             subjects <subnet>.msg.>
  *   bucket  comms_profiles               keys a.<subnet>.<name> (profile = lifecycle
- *                                     record, no TTL — offline/exited agents stay visible;
+ *                                     record, no TTL — stale/exited agents stay visible;
  *                                     liveness derived from lifecycle + last_seen_at)
  *   bucket  comms_history             keys h.<subnet>.<name>.<out|in>.<msg_id>
  *                                     (bidirectional message content history, bucket TTL)
@@ -46,13 +46,13 @@ export const DEFAULT_NATS_URL = "nats://127.0.0.1:4222";
  *  (separate streams/subjects/KV keys) — pass --subnet to join a specific one. */
 export const DEFAULT_SUBNET = "subnet0";
 export const DEFAULT_HEARTBEAT_MS = 10_000;
-/** No heartbeat for this long → the peer is OFFline (status derived from
+/** No heartbeat for this long → the peer is STALE (status derived from
  *  last_seen_at — a single threshold; there is no intermediate state). Kept
  *  small so status converges fast; NOT used for name reclaim. */
-export const DEFAULT_OFFLINE_AFTER_MS = 60_000;
+export const DEFAULT_STALE_AFTER_MS = 60_000;
 /** No heartbeat for this long → the name claim of a living-profiled agent is
  *  presumed dead and reclaimable (register's collision path steals it). Kept
- *  deliberately larger than OFFLINE_AFTER_MS: a steal must never fire on a
+ *  deliberately larger than STALE_AFTER_MS: a steal must never fire on a
  *  merely slow/lagging agent — only on a deeply-gone one. */
 export const DEFAULT_RECLAIM_AFTER_MS = 10 * 60_000;
 export const DEFAULT_MESSAGE_TTL_MS = 1_800_000; // 30 min
@@ -124,9 +124,9 @@ export function streamName(subnet: string = DEFAULT_SUBNET): string {
 /**
  * Profile key is the agent NAME, not the session id: one entry per name, and
  * reclaiming a name overwrites the old profile — no duplicate profiles for a
- * restarted agent. The entry persists even after the agent goes offline
- * (profiles bucket has no TTL) — it is the tombstone that keeps dead agents
- * visible and their last state readable.
+ * restarted agent. The entry persists even after the agent goes stale or
+ * exited (profiles bucket has no TTL) — it is the tombstone that keeps dead
+ * agents visible and their last state readable.
  */
 export function profileKey(subnet: string, name: string): string {
 	return `a.${subnet}.${sanitizeAgentName(name)}`;
@@ -177,7 +177,7 @@ export function msgSubjectPrefix(subnet: string, name: string): string {
  *  consumer persists across restarts (clean shutdown does NOT delete it —
  *  the profile entry just becomes a terminal tombstone), so a restart under
  *  the same name resumes the same cursor: unacked prompts redeliver, acked
- *  ones are never replayed, and messages queued while offline deliver on
+ *  ones are never replayed, and messages queued while the agent is gone deliver on
  *  return. */
 export function promptDurable(name: string): string {
 	return `p_${sanitizeAgentName(name)}`;
@@ -185,7 +185,7 @@ export function promptDurable(name: string): string {
 
 // ━━ Shared types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-type AgentStatus = "online" | "offline";
+export type AgentStatus = "online" | "stale" | "exited";
 
 /**
  * Lifecycle of an agent, as WRITTEN by the agent itself:
@@ -341,24 +341,24 @@ export function nowIso(): string {
 	return new Date().toISOString();
 }
 
-/** Derived status from last_seen: heartbeated within offlineAfterMs → online,
- *  otherwise offline. One threshold — no intermediate state. */
-export function statusFromLastSeen(lastSeenIso: string, offlineAfterMs: number): AgentStatus {
+/** Derived status from last_seen: heartbeated within staleAfterMs → online,
+ *  otherwise stale. One threshold — no intermediate state. */
+export function statusFromLastSeen(lastSeenIso: string, staleAfterMs: number): "online" | "stale" {
 	const last = Date.parse(lastSeenIso);
-	if (Number.isNaN(last)) return "offline";
-	return Date.now() - last > offlineAfterMs ? "offline" : "online";
+	if (Number.isNaN(last)) return "stale";
+	return Date.now() - last > staleAfterMs ? "stale" : "online";
 }
 
 /**
  * Derived status from a full profile record. A terminal lifecycle
- * (gracefully_exited) is unconditionally offline; a living record is judged
- * by last_seen_at (a crash leaves "living" behind, so the timestamp is the
- * only liveness evidence).
+ * (gracefully_exited) is exited; a living record is judged by last_seen_at
+ * (a crash leaves "living" behind, so the timestamp is the only liveness
+ * evidence).
  */
 export function statusFromProfile(
 	profile: Pick<StoredProfile, "lifecycle" | "last_seen_at">,
-	offlineAfterMs: number,
+	staleAfterMs: number,
 ): AgentStatus {
-	if (profile.lifecycle === "gracefully_exited") return "offline";
-	return statusFromLastSeen(profile.last_seen_at, offlineAfterMs);
+	if (profile.lifecycle === "gracefully_exited") return "exited";
+	return statusFromLastSeen(profile.last_seen_at, staleAfterMs);
 }

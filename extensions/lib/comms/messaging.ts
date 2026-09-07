@@ -57,7 +57,7 @@ import {
 	type JetStreamManager,
 	nanos,
 } from "nats";
-import type { DeliverAsValue, Identity, InboundContext, PromptPayload, StoredProfile } from "./protocol.ts";
+import type { AgentStatus, DeliverAsValue, Identity, InboundContext, PromptPayload, StoredProfile } from "./protocol.ts";
 import {
 	ACK_WAIT_MS,
 	CONSUMER_INACTIVE_THRESHOLD_MS,
@@ -126,7 +126,7 @@ export interface ActiveReminder {
 	target: string;
 	elapsed_ms: number;
 	/** "unknown" when the name is missing from the registry cache. */
-	target_status: "online" | "offline" | "unknown";
+	target_status: AgentStatus | "unknown";
 	/** ms remaining until sentAt + TTL (out only); null when no TTL configured. */
 	expires_in_ms: number | null;
 	remind_s: number;
@@ -135,8 +135,8 @@ export interface ActiveReminder {
 
 export interface SendResult {
 	msg_id: string;
-	/** Target status at send time (online / offline) — the message is queued regardless. */
-	target_status: "online" | "offline";
+	/** Target status at send time (online / stale / exited) — the message is queued regardless. */
+	target_status: AgentStatus;
 }
 
 export interface SendOptions {
@@ -470,7 +470,7 @@ export function createMessaging(deps: MessagingDeps): MessagingInstance {
 
 		// Target status for the caller (comms_send's target_status): derived from
 		// the profile snapshot resolveName just returned. The message is queued
-		// to the stream regardless — an offline target simply redelivers on
+		// to the stream regardless — a stale target simply redelivers on
 		// restart.
 		const targetStatus = registry.statusOfProfile(resolved);
 

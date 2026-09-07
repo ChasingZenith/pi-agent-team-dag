@@ -7,7 +7,7 @@
  *                raw heartbeat timestamp; addressability and status always
  *                come from the same snapshot.
  *
- * Entries outlive the agent: an offline/exited agent stays visible. Name
+ * Entries outlive the agent: a stale/exited agent stays visible. Name
  * reclaim happens when a register collides with a dead holder — a
  * gracefully_exited terminal state (immutable, so the steal is race-free via
  * revision-check) or a living profile whose last_seen_at is older than
@@ -25,7 +25,7 @@
  */
 
 import type { KV, KvEntry, QueuedIterator } from "nats";
-import type { AgentProfile, Identity, StoredProfile } from "./protocol.ts";
+import type { AgentProfile, AgentStatus, Identity, StoredProfile } from "./protocol.ts";
 import {
 	profileKey,
 	profileKeyPrefix,
@@ -37,9 +37,9 @@ import { audit, type AuditFn } from "./audit.ts";
 // ━━ Factory ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export interface RegistryConfig {
-	/** Display-offline threshold (ms) — REQUIRED. Kept small so status
+	/** Display-stale threshold (ms) — REQUIRED. Kept small so status
 	 *  converges fast; NOT used for name reclaim. */
-	offlineAfterMs: number;
+	staleAfterMs: number;
 	/** Name-reclaim threshold (ms) — REQUIRED. Conservative: a steal must
 	 *  never fire on a merely slow/lagging agent. */
 	reclaimAfterMs: number;
@@ -62,8 +62,8 @@ export interface RegistryInstance {
 	stopWatch(): void;
 	getPeers(): AgentProfile[];
 	resolveName(subnet: string, name: string): Promise<StoredProfile | null>;
-	statusOfName(subnet: string, name: string): "online" | "offline";
-	statusOfProfile(profile: StoredProfile): "online" | "offline";
+	statusOfName(subnet: string, name: string): AgentStatus;
+	statusOfProfile(profile: StoredProfile): AgentStatus;
 	clearOwn(identity: Identity): Promise<void>;
 	/** Latest callback wins; null clears. */
 	onCacheChange(cb: (() => void) | null): void;
@@ -75,7 +75,7 @@ export interface ProfileHeartbeatExtra {
 }
 
 export function createRegistry(cfg: RegistryConfig): RegistryInstance {
-	const { offlineAfterMs, reclaimAfterMs } = cfg;
+	const { staleAfterMs, reclaimAfterMs } = cfg;
 	const kv = cfg.kvProfiles;
 	const auditLog = cfg.audit ?? audit;
 
@@ -89,7 +89,7 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 
 	/**
 	 * Is a living profile's name reclaimable — i.e. the holder is presumed
-	 * crashed? Deliberately a much larger threshold than the display-offline
+	 * crashed? Deliberately a much larger threshold than the display-stale
 	 * threshold: a steal must never fire on a merely slow/lagging agent.
 	 */
 	function isReclaimable(profile: StoredProfile): boolean {
@@ -317,7 +317,7 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 		for (const profile of cache.values()) {
 			out.push({
 				...profile,
-				status: statusFromProfile(profile, offlineAfterMs),
+				status: statusFromProfile(profile, staleAfterMs),
 			});
 		}
 		return out;
@@ -352,14 +352,14 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 	 * the resolveName snapshot instead.
 	 *
 	 * A missing cached profile means the peer is NOT known to be alive — the
-	 * answer is unconditionally "offline" (never assume a peer we know nothing
+	 * answer is unconditionally "stale" (never assume a peer we know nothing
 	 * about is alive; the message still delivers via the stream). A cached
-	 * terminal entry (gracefully_exited) is offline; a cached living entry is
+	 * terminal entry (gracefully_exited) is exited; a cached living entry is
 	 * judged by last_seen_at.
 	 */
-	function statusOfName(subnet: string, name: string): "online" | "offline" {
+	function statusOfName(subnet: string, name: string): AgentStatus {
 		const profile = cache.get(profileKey(subnet, name));
-		if (!profile) return "offline";
+		if (!profile) return "stale";
 		return statusOfProfile(profile);
 	}
 
@@ -368,8 +368,8 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 	 * path uses this on the resolveName result so its target_status is derived
 	 * from the same entry that proved addressability.
 	 */
-	function statusOfProfile(profile: StoredProfile): "online" | "offline" {
-		return statusFromProfile(profile, offlineAfterMs);
+	function statusOfProfile(profile: StoredProfile): AgentStatus {
+		return statusFromProfile(profile, staleAfterMs);
 	}
 
 	/**
@@ -400,7 +400,7 @@ export function createRegistry(cfg: RegistryConfig): RegistryInstance {
 				}),
 			]);
 		} catch {
-			// best-effort — a stale living profile just shows offline (presumed
+			// best-effort — a stale living profile just shows stale (presumed
 			// crashed) and is reclaimable after reclaimAfterMs
 		}
 	}

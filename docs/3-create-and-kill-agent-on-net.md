@@ -157,7 +157,7 @@ agent-lifecycle 提供 **2 个工具**：
   2. 如果未找到，返回提示（可能已被 kill 或由其他 session 管理）
   3. 调用 `tmuxKillWindow()` 关闭窗口（window 已死则静默忽略）
   4. 从 `moduleAgents` 中移除状态记录
-- **注意**：agent 从 comms 的注销由 comms 断线机制自动处理（心跳停止 → 记录推导 offline，心跳停止超过回收阈值后名字可被抢占，见 docs/1 §2.3），agent_kill 不需要手动注销。
+- **注意**：agent 从 comms 的注销由 comms 断线机制自动处理（心跳停止 → 记录推导 stale，心跳停止超过回收阈值后名字可被抢占，见 docs/1 §2.3），agent_kill 不需要手动注销。
 
 ---
 

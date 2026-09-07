@@ -113,12 +113,12 @@ When you finish (or when reality stops part of the work): (1) task_checkout(id="
 
 ## 2.2 Worker 失联恢复（worker_offline）
 
-派发后任务可能**失去执行者**：worker 崩溃 / SIGKILL / 机器宕机，或者 worker 仍显示 online 但已不再响应（长期不回复、不提交报告、不 task_start——online 只代表 comms 消费者存活，不代表 agent 还在工作）。Coordinator 通过 **comms reminder** 辨别：派发消息的提醒回合若报告接收方 `⚠ X is OFFLINE`，即该 worker 已掉线；若无 offline 标记但持续沉默，先 probe（`comms_send` 询问状态），probe 也无回应则同样按失联处理。**这不是 `blocked`**——`blocked` 是现实阻碍**计划**，`worker_offline` 是**执行者消失/失联**（可恢复的失败，不是计划矛盾）。
+派发后任务可能**失去执行者**：worker 崩溃 / SIGKILL / 机器宕机，或者 worker 仍显示 online 但已不再响应（长期不回复、不提交报告、不 task_start——online 只代表 comms 消费者存活，不代表 agent 还在工作）。Coordinator 通过 **comms reminder** 辨别：派发消息的提醒回合若报告接收方 `⚠ X is STALE`，即该 worker 已掉线；若无 stale 标记但持续沉默，先 probe（`comms_send` 询问状态），probe 也无回应则同样按失联处理。**这不是 `blocked`**——`blocked` 是现实阻碍**计划**，`worker_offline` 是**执行者消失/失联**（可恢复的失败，不是计划矛盾）。
 
 完整协议（coordinator 驱动 + TP 重启的**双角色流程**）在独立 skill `recover-worker`（`.pi/skills/recover-worker.md`），coordinator 与 TP 都读取：
 
 ```
-Coordinator 从 reminder 发现 dispatch 接收方 offline
+Coordinator 从 reminder 发现 dispatch 接收方 stale
    → task_set_status(id, "worker_offline")          # 专门状态，依赖方保持锁定
    → comms_send → TP: "Restart the agent <name> that was running task <id> — it went offline; resume its execution_session"
    → TP 读节点上的 execution_session（JSONL），按原 role/name 重启同名 agent（保留上次执行上下文）

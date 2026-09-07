@@ -7,6 +7,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentStatus } from "../protocol.ts";
 
 /**
  * Abbreviate a model id for narrow display: strip a "claude-" prefix and
@@ -19,17 +20,26 @@ export function abbreviateModel(model: string): string {
 	return m;
 }
 
-/** Status dot for peer rows: ● online, ✗ offline. Plain text (no ANSI). */
-export function statusDot(status: "online" | "offline"): string {
-	return status === "online" ? "●" : "✗";
+/** Status dot for peer rows: ● online, ✗ stale, ~ exited. Plain text (no ANSI). */
+export function statusDot(status: AgentStatus): string {
+	if (status === "online") return "●";
+	if (status === "stale") return "✗";
+	return "~";
 }
 
-/** Status dot with theme colouring: ● success, ✗ error. */
-export function themeStatusDot(theme: Theme, status: "online" | "offline"): string {
-	return status === "online" ? theme.fg("success", "●") : theme.fg("error", "✗");
+/** Status dot with theme colouring: ● success, ✗ error, ~ (muted). */
+export function themeStatusDot(theme: Theme, status: AgentStatus): string {
+	if (status === "online") return theme.fg("success", "●");
+	if (status === "stale") return theme.fg("error", "✗");
+	return theme.fg("muted", "~");
 }
 
 /** Peer status word with theme colouring (send result target_status). */
 export function themeStatusWord(theme: Theme, status: string): string {
-	return status === "online" ? theme.fg("success", "online") : theme.fg("error", "offline");
+	switch (status) {
+		case "online": return theme.fg("success", "online");
+		case "stale": return theme.fg("error", "stale");
+		case "exited": return theme.fg("muted", "exited");
+		default: return status;
+	}
 }

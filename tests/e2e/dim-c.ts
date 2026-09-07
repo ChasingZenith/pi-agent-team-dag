@@ -20,7 +20,7 @@ import * as nats from "../../extensions/lib/comms/nats.ts";
 import { readSecretFile, type RuntimeConfig } from "../../extensions/lib/comms/config.ts";
 import {
   DEFAULT_SUBNET, DEFAULT_NATS_URL, DEFAULT_RECLAIM_AFTER_MS, DEFAULT_MESSAGE_TTL_MS,
-  DEFAULT_HISTORY_TTL_MS, DEFAULT_HEARTBEAT_MS, DEFAULT_OFFLINE_AFTER_MS,
+  DEFAULT_HISTORY_TTL_MS, DEFAULT_HEARTBEAT_MS, DEFAULT_STALE_AFTER_MS,
 } from "../../extensions/lib/comms/protocol.ts";
 import type { Identity } from "../../extensions/lib/comms/protocol.ts";
 import { agentFileStem, SCRIPT_DIR } from "../../extensions/lib/launch-script.ts";
@@ -77,7 +77,7 @@ function makeConfig(subnet: string): RuntimeConfig {
     heartbeatMs: DEFAULT_HEARTBEAT_MS,
     messageTtlMs: DEFAULT_MESSAGE_TTL_MS,
     reclaimAfterMs: DEFAULT_RECLAIM_AFTER_MS,
-    offlineAfterMs: DEFAULT_OFFLINE_AFTER_MS,
+    staleAfterMs: DEFAULT_STALE_AFTER_MS,
     historyTtlMs: DEFAULT_HISTORY_TTL_MS,
   };
 }
@@ -250,7 +250,7 @@ async function kvGet(subnet: string, name: string): Promise<void> {
 // the factories take lazy accessors, so a fresh instance per connect is fine).
 function registryFor(): RegistryInstance {
   return createRegistry({
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 10 * 60_000,
     kvProfiles: () => nats.getKvProfiles(),
   });

@@ -69,14 +69,14 @@ async function main(): Promise<void> {
     subnet: SUBNET,
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 30_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
   const registry = createRegistry({
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 30_000,
     kvProfiles: () => getKvProfiles(),
   });

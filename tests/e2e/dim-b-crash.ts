@@ -46,14 +46,14 @@ async function main(): Promise<void> {
     subnet: SUBNET,
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 30_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
   const registry = createRegistry({
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 30_000,
     kvProfiles: () => getKvProfiles(),
   });
@@ -108,12 +108,12 @@ async function main(): Promise<void> {
     `t+35s crashed entry remains, lifecycle=living (got ${JSON.stringify(sid35)})`,
   );
 
-  // +70s: profile permanent + offline derived
+  // +70s: profile permanent + stale derived
   await sleep(35_000);
   const profile = (await kvRead(getKvProfiles(), profileKey("test-b", "b-crasher"))) as any;
   const st = profile ? statusFromLastSeen(profile.last_seen_at, 60_000) : null;
   check("BC-6", !!profile, `t+70s profile a.test-b.b-crasher still present (profile=null? ${profile === null})`);
-  check("BC-7", st === "offline", `t+70s profile statusFromLastSeen → offline (got ${st})`);
+  check("BC-7", st === "stale", `t+70s profile statusFromLastSeen → stale (got ${st})`);
 
   // Name reclaim: same-name re-register succeeds
   let reregOk = false;

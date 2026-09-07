@@ -10,7 +10,7 @@
 
 - NATS 服务器(JetStream 持久化)统一承载注册表、消息流与回复流
 - agent 注册与自动发现(心跳 + 生命周期状态机,单一 KV bucket)
-- 实时推送:KV watch 驱动 peer 缓存(自愈见 §3);UI 另有 15s 周期刷新,派生状态(online→stale→offline)即使无任何事件也按时如实呈现(见 §7)
+- 实时推送:KV watch 驱动 peer 缓存(自愈见 §3);UI 另有 15s 周期刷新,派生状态(online→stale→exited)即使无任何事件也按时如实呈现(见 §7)
 - 消息**持久化**:服务器重启不丢;agent 崩溃自动重投(max_deliver 3)
 - **跨重启复用**:地址以名字锚定、不随进程变化——同名重启复用同一 durable consumer(干净关闭也不删除),未 ack 的 prompt 重投、已 ack 的不重放、离线期间积累的消息续投(stream TTL 内);outbox/inbox 历史同样跨重启可读(见 §2.1.1、§9)
 - **显式回复**:回复 = `comms_send(target=<发送方>, reply_to_msg_id=<收到的 msg_id>)`,无自动应答;回复自动以入站 turn 到达,无需轮询(见 §2.4、§6.2)
@@ -91,9 +91,9 @@ Agent A (发送方)              NATS                    Agent B (接收方)
 - **`comms_profiles`(无 TTL,永久)** — `a.<subnet>.<name>` 生命周期记录,**每个 agent 恰好一条**,同时承载**名字声明**与**生命周期状态**(`living` | `gracefully_exited`)及原始心跳时间戳 `last_seen_at`。key 用**名字**:一个名字一条记录,名字被新运行抢占时自动覆盖旧记录(不产生重启后的重复记录);agent 离线后记录**保留可见**,不会从注册表消失。**没有第二个 bucket 需要同步**:可寻址性(条目存在)与状态(由 lifecycle + last_seen_at 推导)始终来自同一份快照。正常退出(`clearOwn`)写入**终态墓碑**(`lifecycle: "gracefully_exited"`);崩溃则永远停在 `living` + 过期的 `last_seen_at`,供 peers 推定。
 - **`comms_history`(bucket 级 TTL 默认 24h)** — `h.<subnet>.<name>.<out|in>.<msg_id>` 双向**消息内容历史**:发出与收到的每条消息全文,compact(上下文压缩)或 agent 重启后由 `comms_outbox` / `comms_inbox` 重读。key 锚定名字,跨重启可读,outbox/inbox 的列表模式覆盖 agent 的**全部**历史而非仅当前进程。发送状态由历史记录推导(`replied` / `expired` / `waiting`);提醒本身是进程内存,不落历史。写入是 best-effort(不阻塞发送与消息注入),TTL 首次创建生效。
 
-状态推导(只对资料):`status` 只有两态 — `online`(living 且 last_seen_at 距今 < 60s)与 `offline`(终态,或超过 60s),没有中间态。离线/退出的记录**保留**在缓存里显示 ✗(这是“永久记录”的语义)。
+状态推导(只对资料):`status` 有三态 — `online`(living 且 last_seen_at 距今 < 60s)、`stale`(living 且超过 60s,即崩溃/失联推定)与 `exited`(`gracefully_exited` 终态,正常退出)。`online / stale` 是是否仍在心跳的二分,`exited` 表示主动离开且名字立即可回收,不复用异常语义。stale/exited 的记录**保留**在缓存里(这是“永久记录”的语义):stale 显示 ✗、exited 显示 ~。
 
-名字回收是**读方驱动**的(无租约 bucket、无 reaper 扫描):注册撞名时读现持有者,若已终态(不可变,revision-check 抢占天然无竞态)或 `living` 且 `last_seen_at` 超过 `PI_COMMS_RECLAIM_AFTER_MS`(默认 10 分钟,刻意远大于 offline 阈值——抢占绝不能误伤只是心跳慢的 agent),则经 revision 校验的 update 强占;否则后缀重试。
+名字回收是**读方驱动**的(无租约 bucket、无 reaper 扫描):注册撞名时读现持有者,若已终态(不可变,revision-check 抢占天然无竞态)或 `living` 且 `last_seen_at` 超过 `PI_COMMS_RECLAIM_AFTER_MS`(默认 10 分钟,刻意远大于 stale 阈值——抢占绝不能误伤只是心跳慢的 agent),则经 revision 校验的 update 强占;否则后缀重试。
 
 注意:nats.js 的 `kv.get()` 对已删除的 key 返回 DEL tombstone 条目(非 null)——所有存在性判断必须检查 `entry.operation !== "DEL"`。
 
@@ -148,7 +148,7 @@ session_start
     │        put 完整资料刷新 TTL
     │
     └── 10. UI 刷新定时器(15s,unref):周期重渲染派生状态
-             (online→offline,即使无任何 watch 事件)
+             (online→stale→exited,即使无任何 watch 事件)
              ─────────────────────────────────────────────────
 session_running
     │
@@ -207,8 +207,8 @@ session_shutdown / SIGINT / SIGTERM
 | `PI_COMMS_HOST` | up.sh 绑定地址(默认 127.0.0.1) |
 | `PI_COMMS_HEARTBEAT_MS` | 心跳间隔(默认 10000) |
 | `PI_COMMS_MESSAGE_TTL_MS` | 消息 TTL / stream max_age(默认 1800000 = 30 分钟;consumer 重投窗口 ack_wait 固定 5 分钟) |
-| `PI_COMMS_OFFLINE_AFTER_MS` | 心跳超过多久标记 offline(默认 60000;唯一的状态阈值,超过即 offline;离线记录仍保留,不会从注册表删除) |
-| `PI_COMMS_RECLAIM_AFTER_MS` | 名字回收阈值:living 记录的心跳超过多久后名字可被新注册抢占(默认 600000 = 10 分钟;刻意远大于 offline 阈值,避免误抢心跳慢的 agent) |
+| `PI_COMMS_STALE_AFTER_MS` | 心跳超过多久标记 stale(默认 60000;唯一的心跳状态阈值,超过即 stale;stale 记录仍保留,不会从注册表删除) |
+| `PI_COMMS_RECLAIM_AFTER_MS` | 名字回收阈值:living 记录的心跳超过多久后名字可被新注册抢占(默认 600000 = 10 分钟;刻意远大于 stale 阈值,避免误抢心跳慢的 agent) |
 | `PI_COMMS_HISTORY_TTL_MS` | 消息内容历史(comms_history)保留时长(默认 86400000 = 24h)。**bucket 级 TTL 首次创建时生效**,改动需删除 bucket |
 | `PI_COMMS_NATS_VERSION` | up.sh 下载 nats-server 的版本(默认 2.14.4) |
 | `NATS_SERVER_BIN` | 显式指定 nats-server 二进制路径 |
@@ -228,7 +228,7 @@ session_shutdown / SIGINT / SIGTERM
 - `deliver_as`(可选):**投递模式** — 控制消息到达目标 agent 的投递方式,两个取值与 pi.sendMessage 的 deliverAs **一一对应**:`steer`(默认,目标忙碌时在其下一次 LLM 调用边界注入 — 当前 turn 的 tool call 结束后、下一条响应前,**不**打断进行中的流式响应;空闲时立即触发 turn)/ `followUp`(目标当前 turn 完全结束后处理,空闲时立即触发)。两个模式都是 pi 侧语义:消息到达即注入,由 pi 自行排队与投递,comms 层不做任何等待或批次合并
 - 入站注入:每条消息到达即注入 — 单条 framing(标注 sender / msg_id / reply 状态),携带自己的 `deliver_as`(缺省 `steer`,不做模式提升);**注入成功后立即 ack**,失败保持 unacked,5 分钟 `ack_wait` 后由 stream 重投重试;注入后、回合完成前目标崩溃的消息不会被重投,由发送方 `remind_s` 兜底
 - 无跃点限制:转发链不设防循环上限,由使用方自行约束
-- 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `offline`)
+- 返回(每个收件人):`msg_id`、`target_status`(目标的注册状态:`online` / `stale`)
 - 注意:一旦发送成功,消息就留在 stream(TTL 内)——目标随后崩溃/重启,同名重启后由复用同一 consumer 收到(崩溃重投);目标是 `living` 但心跳已停(崩溃推定)时消息照常排队,同名重启后收到;目标已优雅退出(终态墓碑)再发送则报“exited gracefully”;名字从未注册则报 `target not found`
 
 ### 6.3 `comms_outbox` — 重读自己发送的消息(含状态与回复)
@@ -260,7 +260,7 @@ session_shutdown / SIGINT / SIGTERM
 ---
 ## 7. 状态行
 
-status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers` 计数)。完整 peer 列表放在 belowEditor widget(`comms-peers`)中,单行文本按终端宽度自动换行 — 窄窗口/多 peer 时也不会截断,所有 peer 都能看到。格式紧凑:`Peers: ● alice, ✗ bob, ✗ carol, …`(● 在线 / ✗ 离线,符号与 `comms_list_peer` 一致;不含自己)。无 peer 时 widget 隐藏,状态只显示 `📡 name@subnet`。状态由 `last_seen_at` 派生,除 watch 事件外每 15s 定时重渲染 — peer 崩溃(无任何事件)或 NATS 断线时,离线状态也会在 ~75s 内如实呈现,恢复后自动回到在线。详细 peer 信息统一走 `comms_list_peer`。
+status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers` 计数)。完整 peer 列表放在 belowEditor widget(`comms-peers`)中,单行文本按终端宽度自动换行 — 窄窗口/多 peer 时也不会截断,所有 peer 都能看到。格式紧凑:`Peers: ● alice, ✗ bob, ~ carol, …`(● 在线 / ✗ stale / ~ exited,符号与 `comms_list_peer` 一致;不含自己)。无 peer 时 widget 隐藏,状态只显示 `📡 name@subnet`。状态由 `last_seen_at` 派生,除 watch 事件外每 15s 定时重渲染 — peer 崩溃(无任何事件)或 NATS 断线时,stale 状态也会在 ~75s 内如实呈现,恢复后自动回到在线;正常退出(ctrl+D 等)立即写终态墓碑,显示 ~。详细 peer 信息统一走 `comms_list_peer`。
 
 ---
 ## 8. 审计日志
@@ -283,7 +283,7 @@ status key `comms`,显示 `name @subnet`(有 peer 时追加紧凑的 `· N peers
 | 场景 | 行为 |
 |------|------|
 | 网络抖动 / 服务器短暂不可达 | NATS 客户端自动重连;durable consumer 从 ack 位置继续;未 ack 的 prompt 重投(去重后不重复触发,见 §2.2) |
-| agent 崩溃(SIGKILL) | 生命周期记录**永久保留**(living 标签 + 过期的 last_seen_at,状态推导为 offline);心跳停止超过 `PI_COMMS_RECLAIM_AFTER_MS` 后名字可被新 agent 强占;已投递未 ack 的 prompt 重投见下行;发起方的合并提醒继续(见 §2.4) |
+| agent 崩溃(SIGKILL) | 生命周期记录**永久保留**(living 标签 + 过期的 last_seen_at,状态推导为 stale);心跳停止超过 `PI_COMMS_RECLAIM_AFTER_MS` 后名字可被新 agent 强占;已投递未 ack 的 prompt 重投见下行;发起方的合并提醒继续(见 §2.4) |
 | nats-server 重启 | stream/KV 落盘恢复,消息不丢;客户端自动重连 |
 | 目标离线 | 消息在 stream 中排队(30min TTL);目标重连后送达(离线 ≤1h 复用同一 consumer 续投游标;更久则 consumer 已被 server 回收,重建后重放 TTL 窗口内的消息);TTL 过期未投的消息由 stream 清理;提醒与 expired 语义见 §2.4 |
 | 并发入站 | 每条消息到达即注入(目标忙碌时由 pi 的 steer / followUp 队列排队),注入成功即 ack,失败按 ack_wait 重投;无批次等待 |

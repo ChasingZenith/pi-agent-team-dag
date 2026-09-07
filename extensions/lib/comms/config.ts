@@ -11,7 +11,7 @@ import {
 	DEFAULT_HISTORY_TTL_MS,
 	DEFAULT_MESSAGE_TTL_MS,
 	DEFAULT_NATS_URL,
-	DEFAULT_OFFLINE_AFTER_MS,
+	DEFAULT_STALE_AFTER_MS,
 	DEFAULT_RECLAIM_AFTER_MS,
 	DEFAULT_SUBNET,
 } from "./protocol.ts";
@@ -23,7 +23,7 @@ export interface RuntimeConfig {
 	subnet: string;
 	heartbeatMs: number;
 	messageTtlMs: number;
-	offlineAfterMs: number;
+	staleAfterMs: number;
 	/** living-profile name reclaim threshold (presumed crashed). */
 	reclaimAfterMs: number;
 	/** comms_history bucket TTL — how long message content history is kept. */
@@ -75,7 +75,7 @@ export function readConfig(pi: ExtensionAPI): RuntimeConfig {
 		subnet: (flags.subnet && flags.subnet.length > 0 ? flags.subnet : undefined) || DEFAULT_SUBNET,
 		heartbeatMs: numEnv("PI_COMMS_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS),
 		messageTtlMs: numEnv("PI_COMMS_MESSAGE_TTL_MS", DEFAULT_MESSAGE_TTL_MS),
-		offlineAfterMs: numEnv("PI_COMMS_OFFLINE_AFTER_MS", DEFAULT_OFFLINE_AFTER_MS),
+		staleAfterMs: numEnv("PI_COMMS_STALE_AFTER_MS", DEFAULT_STALE_AFTER_MS),
 		reclaimAfterMs: numEnv("PI_COMMS_RECLAIM_AFTER_MS", DEFAULT_RECLAIM_AFTER_MS),
 		historyTtlMs: numEnv("PI_COMMS_HISTORY_TTL_MS", DEFAULT_HISTORY_TTL_MS),
 	};

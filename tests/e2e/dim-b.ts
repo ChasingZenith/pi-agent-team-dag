@@ -218,12 +218,12 @@ async function runB7B8(): Promise<void> {
     `t+35s crashed holder's entry remains, lifecycle=living (got ${JSON.stringify(sid35)})`,
   );
 
-  // B-8: +70s — profile permanent + offline derived (same crash timeline)
+  // B-8: +70s — profile permanent + stale derived (same crash timeline)
   await sleep(35_000);
   const profile70 = (await kvRead(getKvProfiles(), profileKey("test-b", "b-leaser"))) as any;
   const st70 = profile70 ? statusFromLastSeen(profile70.last_seen_at, 60_000) : null;
   check("B-8a", !!profile70, `t+70s profile a.test-b.b-leaser still present (profile=null? ${profile70 === null})`);
-  check("B-8b", st70 === "offline", `t+70s profile statusFromLastSeen → offline (got ${st70})`);
+  check("B-8b", st70 === "stale", `t+70s profile statusFromLastSeen → stale (got ${st70})`);
 
   // Evidence snapshot BEFORE the re-register overwrites the profile
   writeFileSync(
@@ -253,7 +253,7 @@ function runB10(): void {
   const iso = (agoMs: number) => new Date(now - agoMs).toISOString();
   check("B-10a", statusFromLastSeen(iso(10_000), 60_000) === "online", "last_seen 10s ago → online");
   check("B-10b", statusFromLastSeen(iso(40_000), 60_000) === "online", "last_seen 40s ago → online (below 60s threshold)");
-  check("B-10c", statusFromLastSeen(iso(70_000), 60_000) === "offline", "last_seen 70s ago → offline");
+  check("B-10c", statusFromLastSeen(iso(70_000), 60_000) === "stale", "last_seen 70s ago → stale");
 }
 
 // ━━ main ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -267,14 +267,14 @@ async function main(): Promise<void> {
     subnet: SUBNET,
     heartbeatMs: 10_000,
     messageTtlMs: 1_800_000,
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 30_000,
     historyTtlMs: 24 * 60 * 60 * 1000,
   };
   await connectNats(cfg);
   await ensureStream(cfg.messageTtlMs, SUBNET);
   registry = createRegistry({
-    offlineAfterMs: 60_000,
+    staleAfterMs: 60_000,
     reclaimAfterMs: 30_000,
     kvProfiles: () => getKvProfiles(),
   });

@@ -4,7 +4,7 @@
  *   stream  COMMS_<subnet>    durable per-agent prompt consumer
  *   bucket  comms_profiles       lifecycle records (a.<subnet>.<name>; one entry per agent —
  *                             name claim + lifecycle (living/gracefully_exited) + last_seen_at;
- *                             offline/exited stay visible, name reclaim is reader-driven)
+ *                             stale/exited stay visible, name reclaim is reader-driven)
  *   bucket  comms_history     message content history (h.<subnet>.<name>.<out|in>.<msg_id>, TTL default 24h)
  *
  * Identity: the agent NAME is the comms identity and the address for every
@@ -162,7 +162,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	// UI re-render interval: well below the default offline threshold (60 s)
+	// UI re-render interval: well below the default stale threshold (60 s)
 	// so derived peer statuses surface within ~75 s of a peer going away,
 	// and below any heartbeat-driven event gap.
 	const UI_REFRESH_MS = 15_000;
@@ -174,7 +174,7 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Every other agent on the subnet (self excluded), compactly as
-	 * "● name" / "~ name" / "✗ name" (status dot + name — no model/pct/task,
+	 * "● name" / "✗ name" / "~ name" (status dot + name — no model/pct/task,
 	 * details stay in comms_list_peer).
 	 */
 	function peerList(): string[] {
@@ -291,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 		// On collision the suffix arrives via in-place mutation of `identity`
 		// (register returns void) — the emitted handle stays valid.
 		registryInst = createRegistry({
-			offlineAfterMs: cfg.offlineAfterMs,
+			staleAfterMs: cfg.staleAfterMs,
 			reclaimAfterMs: cfg.reclaimAfterMs,
 			kvProfiles: () => getKvProfiles(),
 			audit,
@@ -346,13 +346,16 @@ export default function (pi: ExtensionAPI) {
 							? ` · expires in ${fmtMs(x.expires_in_ms)}`
 							: " · expired — resend or cancel"
 						: "");
-				// The peer we're waiting on is offline: the conversation can't
-				// progress right now (no reply in / our reply undelivable).
-				if (x.target_status === "offline") {
+				// The peer we're waiting on is stale (crashed/unresponsive) or exited:
+				// the conversation can't progress right now (no reply in / our reply
+				// undeliverable).
+				if (x.target_status === "stale" || x.target_status === "exited") {
 					return base +
-						(x.dir === "out"
-							? `\n    ⚠ ${x.target} is OFFLINE — their reply won't arrive until they're back; consider resending, cancelling, or solving it another way.`
-							: `\n    ⚠ ${x.target} is OFFLINE — your reply to them won't be delivered until they're back online.`);
+						(x.target_status === "exited"
+							? `\n    ⚠ ${x.target} has exited — their reply will never arrive; pick another agent or unwait.`
+							: x.dir === "out"
+								? `\n    ⚠ ${x.target} is STALE — their reply won't arrive until they're back; consider resending, cancelling, or solving it another way.`
+								: `\n    ⚠ ${x.target} is STALE — your reply to them won't be delivered until they're back online.`);
 				}
 				return base;
 			});
@@ -394,7 +397,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Watch the registry (peer cache), re-rendering the footer status and
 		// the belowEditor peers widget whenever the peer set changes
-		// (peers join / leave / go offline). The widget word-wraps at the
+		// (peers join / leave / go stale). The widget word-wraps at the
 		// terminal width, so all peers stay visible even in a narrow window.
 		// The watch loop self-heals after NATS outages.
 		registryInst.startWatch(identity.subnet);
@@ -419,7 +422,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Time-driven UI refresh — a crashed peer emits no DEL and a NATS
 		// outage emits nothing at all, so re-render on a timer to surface
-		// derived statuses (online → offline) within ~offlineAfterMs +
+		// derived statuses (online → stale) within ~staleAfterMs +
 		// this interval. unref'd: pure UI, must not hold the process open.
 		uiRefreshTimer = setInterval(refreshPeersUi, UI_REFRESH_MS);
 		try { (uiRefreshTimer as any).unref?.(); } catch { /* ignore */ }
@@ -487,7 +490,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"List peer agents on the comms hub for YOUR subnet: each peer's name, status, model, " +
 			"live context-window usage, and current task. Your own entry is marked with a \"(you)\" suffix. " +
-			"Status symbols: ● online · ✗ offline (no heartbeat for ~60 s).",
+			"Status symbols: ● online · ✗ stale (no heartbeat for ~60 s) · ~ exited.",
 		parameters: Type.Object({}),
 		async execute(_callId, _params) {
 			if (!identity) throw new Error("comms not initialised");
@@ -804,10 +807,10 @@ pi.registerTool({
 	description:
 		"Set, adjust, or cancel a reminder for a message\n\n" +
 		"`remind_s > 0` (1–3600): Set or adjust the reminder interval for this message. While the reminder is active, a reminder turn is periodically injected to YOU. " +
-		"Use this to follow up on a message you received, or to (re)arm the wait for a reply to a message you sent. Note: if the target peer is offline, their reply won't arrive until they're back — undelivered messages redeliver via their durable consumer once they reconnect, so there is no need to resend the message. " +
+		"Use this to follow up on a message you received, or to (re)arm the wait for a reply to a message you sent. Note: if the target peer is stale or exited, their reply won't arrive until they're back — undelivered messages redeliver via their durable consumer once they reconnect, so there is no need to resend the message. " +
 		"`remind_s = 0`: Cancel the reminder. This simply removes the reminder — or confirms none is armed — and " +
 		"does not modify the message itself. Use this when the peer has replied without a `reply_to_msg_id` and " +
-		"you already have your answer, when the peer is offline or no longer relevant, or when you decide to " +
+		"you already have your answer, when the peer is stale/exited or no longer relevant, or when you decide to " +
 		"resolve the issue another way.\n\n" +
 		"Each message can have only one reminder; calling this tool again updates its interval. A reply to an " +
 		"outgoing message automatically cancels its reminder (an already-replied message is fine to re-arm). Reminders exist only for the " +
@@ -903,7 +906,7 @@ pi.registerTool({
 	// The prompt durable consumer is deliberately NOT deleted here: it persists
 	// across restarts, so a restart under the same name resumes the same cursor
 	// (unacked prompts redeliver, acked ones are not replayed, and messages
-	// queued while offline deliver on return). Deleting it would make the
+	// queued while stale deliver on return). Deleting it would make the
 	// recreated consumer replay the whole stream (deliver_policy: All).
 
 	async function cleanShutdown(): Promise<void> {

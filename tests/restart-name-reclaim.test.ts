@@ -58,7 +58,7 @@ class FakeKv {
 
 const kv = new FakeKv();
 const registry = createRegistry({
-	offlineAfterMs: 60_000,
+	staleAfterMs: 60_000,
 	reclaimAfterMs: RECLAIM_AFTER_MS,
 	kvProfiles: () => kv as any,
 });
