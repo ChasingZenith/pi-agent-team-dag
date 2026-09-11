@@ -607,7 +607,7 @@ describe("renderGraph", () => {
     const dispatched = mkTask({ id: "task-d", title: "D", status: "dispatched" });
     const out = renderGraph([parent, dep, blocked, cancelled, dispatched]);
     expect(out).toContain("◻ task-agg Agg (deps:1)"); // manual pending — no derivation
-    expect(out).toContain("◔ task-d D (deps:0)"); // dispatched — not yet started
+    expect(out).toContain("◔ task-d D (deps:0)"); // dispatched
     expect(out).toContain("⊘ task-b B (deps:0)");
     expect(out).toContain("✕ task-c C (deps:0)");
   });

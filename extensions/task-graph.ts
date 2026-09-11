@@ -748,8 +748,7 @@ pi.registerTool({
 			],
 			{
 				description:
-					"New status to set. pending; dispatched (delegation sent, owner recorded, work not yet started — " +
-					"set together with dispatched_to); active (in progress — the dispatched worker moves its item here via task_start); " +
+					"New status to set. pending; dispatched (owner record delegation sent); active (in progress — the dispatched worker moves its item here via task_start); " +
 					"done; blocked (reality is blocking progress); cancelled; worker_offline (the executing worker went offline/dead mid-flight, or is online but unresponsive after a status probe — " +
 					"a recoverable failure distinct from blocked: the coordinator re-dispatches to a restarted agent after restart. " +
 					"Write the recovery rung reached (session_resume / fresh_spawn) into change_summary — it is the durable probe state on the node's history). " +
@@ -760,8 +759,7 @@ pi.registerTool({
 		dispatched_to: Type.Optional(
 			Type.String({
 				description:
-					"Agent name to record as the item's responsible owner — only valid when setting dispatched " +
-					"(dispatch). Cleared automatically on done/cancelled.",
+					"Agent name to record as the item's responsible owner — only valid when setting dispatched",
 			}),
 		),
 		change_summary: Type.Optional(

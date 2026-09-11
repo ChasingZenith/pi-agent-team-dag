@@ -209,8 +209,8 @@ describe("task-comms-ops extension shell", () => {
       ),
     ).toBe(true);
 
-    // already active → only dispatched items can be started
-    await expect(start.execute("c4", { id: "task-x" }, undefined, undefined)).rejects.toThrow(/only dispatched items/);
+    // already active → only "dispatched" items can be started
+    await expect(start.execute("c4", { id: "task-x" }, undefined, undefined)).rejects.toThrow(/only "dispatched" items/);
   });
 
   it("task_dispatch refuses an info node BEFORE sending any message (no orphaned delegation)", async () => {

@@ -180,7 +180,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Dispatch Task",
 		description:
 			"Dispatch a task to an agent: sends your delegation message and records the dispatch in one step — " +
-			"the task becomes dispatched (not yet started) with dispatched_to=<agent>. The worker flips the item " +
+			"the task becomes dispatched with dispatched_to=<agent>. The worker flips the item " +
 			"to active via task_start when it starts; task_submit_report replies to your delegation message when " +
 			"it finishes (your reminder for the delegation stops).",
 		parameters: Type.Object({
@@ -336,7 +336,7 @@ export default function (pi: ExtensionAPI) {
 			if (!target) throw notFoundError(cwd, p.id);
 			if (target.status !== "dispatched") {
 				throw new Error(
-					`tasks: cannot start "${p.id}" — its status is "${target.status}"; only dispatched items (yours, not yet started) can be started`,
+					`tasks: cannot start "${p.id}" — its status is "${target.status}"; only "dispatched" items can be started`,
 				);
 			}
 			if (!target.dispatched_to || target.dispatched_to.name !== me) {
