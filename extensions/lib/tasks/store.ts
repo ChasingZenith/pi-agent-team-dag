@@ -75,6 +75,18 @@
  * flagged stale (report_for_version < version) so the reader judges whether
  * the old-contract work still satisfies the new contract.
  *
+ * WRITE CONCURRENCY — the store has exactly one writer at a time, enforced by
+ * a cross-process mutex (see `withStoreLock`). Optimistic `expected_version`
+ * alone is NOT sufficient: the version check and the rename are separate
+ * syscalls, so two PROCESSES (each agent runs its own pi) sharing one
+ * .pi/tasks can both pass the check and both write, silently dropping one
+ * update. Parallel tool calls within a single process cannot interleave (the
+ * whole write path is synchronous JS), so the mutex exists for the
+ * cross-process topology — the normal one (coordinator + workers share cwd).
+ * `expected_version` remains the LOGICAL guard (a caller's stale intent is
+ * rejected, not merged); the mutex is the PHYSICAL guard (writes do not
+ * interleave at all).
+ *
  * State machine — done/cancelled are terminal except reopen/undo; cancelled
  * counts as satisfied everywhere (dependents), so cancelling resolves a stuck
  * task without blocking everything downstream:
@@ -105,7 +117,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join, relative } from "node:path";
 import { DepGraphCycleError } from "dependency-graph";
 import { parse } from "smol-toml";
@@ -664,13 +677,148 @@ export function parseTask(raw: string): Task | null {
 }
 
 // ---------------------------------------------------------------------------
+// Store lock — the one-writer-at-a-time mutex
+// ---------------------------------------------------------------------------
+
+/**
+ * Lock directory under the store: mkdir is the atomic primitive (EEXIST =
+ * held) — one lock for the WHOLE store, not per task. A commit also validates
+ * the whole graph and rewrites parents' edge arrays (wiring), so the
+ * invariants span nodes; per-file locking could not cover them. Commits are
+ * milliseconds, so serializing all of them is cheap.
+ */
+function storeLockDir(cwd: string): string {
+	return join(tasksDir(cwd), ".lock");
+}
+
+/** A lock younger than this is never broken, even if its owner is unreadable. */
+const LOCK_STALE_MS = 60_000;
+const LOCK_POLL_MS = 15;
+/** Give up acquiring after this long and surface a retryable error. */
+const DEFAULT_LOCK_TIMEOUT_MS = 15_000;
+
+/** Sleep synchronously without burning CPU — the write path is fully sync. */
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		// EPERM = alive but owned by another user; anything else = gone.
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Break a lock whose holder is demonstrably gone: same host and a dead pid, or
+ * older than LOCK_STALE_MS (a crashed holder on an unreadable/foreign host).
+ * The removal is best-effort; a racing breaker just loses the next mkdir.
+ */
+function breakStaleLock(lock: string): void {
+	let ownerPid = 0;
+	let ownerHost = "";
+	try {
+		const token = readFileSync(join(lock, "owner"), "utf-8").trim().split(/\s+/)[0] ?? "";
+		const at = token.indexOf("@");
+		ownerPid = Number(at >= 0 ? token.slice(0, at) : token);
+		ownerHost = at >= 0 ? token.slice(at + 1) : "";
+	} catch {
+		// owner file not written yet (or already gone) — fall back to age alone
+	}
+	// Same host + a dead pid → the holder is gone; break immediately.
+	if (ownerHost === hostname() && ownerPid > 0) {
+		if (processAlive(ownerPid)) return;
+	} else {
+		// Foreign / unreadable owner: only age can prove it is abandoned.
+		let ageMs = Number.POSITIVE_INFINITY;
+		try {
+			ageMs = Date.now() - statSync(lock).mtimeMs;
+		} catch {
+			return; // vanished — the next loop iteration will just mkdir
+		}
+		if (ageMs < LOCK_STALE_MS) return;
+	}
+	try {
+		rmSync(lock, { recursive: true, force: true });
+	} catch {
+		// someone else removed it first
+	}
+}
+
+function acquireStoreLock(cwd: string, lock: string): void {
+	mkdirSync(tasksDir(cwd), { recursive: true });
+	// Read per acquisition (not at module load) so tests / a user can tune the
+	// wait without reloading the module.
+	const timeoutMs = Number(process.env.PI_TASKS_LOCK_TIMEOUT_MS ?? DEFAULT_LOCK_TIMEOUT_MS);
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			// recursive:false is load-bearing — recursive mkdir never reports EEXIST.
+			mkdirSync(lock);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+			breakStaleLock(lock);
+			if (Date.now() >= deadline) {
+				throw new Error(
+					`tasks: could not acquire the task store lock (${relative(cwd, lock)}) within ${timeoutMs}ms — another agent is committing; retry the call`,
+				);
+			}
+			sleepSync(LOCK_POLL_MS);
+			continue;
+		}
+		// Write the owner INSIDE the lock we hold, so a breaker can tell whether the
+		// holder is still alive. Failure is non-fatal: age-based breaking still works.
+		try {
+			writeFileSync(join(lock, "owner"), `${process.pid}@${hostname()} ${new Date().toISOString()}`, "utf-8");
+		} catch {
+			// ignore — the directory itself is the lock
+		}
+		return;
+	}
+}
+
+/**
+ * Run `fn` as the store's exclusive writer. Reentrant within one synchronous
+ * call chain: a public write entry point that internally calls another
+ * (loadGraph, readTask, wiring) must not deadlock on its own lock — since the
+ * whole critical section is synchronous, a module-global is enough to detect
+ * it.
+ */
+let heldLockDir: string | null = null;
+function withStoreLock<T>(cwd: string, fn: () => T): T {
+	const lock = storeLockDir(cwd);
+	if (heldLockDir === lock) return fn();
+	acquireStoreLock(cwd, lock);
+	heldLockDir = lock;
+	try {
+		return fn();
+	} finally {
+		heldLockDir = null;
+		try {
+			rmSync(lock, { recursive: true, force: true });
+		} catch {
+			// best effort — a leftover lock is broken by the stale-lock rules
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Atomic writes
 // ---------------------------------------------------------------------------
 
-/** Atomically write one file (tmp + rename), creating parent directories. */
+/**
+ * Atomically write one file (tmp + rename), creating parent directories.
+ * The tmp name carries pid + a per-process sequence: even under the store lock
+ * (which already serializes writers) a stale tmp from a crashed run must never
+ * be reused by a different writer.
+ */
+let tmpSeq = 0;
 function atomicWriteFile(path: string, content: string): void {
 	mkdirSync(join(path, ".."), { recursive: true });
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
 	writeFileSync(tmp, content, "utf-8");
 	renameSync(tmp, path);
 }
@@ -1305,14 +1453,11 @@ function normalizeIntoInfoRefs(graph: Task[], childId: string, childKind: TaskKi
  * description, report and everything a worker anchors on is untouched — so a
  * parent being actively driven is never disturbed by a child joining its subgraph.
  *
- * CONCURRENCY (locked-free optimistic retry): each parent is read FRESH, the
- * candidate deps computed, then re-committed with struct_version used as a CAS
- * token — if the on-disk struct_version moved since our read, another writer
- * already changed the edge arrays, so we re-read and retry. Node's rename is
- * not an atomic check-and-swap, so this narrows but cannot provably close the
- * window between the version re-check and the rename; it eliminates the common
- * two-children-lost-update by retrying on mismatch. The union is idempotent, so
- * a retry merely re-appends this child on top of the competitor's edge.
+ * CONCURRENCY: called only while the store lock is held (from commitTask), so
+ * these parent updates are exclusive. The struct_version re-check is kept as a
+ * cheap defensive assertion — it should never fire now, and if it does the
+ * eager error is better than a silent clobber. The union is idempotent, so a
+ * retry merely re-appends this child on top of the competitor's edge.
  *
  * Returns the ids of the parents actually modified (deps/subgraph_deps changed).
  */
@@ -1507,10 +1652,9 @@ function wireChildIntoParent(
 /**
  * CAS guard for the direct-commit write path: true only when the on-disk
  * (version, struct_version) still equal the base this commit was computed from.
- * `version` guards against a concurrent content commit; `struct_version` guards
- * against a concurrent wiring/edge change (which bumps `struct_version` but not
- * `version` — the expected_version check above only covers the former). Returns
- * false when stale so the update path re-reads and recomputes.
+ * `version` guards the logical base the caller's expected_version referred to;
+ * `struct_version` guards the edge arrays. The store lock makes a competing
+ * writer impossible, so this is a defensive assertion — see `withStoreLock`.
  */
 function commitStillCurrent(cwd: string, id: string, base: Task): boolean {
 	const current = tryReadTaskFile(cwd, id);
@@ -1522,11 +1666,8 @@ function commitStillCurrent(cwd: string, id: string, base: Task): boolean {
  * the on-disk struct_version still equals the snapshot we computed the candidate
  * from; otherwise returns false so the caller retries on a fresh read.
  *
- * The check and the rename are two separate syscalls (rename is not an atomic
- * compare-and-swap), so a writer could still slip between them; the CAS only
- * makes the competitor's change *detectable* on the next re-read, which is the
- * optimistic contract — eventually one writer's append is observed by the
- * retrying one instead of being silently overwritten.
+ * The store lock already makes competing writers impossible, so this is a
+ * defensive assertion rather than the real guard (see `withStoreLock`).
  */
 function writeWiredParentCas(
 	cwd: string,
@@ -1591,6 +1732,17 @@ function writeWiredParent(
 
 export type SubmitScope = "metadata" | "description" | "all";
 
+/** Options for {@link commitTask} — the committing agent and the base version. */
+export interface CommitOptions {
+	scope: SubmitScope;
+	/** The committing agent's identity (--cname) — locates draft/<cname>/. */
+	cname: string;
+	change_summary?: string;
+	updated_by?: string;
+	/** REQUIRED — for an update it is task_read's version; for a create it must be 1 (v1). */
+	expected_version: number;
+}
+
 /** What a commit consumed / produced — for the shell's result text. */
 export interface CommitResult {
 	item: Task;
@@ -1621,19 +1773,12 @@ export interface CommitResult {
  * gates must sit outside the module's own subgraph, the expanded graph must
  * stay acyclic, kind must be legal and consistent with gates.
  */
-export function commitTask(
-	cwd: string,
-	id: string,
-	opts: {
-		scope: SubmitScope;
-		/** The committing agent's identity (--cname) — locates draft/<cname>/. */
-		cname: string;
-		change_summary?: string;
-		updated_by?: string;
-		/** REQUIRED — for an update it is task_read's version; for a create it must be 1 (v1). */
-		expected_version: number;
-	},
-): CommitResult {
+export function commitTask(cwd: string, id: string, opts: CommitOptions): CommitResult {
+	return withStoreLock(cwd, () => commitTaskLocked(cwd, id, opts));
+}
+
+/** `commitTask`'s body — always runs as the store's exclusive writer. */
+function commitTaskLocked(cwd: string, id: string, opts: CommitOptions): CommitResult {
 	const clean = sanitizeTaskId(id);
 	if (!clean) {
 		throw new Error(
@@ -1748,13 +1893,10 @@ export function commitTask(
 	const descScope = opts.scope === "description" || opts.scope === "all";
 	const draftPresent = existsSync(draftToml);
 
-	// CAS retry loop: `existing` (the expected_version check above) is the base this update is
-	// computed from, but a concurrent writer can change the task between that read and this write
-	// — a wiring bumps `struct_version` without bumping `version` (the check above only guards
-	// `version`), so it would be silently clobbered. Re-verify (version, struct_version) is still
-	// current right before the write; on a mismatch, re-read the base and recompute. This closes
-	// the direct-commit-vs-wiring lost-update; the rename is still not an atomic CAS, so a writer
-	// can slip between the verify and the rename — the optimistic contract, as in the wiring path.
+	// Retained as a defensive assertion: the store lock already serializes writers, so
+	// this loop should run exactly once. It guards the LOGICAL base the caller's
+	// expected_version was checked against. The lock is the real fix for the
+	// cross-process lost-update (see withStoreLock).
 	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
 		const base = attempt === 0 ? existing : tryReadTaskFile(cwd, clean);
 		if (!base) throw new Error(`tasks: task_commit "${clean}": task disappeared mid-commit`);
@@ -1931,20 +2073,33 @@ const TRANSITION_HINTS: Record<TaskStatus, string> = {
  * Returns the stored item plus one computed (never persisted) result:
  * unlocked — ids that marking this item done (or cancelled) newly makes ready.
  */
+/** Options for {@link setTaskStatus}. */
+export interface SetStatusOptions {
+	change_summary?: string;
+	updated_by?: string;
+	/** Record the responsible agent when setting dispatched (dispatch). */
+	dispatched_to?: TaskDispatch | null;
+	/** Record the worker's execution session when setting active (start). */
+	execution_session?: TaskExecutionSession | null;
+	/** Lifecycle action name for the history entry (dispatch / start / complete / block / cancel / status). */
+	event?: string;
+}
+
 export function setTaskStatus(
 	cwd: string,
 	id: string,
 	status: TaskStatus,
-	opts: {
-		change_summary?: string;
-		updated_by?: string;
-		/** Record the responsible agent when setting dispatched (dispatch). */
-		dispatched_to?: TaskDispatch | null;
-		/** Record the worker's execution session when setting active (start). */
-		execution_session?: TaskExecutionSession | null;
-		/** Lifecycle action name for the history entry (dispatch / start / complete / block / cancel / status). */
-		event?: string;
-	} = {},
+	opts: SetStatusOptions = {},
+): { item: Task; unlocked: string[] } {
+	return withStoreLock(cwd, () => setTaskStatusLocked(cwd, id, status, opts));
+}
+
+/** `setTaskStatus`'s body — always runs as the store's exclusive writer. */
+function setTaskStatusLocked(
+	cwd: string,
+	id: string,
+	status: TaskStatus,
+	opts: SetStatusOptions,
 ): { item: Task; unlocked: string[] } {
 	const clean = sanitizeTaskId(id);
 	const existing = readTask(cwd, clean);
@@ -2077,17 +2232,30 @@ export function setTaskStatus(
  * - the caller is not the dispatched agent (including terminal states);
  * - the report draft is missing or empty.
  */
+/** Options for {@link setCompletionReport}. */
+export interface SubmitReportOptions {
+	/** The description version the worker read — REQUIRED; a version ahead of
+	 *  current is rejected, a stale one is accepted and flagged. */
+	expected_version: number;
+	/** The worker's identity — locates draft/<cname>/. */
+	cname: string;
+}
+
 export function setCompletionReport(
 	cwd: string,
 	id: string,
 	updatedBy: string,
-	opts: {
-		/** The description version the worker read — REQUIRED; a stale version
-		 *  (description advanced past it) rejects the write. */
-		expected_version: number;
-		/** The worker's identity — locates draft/<cname>/. */
-		cname: string;
-	},
+	opts: SubmitReportOptions,
+): Task {
+	return withStoreLock(cwd, () => setCompletionReportLocked(cwd, id, updatedBy, opts));
+}
+
+/** `setCompletionReport`'s body — always runs as the store's exclusive writer. */
+function setCompletionReportLocked(
+	cwd: string,
+	id: string,
+	updatedBy: string,
+	opts: SubmitReportOptions,
 ): Task {
 	const clean = sanitizeTaskId(id);
 	const existing = readTask(cwd, clean);

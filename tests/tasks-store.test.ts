@@ -18,7 +18,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   commitTask,
@@ -983,5 +983,41 @@ describe("listPendingDrafts — a commit's leftovers", () => {
   it("sees only the committing agent's own draft dir", () => {
     draft(`draft/other-agent/a.toml`, "id = 'a'");
     expect(listPendingDrafts(CWD, ME)).toEqual([]);
+  });
+});
+
+// ━━ cross-process write lock ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe("store lock — one writer at a time across processes", () => {
+  /** Plant a lock dir as if another process held it. */
+  function plantLock(owner: string): void {
+    mkdirSync(join(tmp, ".lock"), { recursive: true });
+    writeFileSync(join(tmp, ".lock", "owner"), owner, "utf-8");
+  }
+
+  it("a live foreign lock makes a commit fail retryably instead of racing it", () => {
+    createTask({ id: "locked", description: "v1" });
+    plantLock(`${process.pid}@${hostname()} ${new Date().toISOString()}`);
+    process.env.PI_TASKS_LOCK_TIMEOUT_MS = "40";
+    try {
+      expect(() => commitDescription("locked", "v2", 1)).toThrow(
+        /could not acquire the task store lock/,
+      );
+    } finally {
+      delete process.env.PI_TASKS_LOCK_TIMEOUT_MS;
+    }
+    // Nothing was written — the lock is taken before the read-modify-write.
+    expect(readTask(CWD, "locked")!.description).toBe("v1");
+  });
+
+  it("breaks a lock left behind by a dead process and commits normally", () => {
+    createTask({ id: "recovered", description: "v1" });
+    draft(`draft/${ME}/recovered.description.md`, "v2");
+    plantLock(`${Bun.spawnSync(["true"]).pid}@${hostname()} ${new Date().toISOString()}`);
+    const item = commitDescription("recovered", "v2", 1);
+    expect(item.version).toBe(2);
+    expect(item.description).toBe("v2");
+    // Released after the commit.
+    expect(existsSync(join(tmp, ".lock"))).toBe(false);
   });
 });
