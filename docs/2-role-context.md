@@ -9,7 +9,7 @@
 **核心特性：**
 
 - `--role` flag + `before_agent_start` 角色模板注入（交互式启动路径；spawn 路径由 launch script 传 `--system-prompt` 承担）
-- 声明式角色模板：YAML frontmatter + Markdown，`{{}}` 插值与 `{{include:...}}` 内联协议
+- 声明式角色模板：YAML frontmatter + Markdown，`{{}}` 插值、`{{include:<name>}}` 片段内联与 `{{include:skill:<ref>}}` skill 内联协议
 - **外部角色目录**：模板不限于插件内置 `roles/`，可按优先级从 `--role-dir`、`.pi/roles/`、`~/.pi/agent/roles/` 加载（§2.1）
 - **能力声明**：角色 frontmatter 声明 `skills:` / `extensions:`，spawn 时经 launch script 自动传出（§2.2）
 - `llmContextFromRole()` 从角色模板构建 LLMContext——agent-lifecycle 的 role-aware spawn 使用
@@ -42,7 +42,7 @@ extensions/
 
 ## 2. 角色模板格式
 
-每个 `<role>.md` 是 YAML frontmatter + Markdown，按语义分类存放于 `roles/manager/`（管理节点：coordinator、teammate-provider）与 `roles/specialist/`（领域专家）；`{{include:...}}` 用于内联共享协议片段：
+每个 `<role>.md` 是 YAML frontmatter + Markdown，按语义分类存放于 `roles/manager/`（管理节点：coordinator、teammate-provider）与 `roles/specialist/`（领域专家）；`{{include:...}}` 用于把共享文本直接插入 prompt：
 
 ```markdown
 ---
@@ -70,7 +70,10 @@ You are {{cname}}...
 - 相对 `--role-dir` 以进程 cwd 为基准；spawn 的 agent 经 launch script 继承绝对化的 `--role-dir`，与 spawner 解析同一 catalog（工具白名单一致）
 - 不存在的 `--role-dir` 目录会被跳过并警告（防拼写错误静默回落到内置）；项目/用户级目录缺失是常态，不警告
 - 模板加载为进程级缓存：会话中途新增角色文件不会热更新（重启/重载生效）
-- `{{include:...}}` 片段只从引用文件所在目录解析——外部角色若需片段，请把片段放在同一目录
+- `{{include:...}}` 有两种命名空间：
+  - `{{include:<name>}}` —— 同级片段：只从引用文件所在目录解析为 `<name>.md`（不做跨目录查找；外部角色若需片段，请把片段放在同一目录）
+  - `{{include:skill:<ref>}}` —— 内联一个 skill 的正文：`<ref>` 按 `skills:` 字段相同的规则解析（裸名走 `<cwd>/.pi/skills`、`<cwd>/.agents/skills`、`~/.pi/agent/skills`、`~/.agents/skills`，`/`、`~` 字面量原样使用），内联时去掉 frontmatter，只保留正文。角色模板不再让 agent 去“读” skill 文件，而是把协议正文直接写进 system prompt
+  - 两者都在 `{{placeholder}}` 插值前展开（内联文本可含 `{{cname}}` 等占位符），支持递归且带环守卫；解析失败的引用保留原样 token（不匹配任何占位符）并经 `roleWarn` 告警，spawn 继续
 
 ### 2.2 能力声明（skills / extensions）
 
@@ -112,7 +115,7 @@ extensions: /abs/path/to/ext.ts,./rel-to-cwd/ext.ts
 | `scanAgentDirs(cwd)` | 扫描 `.pi/agents/`、`agents/`、`.claude/agents/` |
 | `roleDirsFromArgv(argv)` | 收集 argv 中全部 `--role-dir`（可重复，两种写法均可） |
 | `resolveRoleDirs(opts?)` | 按优先级合并角色目录（`--role-dir` → `.pi/roles` → `~/.pi/agent/roles` → 内置），绝对化、去重、剔除缺失目录 |
-| `loadRoleTemplates(opts?)` | 递归加载全部角色目录中的模板（内置 + 外部，同名首胜），展开 `{{include:...}}` 共享协议片段并按 frontmatter 解析能力声明 |
+| `loadRoleTemplates(opts?)` | 递归加载全部角色目录中的模板（内置 + 外部，同名首胜），展开 `{{include:<name>}}` 片段与 `{{include:skill:<ref>}}` skill 正文，并按 frontmatter 解析能力声明 |
 | `resolveSkillPath(ref, opts)` | skill 名/字面量 → 绝对路径（§2.2 查找顺序），无命中返回 null |
 | `resolveExtensionPath(ref, cwd)` | 扩展引用 → 绝对路径（相对路径以 cwd 为基准），不存在返回 null |
 | `setRoleWarn(fn)` / `roleWarn(msg)` | 能力/目录解析警告 writer（默认 console.warn；扩展入口安装为审计条目 `capability_skip`） |

@@ -8,6 +8,8 @@
  * - Load role templates (built-in lib/role-context/roles/ tree, plus external
  *   dirs: --role-dir flags, <cwd>/.pi/roles, <home>/.pi/agent/roles — highest
  *   priority first; same-named roles are replaced by the first hit)
+ * - Inline shared fragments ({{include:<name>}}) and skill bodies
+ *   ({{include:skill:<ref>}}) into templates at load time
  * - Build system prompts from templates
  *
  * Used by: agent-lifecycle, teammate-provider, coordinator
@@ -204,29 +206,73 @@ function walkMdFiles(dir: string): string[] {
 }
 
 /**
- * Expand {{include:<name>}} references in a template body.
+ * Expand {{include:...}} references in a template body. Two namespaces:
  *
- * The fragment is resolved as <name>.md in the same directory as the
- * referencing template (no cross-directory lookup — fragments live next to
- * the roles that include them). Inlined before {{placeholder}} interpolation,
- * so fragments may use placeholders themselves; nested includes are expanded
- * recursively, with a cycle guard that drops re-entrant tokens.
+ *   {{include:<name>}}      → sibling fragment <name>.md in the template's own
+ *                             directory (no cross-directory lookup — fragments
+ *                             live next to the roles that include them)
+ *   {{include:skill:<ref>}} → a skill, resolved by resolveSkillPath (bare name
+ *                             or literal path); only its body is inlined
+ *                             (frontmatter dropped)
+ *
+ * Runs before {{placeholder}} interpolation, so inlined text may use
+ * placeholders itself; includes are expanded recursively, with a cycle guard
+ * that drops re-entrant tokens. A missing skill/fragment is left as an inert
+ * token (it matches no placeholder key) and reported via roleWarn.
  */
-function expandIncludes(template: string, dir: string, seen = new Set<string>()): string {
-  return template.replace(/\{\{include:([a-zA-Z0-9_-]+)\}\}/g, (_m, name: string) => {
-    if (seen.has(name)) return "";
+function expandIncludes(
+  template: string,
+  opts: { dir: string; cwd: string; home: string },
+  seen = new Set<string>(),
+): string {
+  return template.replace(/\{\{include:([^}]+)\}\}/g, (_m, rawRef: string) => {
+    const ref = rawRef.trim();
+
+    if (ref.startsWith("skill:")) {
+      const skillRef = ref.slice("skill:".length).trim();
+      const path = skillRef
+        ? resolveSkillPath(skillRef, { cwd: opts.cwd, home: opts.home })
+        : null;
+      if (!path) {
+        roleWarn(`skill include "${skillRef}" not found; left uninlined`);
+        return `{{include:${ref}}}`;
+      }
+      if (seen.has(path)) return "";
+      const body = readSkillBody(path);
+      if (body === null) {
+        roleWarn(`skill include "${skillRef}" could not be read; left uninlined`);
+        return `{{include:${ref}}}`;
+      }
+      const next = new Set(seen);
+      next.add(path);
+      return expandIncludes(body, opts, next);
+    }
+
+    if (seen.has(ref)) return "";
     try {
-      const raw = readFileSync(join(dir, `${name}.md`), "utf-8");
+      const raw = readFileSync(join(opts.dir, `${ref}.md`), "utf-8");
       const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
       const body = match ? match[2].trim() : raw.trim();
       const next = new Set(seen);
-      next.add(name);
-      return expandIncludes(body, dir, next);
+      next.add(ref);
+      return expandIncludes(body, opts, next);
     } catch {
       // Fragment missing — leave the token inert (it matches no placeholder key).
-      return `{{include:${name}}}`;
+      return `{{include:${ref}}}`;
     }
   });
+}
+
+/** Read a resolved skill (a <name>/SKILL.md dir, or a <name>.md file), body only. */
+function readSkillBody(path: string): string | null {
+  try {
+    const file = path.endsWith(".md") ? path : join(path, "SKILL.md");
+    const raw = readFileSync(file, "utf-8");
+    const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+    return (match ? match[2] : raw).trim();
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +381,9 @@ export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
   const cwd = opts?.cwd ?? process.cwd();
   const home = opts?.home ?? homedir();
   const dirs = resolveRoleDirs({ cwd, roleDirs: opts?.roleDirs, home });
-  const key = dirs.join("\0");
+  // cwd/home participate in the key: {{include:skill:...}} resolves against
+  // them, so the same dir set can yield different prompts under a different cwd.
+  const key = [cwd, home, ...dirs].join("\0");
   const hit = _roleTemplatesCache.get(key);
   if (hit) return hit;
 
@@ -361,8 +409,8 @@ export function loadRoleTemplates(opts?: RoleDirOptions): RoleTemplate[] {
         seen.add(role);
 
         // Expand includes from the referencing file's directory BEFORE
-        // interpolation, so fragment placeholders resolve in the same pass.
-        const promptTemplate = expandIncludes(match[2].trim(), dirname(file));
+        // interpolation, so fragment/skill placeholders resolve in the same pass.
+        const promptTemplate = expandIncludes(match[2].trim(), { dir: dirname(file), cwd, home });
 
         const label = fm.label || role;
         const description = fm.description || "";

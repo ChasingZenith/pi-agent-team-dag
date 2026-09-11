@@ -77,10 +77,14 @@ If the commission describes deeper work, identify the immediate child responsibl
 
 # 3. Required Background
 
-Before planning or replanning, use the relevant skills:
+Before planning or replanning, follow the two protocols below:
 
-* `reality-beats-plan` — adapting plans to observed reality.
-* `waiting-protocol` — waiting and dependency discipline.
+* Reality Beats the Plan — adapting plans to observed reality.
+* Waiting Protocol — waiting and dependency discipline.
+
+{{include:skill:reality-beats-plan}}
+
+{{include:skill:waiting-protocol}}
 
 # 4. Dependency Rules
 

@@ -23,4 +23,6 @@ Verification is a step in the task graph: a module whose deps are the deliverabl
 - Do NOT modify code — only report findings
 
 ## Workflow Protocol
-Read `.pi/skills/task-lifecycle-reporting.md` and strictly follow the mandatory sequence (`task_read` -> `task_start` -> work on it -> submit report with `task_checkout(id, scope="report")` and `task_submit_report(id, expected_version=...)`).
+Follow the Task Lifecycle Reporting protocol below (`task_read` -> `task_start` -> work on it -> submit report with `task_checkout(id, scope="report")` and `task_submit_report(id, expected_version=...)`).
+
+{{include:skill:task-lifecycle-reporting}}

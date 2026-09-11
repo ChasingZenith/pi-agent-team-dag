@@ -204,6 +204,67 @@ describe("loadRoleTemplates with external dirs", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Skill inlining ({{include:skill:<ref>}})
+// ---------------------------------------------------------------------------
+
+describe("skill inlining", () => {
+  it("inlines a skill file's body with frontmatter stripped", () => {
+    const cwd = tmpDir("rc-cwd-");
+    const home = tmpDir("rc-home-");
+    mkdirSync(join(cwd, ".pi", "skills"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "skills", "demo-protocol.md"),
+      "---\nname: demo-protocol\ndescription: does things\n---\n\n# Demo Protocol\n\nStep one.\n",
+    );
+    mkdirSync(join(cwd, ".pi", "roles"), { recursive: true });
+    writeRole(
+      join(cwd, ".pi", "roles"),
+      "reader.md",
+      { role: "reader", defaultTools: "read" },
+      "You are {{cname}}.\n{{include:skill:demo-protocol}}",
+    );
+    const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "reader");
+    const prompt = t.buildSystemPrompt("reader");
+    expect(prompt).toContain("# Demo Protocol");
+    expect(prompt).toContain("Step one.");
+    expect(prompt).not.toContain("name: demo-protocol");
+  });
+
+  it("resolves a <name>/SKILL.md directory and interpolates placeholders inside it", () => {
+    const cwd = tmpDir("rc-cwd-");
+    const home = tmpDir("rc-home-");
+    mkdirSync(join(cwd, ".pi", "skills", "greet"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "skills", "greet", "SKILL.md"),
+      "---\nname: greet\n---\nHello {{cname}}.\n",
+    );
+    mkdirSync(join(cwd, ".pi", "roles"), { recursive: true });
+    writeRole(
+      join(cwd, ".pi", "roles"),
+      "reader.md",
+      { role: "reader", defaultTools: "read" },
+      "{{include:skill:greet}}",
+    );
+    const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "reader");
+    expect(t.buildSystemPrompt("reader")).toBe("Hello reader.");
+  });
+
+  it("leaves an unresolved {{include:skill:...}} token inert for a missing skill", () => {
+    const cwd = tmpDir("rc-cwd-");
+    const home = tmpDir("rc-home-");
+    mkdirSync(join(cwd, ".pi", "roles"), { recursive: true });
+    writeRole(
+      join(cwd, ".pi", "roles"),
+      "reader.md",
+      { role: "reader", defaultTools: "read" },
+      "A\n{{include:skill:absent-skill}}\nB",
+    );
+    const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "reader");
+    expect(t.buildSystemPrompt("reader")).toContain("{{include:skill:absent-skill}}");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Capability references (skills: / extensions:)
 // ---------------------------------------------------------------------------
 

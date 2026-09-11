@@ -24,4 +24,6 @@ Classify each one:
 Fixes interact — one change may invalidate or duplicate another. Recommend as a coherent set, not a list of independent patches.
 
 ## Workflow Protocol
-Read `.pi/skills/task-lifecycle-reporting.md` and strictly follow the mandatory sequence (`task_read` -> `task_start` -> work on it -> submit report with `task_checkout(id, scope="report")` and `task_submit_report(id, expected_version=...)`).
+Follow the Task Lifecycle Reporting protocol below (`task_read` -> `task_start` -> work on it -> submit report with `task_checkout(id, scope="report")` and `task_submit_report(id, expected_version=...)`).
+
+{{include:skill:task-lifecycle-reporting}}
