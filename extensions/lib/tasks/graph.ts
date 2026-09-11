@@ -405,12 +405,12 @@ const STATUS_ORDER: TaskStatus[] = ["pending", "dispatched", "active", "done", "
  * already on the current path. A shared dep (diamond) renders once per
  * parent — this is a forest, not a deduped graph.
  *
- * Footer: with opts.showReady a "Ready: <ids>" line; otherwise per-status
- * counts (nonzero only). Info nodes (kind = "info") are rendered as a
- * separate "Shared information" section after the tree — they are pure
- * content, not DAG nodes — and are excluded from the status counts.
+ * Footer: per-status counts (nonzero only) on one line, then a "Ready: <ids>"
+ * line naming the dispatchable frontier. Info nodes (kind = "info") are
+ * rendered as a separate "Shared information" section after the tree — they
+ * are pure content, not DAG nodes — and are excluded from the status counts.
  */
-export function renderGraph(items: Task[], opts?: { showReady?: boolean }): string {
+export function renderGraph(items: Task[]): string {
 	const byId = new Map(items.map((i) => [i.id, i]));
 	const dependedOn = new Set(items.flatMap((i) => i.deps));
 	const roots = items
@@ -458,18 +458,15 @@ export function renderGraph(items: Task[], opts?: { showReady?: boolean }): stri
 	}
 
 	lines.push("");
-	if (opts?.showReady) {
-		const readyIds = readySet(items).ready.map((i) => i.id);
-		lines.push(`Ready: ${readyIds.join(", ") || "(none)"}`);
-	} else {
-		const counts = new Map<TaskStatus, number>();
-		for (const item of items) {
-			if (item.kind === "info") continue; // shared info has no lifecycle, excluded from counts
-			counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
-		}
-		const parts = STATUS_ORDER.filter((s) => (counts.get(s) ?? 0) > 0)
-			.map((s) => `${s}: ${counts.get(s)}`);
-		lines.push(parts.length > 0 ? parts.join(", ") : "no tasks");
+	const counts = new Map<TaskStatus, number>();
+	for (const item of items) {
+		if (item.kind === "info") continue; // shared info has no lifecycle, excluded from counts
+		counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
 	}
+	const parts = STATUS_ORDER.filter((s) => (counts.get(s) ?? 0) > 0)
+		.map((s) => `${s}: ${counts.get(s)}`);
+	lines.push(parts.length > 0 ? parts.join(", ") : "no tasks");
+	const readyIds = readySet(items).ready.map((i) => i.id);
+	lines.push(`Ready: ${readyIds.join(", ") || "(none)"}`);
 	return lines.join("\n") + "\n";
 }

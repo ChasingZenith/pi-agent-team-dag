@@ -219,9 +219,8 @@ change_summary = '重写接口契约'
 | `task_checkout` | `id`, `scope?`(`description`\|`report`，默认 `description`), `version?` | 初始化自己的草稿（改内容的 Step 1，只给正文、不带 frontmatter）。**创建新任务**：`version=0`（id 尚不存在）→ 脚手架化 metadata 草稿（含 `id`）+ 空 description 草稿，填好后 `task_commit(id, expected_version=1)` 建 v1。**已存在任务**：省略 version = 当前版本，把真本 `description.md` 的**正文**（剥离 frontmatter）复制到 `draft/<cname>/<id>.description.md`；`version=<n>`（n<当前）→ 把 `history/<id>.v<n>/` 该历史快照的正文复制进草稿（`scope="description"` 时）。`scope="report"`：在 `draft/<cname>/<id>.report.md` 创建**空白草稿**（不带 frontmatter，不复制旧报告），之后 `write/edit` 正文 → `task_submit_report`（提交时补上 `for_version` = 当前 description 版本，见 docs/5 §3）。已有草稿时拒绝覆盖（需手动清除后重建） |
 | `task_set_status` | `id`, `status`, `dispatched_to?`, `change_summary?` | 状态迁移（见 §2.4）；返回 `unlocked`（见 §2.6）；`dispatched_to` 记录负责人——仅设置 `dispatched` 时有效，done/cancelled 自动清除。**生命周期事件：不 bump 版本**，只追加 history 摘要（`changed_items=["status"]` + `event`） |
 | `task_read` | `id`, `version?`, `fields?` | 一律返回元数据 + 图上下文（身份行、title/kind、deps、`subgraph_deps`、`info_refs`、dispatched_to、execution_session、依赖方、缺失 deps（含门）、就绪性、变更历史）+ 正文字数（`description (vN): N chars` / `completion report (for description vN): N chars`）+ 你自己的未提交草稿数 + **完整性警告**（存储细节不外泄，读与编辑分离：编辑走 `task_checkout` + write/edit + `task_commit`/`task_submit_report`）；长正文按需加载——`fields="description"` / `fields="report"` / `fields="full"`；省略的正文报告字数；`version=<n>` 读历史快照（同样受 `fields` 约束）。description 返回的是**有效描述**：被引用 `info` 节点正文注入 + task 自身正文（见 §2.1.1）；`kind="info"` 节点显示 `ready: none — shared information`，无生命周期 |
-| `task_list` | 无参 | 扁平表列出全部节点：id、title、状态 + 图告警（环 / 悬空依赖 / 游离任务 / 断图）+ 状态计数；module 行尾带 `[module]` 标记、带门节点行尾 `subgraph_deps: <ids>`、带共享引用节点行尾 `info_refs: <ids>`；`info` 节点带 `[info]` 标记并单列 `shared info` 计数（不计入状态计数） |
+| `task_list` | 无参 | 整图渲染为缩进树（roots = 交付物，children = 其 deps；glyph 反映节点状态、`[module]` 标记 module）；树后依次为状态计数行、`Ready: <ids>` 行、`── Shared information (N) ──` 段（`info` 节点不进 DAG 树，每行带 `referenced by N` 引用计数），最后在图有结构问题时附图告警（环 / 悬空依赖 / 游离任务 / 断图）；普通节点行尾带 `subgraph_deps: <ids>` / `info_refs: <ids>` |
 | `task_ready_set` | `for?` | 查询就绪集（见 §2.5，**按 kind 分桶**：unit 执行 / module 待驱动）+ 每个未就绪 pending 项及其缺失 deps + 进度计数；`for=<id>` 缩到该节点及其依赖闭包 |
-| `task_render` | 无参 | 整图渲染为缩进树（glyph 反映节点状态）；`info` 节点单列在 `── Shared information (N) ──` 段（不进 DAG 树），普通节点行尾带 `subgraph_deps: <ids>` / `info_refs: <ids>` |
 
 worker 的报告工具——`task_checkout(id, scope="report")`（生成空白报告草稿）与 `task_submit_report`（提交报告：读草稿 → 校验 `dispatched_to` 身份 + `expected_version`（description 契约未漂移）→ 以 `for_version` 锚定当前版本提交 → 自动回复委托消息）——见 docs/5 §3，不属于本扩展。
 
@@ -239,7 +238,7 @@ worker 的报告工具——`task_checkout(id, scope="report")`（生成空白�
 ## 7. 文件清单
 
 ```
-extensions/task-graph.ts       ← 扩展入口：task_commit / task_checkout / task_set_status / task_read / task_list / task_ready_set / task_render + session_start 激活 + 审计（worker 写工具在 task-comms-ops，见 §5）
+extensions/task-graph.ts       ← 扩展入口：task_commit / task_checkout / task_set_status / task_read / task_list / task_ready_set + session_start 激活 + 审计（worker 写工具在 task-comms-ops，见 §5）
 extensions/lib/tasks/
 ├── store.ts                      ← 存储层（3 文件布局 / 草稿 / frontmatter + sha256 / 快照 / 提交校验；纯文件系统，原子写）
 └── graph.ts                      ← 图业务推导（子图门展开 / 就绪集 / 解锁）

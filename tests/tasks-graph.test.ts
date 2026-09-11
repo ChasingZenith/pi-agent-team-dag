@@ -593,7 +593,8 @@ describe("renderGraph", () => {
       "    ◻ task-t3 T3 (deps:0)\n" +
       "◐ task-other Other (deps:0)\n" +
       "\n" +
-      "pending: 3, active: 1, done: 2\n",
+      "pending: 3, active: 1, done: 2\n" +
+      "Ready: task-t3\n",
     );
   });
 
@@ -616,7 +617,7 @@ describe("renderGraph", () => {
       mkTask({ id: "task-a", status: "dispatched" }),
       mkTask({ id: "task-s", status: "active" }),
     ]);
-    expect(out.endsWith("pending: 1, dispatched: 1, active: 1\n")).toBe(true);
+    expect(out).toContain("pending: 1, dispatched: 1, active: 1\n");
   });
 
   it("tags module nodes with [module]; units stay unmarked", () => {
@@ -627,17 +628,17 @@ describe("renderGraph", () => {
     expect(out).toContain("  ◻ task-unit Unit (deps:0)");
   });
 
-  it("appends the ready ids line with showReady", () => {
+  it("appends the ready ids line after the counts", () => {
     const a = mkTask({ id: "task-a", title: "A", status: "done" });
     const b = mkTask({ id: "task-b", title: "B", deps: ["task-a"] });
-    const out = renderGraph([a, b], { showReady: true });
+    const out = renderGraph([a, b]);
     expect(out.endsWith("Ready: task-b\n")).toBe(true);
   });
 
   it("shows Ready: (none) when nothing is ready", () => {
     const a = mkTask({ id: "task-a", title: "A", status: "done" });
     const b = mkTask({ id: "task-b", title: "B", status: "done" });
-    expect(renderGraph([a, b], { showReady: true }).endsWith("Ready: (none)\n")).toBe(true);
+    expect(renderGraph([a, b]).endsWith("Ready: (none)\n")).toBe(true);
   });
 
   it("guards a corrupted cycle with the ↻ marker instead of recursing", () => {
@@ -676,7 +677,7 @@ describe("renderGraph", () => {
       deps: ["task-case1"],
       subgraph_deps: ["task-coding"],
     });
-    const out = renderGraph([testing, case1, coding], { showReady: true });
+    const out = renderGraph([testing, case1, coding]);
     // the gate itself is ready (no deps) — but everything gated stays out
     expect(out.endsWith("Ready: task-coding\n")).toBe(true);
   });
@@ -726,7 +727,7 @@ describe("shared information nodes (kind = info)", () => {
     expect(out).not.toContain("◻ common-reqs Common"); // never a tree node
     expect(out).toContain("◻ site-a Site A");
     // the info node is excluded from the status counts
-    expect(out.endsWith("pending: 1\n")).toBe(true);
+    expect(out).toContain("pending: 1\n");
   });
 
   it("renderGraph shows info_refs on a task's line", () => {

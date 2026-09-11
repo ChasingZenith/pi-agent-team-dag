@@ -133,7 +133,7 @@ just work-items-web             # 前端（默认 5173）
 
 ### task-graph — 任务图数据系统
 
-图存储 + `task_commit` / `task_checkout` / `task_set_status` / `task_read` / `task_list` / `task_ready_set` / `task_render`。存储是「内容即文件」：真本、按 agent 隔离的草稿、按版本归档的快照，配合乐观并发（`expected_version`）与 sha256 完整性校验。
+图存储 + `task_commit` / `task_checkout` / `task_set_status` / `task_read` / `task_list` / `task_ready_set`。存储是「内容即文件」：真本、按 agent 隔离的草稿、按版本归档的快照，配合乐观并发（`expected_version`）与 sha256 完整性校验。
 
 它是**独立的**——不依赖任何其他组件就能读写一张图，也是整个系统里进度与依赖的权威来源。→ [docs/6-task-graph.md](docs/6-task-graph.md)
 

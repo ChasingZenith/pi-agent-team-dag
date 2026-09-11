@@ -42,7 +42,7 @@
  *
  * Tools: task_commit, task_checkout, task_set_status,
  * task_read, task_list,
- * task_ready_set, task_render.
+ * task_ready_set.
  *
  * Implementation: storage in lib/tasks/store.ts (filesystem under
  * .pi/tasks/, PI_TASKS_DIR override), graph semantics in
@@ -963,73 +963,35 @@ pi.registerTool({
 		name: "task_list",
 		label: "Task List",
 		description:
-			"List all tasks as a flat table: id, title, status, version, last update, ready mark — plus " +
-			"status counts and graph warnings (dependency cycles, dangling deps, orphan items — tasks " +
-			"with no dependents, outside every module subgraph). Use it to discover existing " +
-			"items and to find the id referenced in a task message.",
+			"Overview of the whole task graph as an indented tree: roots are the deliverables, each node's " +
+			"children are its deps, with status marks and the [module] marker — plus a status-count line, the " +
+			"Ready: frontier, a separate 'Shared information' section (kind=\"info\" nodes, with their referenced-by " +
+			"count), and graph warnings (dependency cycles, dangling deps, orphan items — tasks with no dependents, " +
+			"outside every module subgraph). Use it to discover existing items, to read the plan structure, and to " +
+			"find the id referenced in a task message.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate) {
-			const summaries = store.listTasks(cwd);
-			if (summaries.length === 0) {
+			const itemsArr = [...loadAllItems(cwd).values()];
+			if (itemsArr.length === 0) {
 				return {
 					content: [{ type: "text" as const, text: "task_list: no tasks yet" }],
-					details: { count: 0, items: [], warnings: { cycles: [], dangling: [], orphans: [], components: [] }, counts: {} },
+					details: {
+						count: 0,
+						ready: 0,
+						graph: "",
+						warnings: { cycles: [], dangling: [], orphans: [], components: [] },
+					},
 				};
 			}
-			const byId = loadAllItems(cwd);
-			const itemsArr = [...byId.values()];
-			const rs = graph.readySet(itemsArr);
-			const readyIds = new Set(rs.ready.map((i) => i.id));
-			const { text: warningBlock, warnings: { cycles, dangling, orphans, components } } = graphWarnings();
-			const counts: Record<TaskStatus, number> = {
-				pending: 0,
-				dispatched: 0,
-				active: 0,
-				done: 0,
-				blocked: 0,
-				cancelled: 0,
-				worker_offline: 0,
-			};
-			let infoCount = 0;
-			for (const i of itemsArr) {
-				if (i.kind === "info") infoCount++;
-				else counts[i.status]++;
-			}
-
-			const row = (s: (typeof summaries)[number]) => {
-				const glyph = STATUS_GLYPH[s.status] ?? "◻";
-				const parts = [
-					`${glyph} ${s.id} ${s.title}`,
-					`v${s.version}`,
-					s.updated_by,
-					s.updated_at.slice(0, 10),
-				];
-				if (s.depCount > 0) parts.push(`${s.depCount} dep(s)`);
-				if (s.dispatched_to) parts.push(`dispatched: ${s.dispatched_to.name}`);
-				// Staleness: only meaningful for the non-terminal, non-pending states
-				// where the item is waiting on a worker (dispatched / active).
-				if (s.status === "dispatched" || s.status === "active") parts.push(`in ${s.status} ${fmtAge(s.status_since_ms)}`);
-				if (readyIds.has(s.id)) parts.push("ready");
-				if (s.kind === "module") parts.push("[module]");
-				if (s.kind === "info") parts.push("[info]");
-				if (s.subgraph_deps.length > 0) parts.push(`subgraph_deps: ${s.subgraph_deps.join(", ")}`);
-				if (s.info_refs.length > 0) parts.push(`info_refs: ${s.info_refs.join(", ")}`);
-				return `  ${parts.join(" · ")}`;
-			};
-			const header =
-				`task_list: ${summaries.length} item(s) — ${counts.done} done · ${counts.blocked} blocked · ` +
-				`${counts.pending} pending · ${counts.dispatched} dispatched` +
-				(infoCount > 0 ? ` · ${infoCount} shared info` : ``);
-			const body = summaries.map(row).join("\n");
-			const text = header + "\n" + body + (warningBlock ? `\n${warningBlock}` : "");
+			// Full-graph health check (cycles / dangling deps / orphans / disconnected),
+			// appended after the tree only when a structural problem exists.
+			const { text: warningBlock, warnings } = graphWarnings();
+			const tree = graph.renderGraph(itemsArr);
+			const text = warningBlock ? `${tree}\n${warningBlock}` : tree;
+			const ready = graph.readySet(itemsArr).ready.length;
 			return {
 				content: [{ type: "text" as const, text }],
-				details: {
-					count: summaries.length,
-					items: summaries,
-					warnings: { cycles, dangling, orphans, components },
-					counts,
-				},
+				details: { count: itemsArr.length, ready, graph: tree, warnings },
 			};
 		},
 		renderCall(_args, theme) {
@@ -1038,9 +1000,10 @@ pi.registerTool({
 		renderResult(result, options, theme) {
 			const d = result.details as Record<string, unknown>;
 			const n = (d?.count as number) || 0;
-			const text = theme.fg("accent", `${n} item(s)`);
+			const ready = (d?.ready as number) || 0;
+			const text = theme.fg("accent", `🌳 ${n} item(s) · ${ready} ready`);
 			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full table, as the LLM saw it.
+			// Expanded: the full graph tree, as the LLM saw it.
 			return new Text(expandedContent(result, text), 0, 0);
 		},
 	});
@@ -1174,40 +1137,6 @@ pi.registerTool({
 	});
 
 	// =============================================================================
-	// task_render
-	// =============================================================================
-
-	pi.registerTool({
-		name: "task_render",
-		label: "Task Render",
-		description:
-			"Render the whole task graph as an indented tree (dependencies first, dependents nested under " +
-			"their deps) with status marks and ready markers — a quick visual overview of the plan structure and " +
-			"current progress.",
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate) {
-			const byId = loadAllItems(cwd);
-			const itemsArr = [...byId.values()];
-			const text = graph.renderGraph(itemsArr, { showReady: true });
-			return {
-				content: [{ type: "text" as const, text }],
-				details: { graph: text, count: itemsArr.length },
-			};
-		},
-		renderCall(_args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("task_render")), 0, 0);
-		},
-		renderResult(result, options, theme) {
-			const d = result.details as Record<string, unknown>;
-			const n = (d?.count as number) || 0;
-			const text = theme.fg("accent", `🌳 ${n} item(s)`);
-			if (!options.expanded) return new Text(text, 0, 0);
-			// Expanded: the full graph tree, as the LLM saw it.
-			return new Text(expandedContent(result, text), 0, 0);
-		},
-	});
-
-	// =============================================================================
 	// Hooks
 	// =============================================================================
 
@@ -1221,7 +1150,6 @@ pi.registerTool({
 			"task_read",
 			"task_list",
 			"task_ready_set",
-			"task_render",
 		];
 		const currentActive = pi.getActiveTools?.() || [];
 		pi.setActiveTools([...new Set([...currentActive, ...ourTools])]);

@@ -64,7 +64,6 @@ const ALL_TOOLS = [
   "task_read",
   "task_list",
   "task_ready_set",
-  "task_render",
 ];
 
 /** The shell's commsName() falls back to "unknown" without --cname. */
@@ -255,20 +254,18 @@ describe("tasks extension shell", () => {
     await expect(ready.execute("c1", { for: "ghost" }, undefined, undefined)).rejects.toThrow(/not found/);
   });
 
-  it("task_list renders the table with warnings; task_render renders the graph", async () => {
+  it("task_list renders the graph tree with warnings", async () => {
     const { pi, tools } = makeFakePi();
     tasksExtension(pi);
     const commit = tools.find((t) => t.name === "task_commit");
     const list = tools.find((t) => t.name === "task_list");
-    const render = tools.find((t) => t.name === "task_render");
 
     await commitCreate(commit, "task-a", "A");
     const l = await list.execute("c1", {}, undefined, undefined);
     expect(l.details.count).toBe(1);
-    expect(l.content[0].text).toContain("task-a");
-    const g = await render.execute("c2", {}, undefined, undefined);
-    expect(g.details.count).toBe(1);
-    expect(g.content[0].text).toContain("task-a");
+    expect(l.details.ready).toBe(1);
+    expect(l.content[0].text).toContain("◻ task-a A (deps:0)");
+    expect(l.content[0].text).toContain("Ready: task-a");
   });
 
   it("task_read of a missing item returns found:false", async () => {

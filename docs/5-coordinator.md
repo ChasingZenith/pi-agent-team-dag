@@ -153,7 +153,7 @@ Coordinator 使用 task-comms-ops 高级工具 + tasks 工具 + comms 通信工�
 
 ### tasks 工具
 
-只读查询（参数与语义见 docs/6 §5）：`task_read`（读节点全文与就绪性）、`task_list`（按状态过滤列表）、`task_ready_set`（就绪集——派发前必查；**按 kind 分桶**：unit 执行 / module 待驱动；`for=<id>` 限定某节点及其依赖闭包，自身就绪也列出；就绪集内两两无依赖 → 可并行派发）、`task_render`（整图渲染，评审与汇报）。
+只读查询（参数与语义见 docs/6 §5）：`task_read`（读节点全文与就绪性）、`task_list`（整图缩进树 + 状态计数 + `Ready:` 前沿 + 共享信息段 + 图告警，用于发现 id、查看计划结构与评审汇报）、`task_ready_set`（就绪集——派发前必查；**按 kind 分桶**：unit 执行 / module 待驱动；`for=<id>` 限定某节点及其依赖闭包，自身就绪也列出；就绪集内两两无依赖 → 可并行派发）。
 
 图写：coordinator 的小调整与接口仲裁直接改草稿 + `task_commit`（metadata 草稿只写要改的字段 `title?/description?/deps?/kind?` + `change_summary`，提交时校验 deps 存在性与无环；`kind` 可翻转 unit → module——执行暴露需细化时）；子图生成（写草稿 + `task_commit` 建节点、链接父节点 deps）归 planner（由下放的子 coordinator 委托）。
 
