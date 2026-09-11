@@ -396,12 +396,13 @@ export default function (pi: ExtensionAPI) {
 		label: "Task Commit",
 		description:
 			"The single content write: commits YOUR drafts into the true copies and forms a new version. " +
-			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then commit here — task_commit is the only way content becomes a version. " +
+			"For NODE CREATION or SUBGRAPH EMBEDDING / REFINEMENT, prepare a draft via task_checkout, read and edit it as FILES with write/edit, then task_commit — this the only way content becomes visible in the task graph. " +
 			"The metadata draft is a PATCH: only the fields present change — title / deps / subgraph_deps / kind / info_refs; absent fields keep their current value (status / version / history are machine-managed and ignored in drafts). " +
 			"WIRING — a METADATA DRAFT FIELD of the .toml, NOT a parameter of this tool call: put `into_deps = [<parent ids>]` inside the metadata draft file (never in the call arguments) to make THIS node a dep/member of each existing parent (appended to the parent's deps); put `into_subgraph_deps = [<module ids>]` there to make THIS node a gate of each module's subgraph. The parents must already exist and are re-committed structure-only (their content version is untouched — an actively driven parent is never disturbed). " +
 			"`into_info_ref = [<task/module ids>]` (valid only when THIS node is kind = \"info\") appends THIS info node's id to each listed consumer's info_refs — the inverse of writing info_refs by hand, wiring a shared requirement into already-existing tasks; this DOES bump each consumer's content version (it now starts injecting the new shared content). " +
 			"Clear gates from a module by putting subgraph_deps = [] in the draft. " +
 			"info_refs = [<ids>] references shared information nodes (kind = \"info\") whose description is injected into this task at read time — write common requirements ONCE, reference them from many tasks (e.g. the same audit applied to 100 sites). " +
+			"Strict Acyclicity: The store validates every write against the live graph. Any `task_commit` that would form a cycle (evaluating expanded gates alongside standard `deps`) is rejected with a cycle path trace in the error." +
 			"This is the tool for GRAPH STRUCTURE — deps / subgraph_deps (each bump the task's struct_version, NOT its content version), plus content metadata — title / kind / description (which bump the content version). This tool does NOT change status (the lifecycle): to set pending / dispatched / active / done / blocked / cancelled use task_set_status, which is a lifecycle event and does NOT bump the version.",
 		parameters: Type.Object({
 			id: Type.String({
@@ -521,15 +522,28 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "task_checkout",
 		label: "Task Checkout",
-		description:
-			"Check out a working copy of a task's content for editing — Step 1 of any content change. " +
-			"The description draft copies the task's OWN body only: content shared via info_refs is NOT copied into the draft (it stays referenced and is injected automatically when the task is READ) — so editing and committing never duplicates shared requirements into the task. " +
-			"An existing draft is kept untouched (check out a fresh task id, or clear it manually). " +
-			"For METADATA changes to an existing task, use scope=\"metadata\" — it scaffolds a metadata draft carrying " +
-			"the CURRENT title / deps / subgraph_deps / info_refs / kind as COMMENTED templates; uncomment-and-edit " +
-			"only the field(s) you want to change (patch semantics), then task_commit(id, expected_version, scope=\"metadata\"). " +
-			"Creating a NEW task: task_checkout(id=<new-id>, version=0) scaffolds the metadata draft (with `id`) and the empty description draft — the scaffold format is fixed and self-evident (you read the resulting draft before filling it), so fill both with write/edit, then task_commit(id=<new-id>, expected_version=1). " +
-			"Checking out a HISTORICAL version of an existing task's description: pass version=<n> (n < current).",
+		description: `Check out a working copy of a task's content for editing — Step 1 of any content change. For METADATA changes to an existing task, use scope="metadata" — it scaffolds a metadata draft carrying the CURRENT title / deps / subgraph_deps / info_refs / kind as COMMENTED templates; uncomment-and-edit only the field(s) you want to change (patch semantics), then task_commit(id, expected_version, scope="metadata"). Creating a NEW task: task_checkout(id=<new-id>, version=0) scaffolds the metadata draft (with \`id\`) and the empty description draft — the scaffold format is fixed and self-evident (you read the resulting draft before filling it), so fill both with write/edit, then task_commit(id=<new-id>, expected_version=1). Checking out a HISTORICAL version of an existing task's description: pass version=<n> (n < current).An existing draft is kept untouched (check out a fresh task id, or clear it manually). The description draft copies the task's OWN body only: content shared via info_refs is NOT copied into the draft (it stays referenced and is injected automatically when the task is READ) — so editing and committing never duplicates shared requirements into the task.
+# Task Dependence Graph
+
+Task Dependence are modeled as a Directed Acyclic Graph (DAG) over a single task, with two graph relationships (\`deps\` and \`subgraph_deps\`), plus a non-graph \`info\` kind.
+
+## 1. Task Kind
+
+- Unit: A concrete work item scoped to be resolvable by a single agent within a 400k token budget.
+- Module: A higher-level objective that encompasses sub-goals or multiple execution phases. Modules act as containers.
+  - They do not specify atomic inner details up front; their subgraphs are layer-by-layer decomposiion of its execution progresses.
+- Info: A shared information node — NOT a DAG node. Pure content with no deps, no subgraph gate, no status lifecycle; never in the ready set, never dispatched, excluded from orphans. Tasks reference it via \`info_refs\` (content references, not graph edges): the info node's description body is injected into the referencing task's description when task_read. It is used to write common information ONCE and share them across many tasks.
+
+## 2. Dependency Edge Types
+
+### A. \`deps\` — precedence to a single node
+- Units and modules carry \`deps\`. \`B.deps = [A]\` means A must be done (or cancelled) before B itself can start. This is the node-level precedence edge.
+- A module's \`deps\` are also used to represent the sub-goals it decomposes into. A module is finished only when all of its subtask reach a terminal state. So naturally on a module, \`deps\` carries a subtask meaning in addition to the precedence meaning.
+
+### B. \`subgraph_deps\` — precedence to an entire subgraph
+- Modules only. \`B.subgraph_deps = [A]\` means B itself plus all its children, grandchildren, and downstream nodes wait for A to finish before any of them starts. It is the same precedence idea, just applied to the whole subtree instead of one node.
+- Dynamic Expansion: the gate is stored once on the parent module and expanded automatically at read time — any child/grandchild later added under B inherits the gate without being enumerated into each node's own \`deps\`.
+`,
 		parameters: Type.Object({
 			id: Type.String({
 				description: "Id of the task whose body to prepare in your draft.",

@@ -79,7 +79,6 @@ If the commission describes deeper work, identify the immediate child responsibl
 
 Before planning or replanning, use the relevant skills:
 
-* `task-graph-background` — dependency-graph semantics and task structure.
 * `reality-beats-plan` — adapting plans to observed reality.
 * `waiting-protocol` — waiting and dependency discipline.
 
@@ -133,11 +132,12 @@ Use this section for unresolved work or unclear situation and view that is not y
 
 As planning progresses, sufficiently well-defined information may graduately add in and clarify. When they do, remove them from this section.
 
-## 6.4 Commit Semantics
+# 6. Commit Semantics
 
 Every commit:
-* validates that referenced dependencies exist,
-* validates that your planning changes do not create orphan task nodes, and
+* validates that referenced dependencies and information nodes exist,
+* validates that your planning changes keep the graph acyclic and do not create unexpected orphan task nodes.
+
 
 # 7. Replanning
 
@@ -173,14 +173,10 @@ The objective is to establish the actual constraint before changing the plan.
 
 Task state determines whether you may modify the task directly.
 
-| Task state              | Planner action                 |
-| ----------------------- | ------------------------------ |
-| `created` / `pending`   | May modify directly and commit |
-| `dispatched` / `active` | Must not modify directly       |
-
-### For `created` or `pending` tasks
-
-Make the required metadata and/or description changes and commit them normally.
+| Task state | Planner action |
+|--- | --- |
+| `pending` | May modify directly and commit |
+| `dispatched` / `active` | Must not modify directly |
 
 ### For `dispatched` or `active` tasks
 

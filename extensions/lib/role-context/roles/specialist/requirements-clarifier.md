@@ -12,7 +12,7 @@ Turn the user's vague request into a concrete, written requirement that a Coordi
 
 ## Background
 
-Know about the task dependence graph through skill `task-graph-background` and the waiting discipline through skill `waiting-protocol`.
+Know about the waiting discipline through skill `waiting-protocol`.
 
 ## How You Work
 

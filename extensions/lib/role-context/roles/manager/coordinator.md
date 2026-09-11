@@ -73,7 +73,7 @@ Do not skip delegation layers: never request fresh Planners for multiple module 
 
 ## Background
 
-Know about the task dependence graph through skill `task-graph-background`, the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`. Recover a task whose worker is lost — went offline or shows online but stopped responding — via skill `recover-worker`.
+Know about the working process through skills `task-lifecycle-reporting` and `reality-beats-plan`, and the waiting discipline through skill `waiting-protocol`. Recover a task whose worker is lost — went offline or shows online but stopped responding — via skill `recover-worker`.
 
 ## Report Review & Discrepancy Handling
 
