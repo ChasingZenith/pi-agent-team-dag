@@ -394,7 +394,7 @@ describe("tasks extension shell", () => {
     writeDraft(`draft/${ME}/task-e.description.md`, "v2 body");
     await expect(
       commit.execute("c4", { id: "task-e", scope: "description", expected_version: 2 }, undefined, undefined),
-    ).rejects.toThrow(/no changes to commit/);
+    ).rejects.toThrow(/NOTHING was committed and your draft files were NOT deleted/);
 
     // missing expected_version on an existing task rejected (conflict — the parameter is mandatory)
     writeDraft(`draft/${ME}/task-e.description.md`, "v3 body");

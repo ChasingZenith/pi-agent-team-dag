@@ -280,8 +280,10 @@ describe("commitTask — update (patch semantics)", () => {
     draft(`draft/${ME}/n.description.md`, "same");
     expect(() =>
       commitTask(CWD, "n", { scope: "description", cname: ME, updated_by: ME, expected_version: 1 }),
-    ).toThrow(/no changes to commit/);
+    ).toThrow(/NOTHING was committed and your draft files were NOT deleted/);
     expect(readTask(CWD, "n")!.version).toBe(1);
+    // a rejected commit is a no-op on disk: the draft survives, so it can be edited and retried
+    expect(existsSync(taskDraftDescriptionPath(CWD, ME, "n"))).toBe(true);
   });
 
   it("an empty metadata draft is a no-op and rejected", () => {
@@ -289,7 +291,7 @@ describe("commitTask — update (patch semantics)", () => {
     draft(`draft/${ME}/no.toml`, "");
     expect(() =>
       commitTask(CWD, "no", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 }),
-    ).toThrow(/no changes to commit/);
+    ).toThrow(/NOTHING was committed and your draft files were NOT deleted/);
   });
 
   it("draft id must match the committed task id", () => {

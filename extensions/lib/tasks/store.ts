@@ -1771,7 +1771,7 @@ export function commitTask(
 		const changed = [...contentChanged, ...structChanged];
 		if (changed.length === 0 && !hasWiring) {
 			throw new Error(
-				`tasks: task_commit "${clean}": no changes to commit — draft content is identical to v${base.version}; nothing to do`,
+				`tasks: task_commit "${clean}": your draft content is identical to v${base.version}, so NOTHING was committed and your draft files were NOT deleted. Edit the draft(s) to change something and commit again, or delete them if you meant to discard your edits.`,
 			);
 		}
 
