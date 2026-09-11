@@ -80,7 +80,7 @@ You are {{cname}}...
 ---
 role: web-searcher
 defaultTools: read,web_search,web_fetch,comms_send,bash
-skills: playwright-cli,bx,/abs/path-to-skill,~/mine
+skills: bx,/abs/path-to-skill,~/mine
 extensions: /abs/path/to/ext.ts,./rel-to-cwd/ext.ts
 ---
 ```

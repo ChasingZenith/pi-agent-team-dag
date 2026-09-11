@@ -88,9 +88,9 @@ function buildFixture(): { cwd: string; home: string; skill: string; ext: string
   const cwd = mkdtempSync(join(tmpdir(), "role-cwd-"));
   const home = mkdtempSync(join(tmpdir(), "role-home-"));
   fixtureDirs.push(cwd, home);
-  const skill = join(cwd, ".pi", "skills", "playwright");
+  const skill = join(cwd, ".pi", "skills", "demo-skill");
   mkdirSync(skill, { recursive: true });
-  writeFileSync(join(skill, "SKILL.md"), "pw");
+  writeFileSync(join(skill, "SKILL.md"), "demo");
   const ext = join(cwd, "tool-ext.ts");
   writeFileSync(ext, "export default () => {}");
   const roles = join(cwd, ".pi", "roles");
@@ -105,7 +105,7 @@ function buildFixture(): { cwd: string; home: string; skill: string; ext: string
       "label: Worker",
       "description: hands-on",
       "defaultTools: read,bash,comms_send",
-      `skills: playwright`,
+      `skills: demo-skill`,
       `extensions: ./tool-ext.ts`,
       "---",
       "You are {{cname}}.",
@@ -172,7 +172,7 @@ describe("executeAgentSpawnByRole capability overrides", () => {
         );
         const details = res.details as Record<string, unknown>;
         const skills = details.skills as string[];
-        expect(skills).toContain(join(cwd, ".pi", "skills", "playwright"));
+        expect(skills).toContain(join(cwd, ".pi", "skills", "demo-skill"));
         expect(skills).toContain(join(cwd, "extra-skill"));
       } finally {
         process.chdir(prev);
@@ -196,7 +196,7 @@ describe("executeAgentSpawnByRole capability overrides", () => {
         );
         const details = res.details as Record<string, unknown>;
         expect((details.skills as string[] | undefined) ?? []).not.toContain(
-          join(cwd, ".pi", "skills", "playwright"),
+          join(cwd, ".pi", "skills", "demo-skill"),
         );
       } finally {
         process.chdir(prev);

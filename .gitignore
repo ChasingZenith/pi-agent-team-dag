@@ -18,7 +18,4 @@ dist/
 
 
 
-.playwright-cli/
-
-
 .pi/e2e-reports/

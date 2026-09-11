@@ -263,21 +263,21 @@ describe("role template capability fields", () => {
   it("populates skillPaths/extensionPaths and warns for unresolved refs", () => {
     const cwd = tmpDir("rc-cwd-");
     const home = tmpDir("rc-home-");
-    mkdirSync(join(cwd, ".pi", "skills", "playwright"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "skills", "playwright", "SKILL.md"), "pw");
+    mkdirSync(join(cwd, ".pi", "skills", "demo-skill"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "skills", "demo-skill", "SKILL.md"), "demo");
     writeFileSync(join(cwd, "ext.ts"), "export default () => {}");
 
     mkdirSync(join(cwd, ".pi", "roles"), { recursive: true });
     writeRole(join(cwd, ".pi", "roles"), "sweeper.md", {
       role: "sweeper",
-      skills: "playwright, absent-skill",
+      skills: "demo-skill, absent-skill",
       extensions: "./ext.ts,/absent",
     });
 
     const [t] = loadRoleTemplates({ cwd, home }).filter((t) => t.role === "sweeper");
-    expect(t.skillPaths).toEqual([join(cwd, ".pi", "skills", "playwright")]);
+    expect(t.skillPaths).toEqual([join(cwd, ".pi", "skills", "demo-skill")]);
     expect(t.extensionPaths).toEqual([join(cwd, "ext.ts")]);
-    expect(t.skillRefs).toEqual(["playwright", "absent-skill"]);
+    expect(t.skillRefs).toEqual(["demo-skill", "absent-skill"]);
     expect(t.extensionRefs).toEqual(["./ext.ts", "/absent"]);
     expect(t.capabilityWarnings.length).toBe(2);
     expect(t.capabilityWarnings[0]).toContain("absent-skill");
@@ -300,8 +300,8 @@ describe("role template capability fields", () => {
   it("role catalog surfaces each role's declared skills and extensions", () => {
     const cwd = tmpDir("rc-cwd-");
     const home = tmpDir("rc-home-");
-    mkdirSync(join(cwd, ".pi", "skills", "playwright"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "skills", "playwright", "SKILL.md"), "pw");
+    mkdirSync(join(cwd, ".pi", "skills", "demo-skill"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "skills", "demo-skill", "SKILL.md"), "demo");
     writeFileSync(join(cwd, "ext.ts"), "export default () => {}");
     mkdirSync(join(cwd, ".pi", "roles"), { recursive: true });
     writeRole(join(cwd, ".pi", "roles"), "sweeper.md", {
@@ -309,7 +309,7 @@ describe("role template capability fields", () => {
       label: "Sweeper",
       description: "cleans up",
       defaultTools: "read,bash",
-      skills: "playwright",
+      skills: "demo-skill",
       extensions: "./ext.ts",
     });
     // A role with no declared capabilities to prove the lines are optional.
@@ -325,7 +325,7 @@ describe("role template capability fields", () => {
     process.chdir(cwd);
     try {
       const catalog = buildRoleCatalog();
-      expect(catalog).toContain("Declared skills: playwright");
+      expect(catalog).toContain("Declared skills: demo-skill");
       expect(catalog).toContain("Declared extensions: ./ext.ts");
       // The plain role shows only its default tools, no capability lines.
       expect(catalog).toContain("Default tools: read");
