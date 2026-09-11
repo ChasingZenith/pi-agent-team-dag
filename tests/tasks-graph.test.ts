@@ -47,6 +47,7 @@ function mkTask(partial: Partial<Task> & Pick<Task, "id">): Task {
     report_sha256: null,
     dispatched_to: null,
     execution_session: null,
+    planned_by: null,
     completion_report: null,
     report_for_version: 0,
     created_at: "t0",

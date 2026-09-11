@@ -102,7 +102,12 @@
  * dispatched = the delegation message is sent and the owner recorded, but work
  * not started — the owner's task_start moves it to active and records its
  * execution session (session id + JSONL transcript file, kept for
- * retrospection even after done/cancelled). Constraint beyond the table:
+ * retrospection even after done/cancelled). The AUTHOR of the plan is recorded
+ * symmetrically: every task_commit sets planned_by to the committing planner's
+ * identity + session (its name and JSONL transcript), so a node always names
+ * the planner whose context produced its current content — wiring a child into
+ * a module re-commits the module, so the module records the planner that
+ * decomposed it. Constraint beyond the table:
  * marking a node done while deps are unsatisfied is a hard error listing the
  * missing deps.
  *
@@ -177,10 +182,23 @@ export interface TaskDispatch {
 	dispatch_msg_id: string;
 }
 
-/** The worker's execution session — recorded by the WORKER itself at
- *  task_start (only the executing agent knows its own pi session). */
-export interface TaskExecutionSession {
+/** A recorded agent session — session id + JSONL transcript file. Used both
+ *  for the WORKER's execution (recorded at task_start) and the PLANNER's
+ *  authoring session (recorded at task_commit). */
+export interface TaskSession {
 	session_id: string;
+	session_file: string;
+}
+
+/** The planner that authored the current plan — recorded on every task_commit,
+ *  mirroring {@link TaskDispatch}. Wiring a child into a module re-commits the
+ *  module, so a module names the planner that decomposed it. */
+export interface TaskPlanning {
+	/** Planner agent name (comms identity). */
+	name: string;
+	/** The planner's pi session id. */
+	session_id: string;
+	/** The planner's session JSONL transcript file (cwd-relative). */
 	session_file: string;
 }
 
@@ -223,7 +241,9 @@ export interface Task {
 	updated_at: string;
 	updated_by: string;
 	dispatched_to: TaskDispatch | null;
-	execution_session: TaskExecutionSession | null;
+	execution_session: TaskSession | null;
+	/** The planner that authored the current plan (identity + session), recorded at commit. */
+	planned_by: TaskPlanning | null;
 	/** Body of .pi/tasks/<id>.report.md — the worker's completion record. Null when empty. */
 	completion_report: string | null;
 	/** Past change traces, newest first. */
@@ -527,9 +547,9 @@ function tomlArray(ids: string[]): string {
  * Serialize the METADATA record to its file form (no bodies — those live in
  * the .description.md / .report.md true copies). All root scalar keys are
  * emitted before any table header ([...] / [[...]]), which TOML requires.
- * Nullable fields (dispatched_to, execution_session, hashes) are omitted when
- * null. Transient fields (integrity_warnings, report_for_version) are never
- * serialized.
+ * Nullable fields (dispatched_to, execution_session, planned_by, hashes) are
+ * omitted when null. Transient fields (integrity_warnings, report_for_version)
+ * are never serialized.
  */
 export function serializeMetadata(item: Task): string {
 	const L: string[] = [];
@@ -564,6 +584,13 @@ export function serializeMetadata(item: Task): string {
 		S("session_id", item.execution_session.session_id);
 		S("session_file", item.execution_session.session_file);
 	}
+	if (item.planned_by) {
+		L.push("");
+		L.push("[planned_by]");
+		S("name", item.planned_by.name);
+		S("session_id", item.planned_by.session_id);
+		S("session_file", item.planned_by.session_file);
+	}
 	if (item.history.length) {
 		L.push("");
 		for (const h of item.history) {
@@ -579,6 +606,19 @@ export function serializeMetadata(item: Task): string {
 	return L.join("\n") + "\n";
 }
 
+/** Lenient planned_by parse: a well-shaped {name, session_id} object, else null. */
+function parsePlanning(raw: unknown): TaskPlanning | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	const a = raw as Record<string, unknown>;
+	if (typeof a.name !== "string" || !a.name.trim()) return null;
+	if (typeof a.session_id !== "string" || !a.session_id.trim()) return null;
+	return {
+		name: a.name,
+		session_id: a.session_id,
+		session_file: typeof a.session_file === "string" ? a.session_file : "",
+	};
+}
+
 /** Lenient dispatch parse: a well-shaped {name} object, else null. */
 function parseDispatch(raw: unknown): TaskDispatch | null {
 	if (typeof raw !== "object" || raw === null) return null;
@@ -591,8 +631,8 @@ function parseDispatch(raw: unknown): TaskDispatch | null {
 	};
 }
 
-/** Lenient execution-session parse: a well-shaped {session_id} object, else null. */
-function parseExecutionSession(raw: unknown): TaskExecutionSession | null {
+/** Lenient session parse: a well-shaped {session_id} object, else null. */
+function parseSession(raw: unknown): TaskSession | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	const a = raw as Record<string, unknown>;
 	if (typeof a.session_id !== "string" || !a.session_id.trim()) return null;
@@ -656,7 +696,8 @@ export function parseTask(raw: string): Task | null {
 		updated_at: typeof d.updated_at === "string" ? d.updated_at : "",
 		updated_by: typeof d.updated_by === "string" ? d.updated_by : "unknown",
 		dispatched_to: parseDispatch(d.dispatched_to),
-		execution_session: parseExecutionSession(d.execution_session),
+		execution_session: parseSession(d.execution_session),
+		planned_by: parsePlanning(d.planned_by),
 		completion_report: null,
 		history: Array.isArray(d.history)
 			? d.history
@@ -1469,13 +1510,14 @@ function wireIntoParents(
 	intoSubgraphDeps: string[],
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): string[] {
 	const wired: string[] = [];
 	for (const t of intoDeps) {
-		if (wireChildIntoParent(cwd, t, childId, "deps", updatedBy, changeSummary)) wired.push(t);
+		if (wireChildIntoParent(cwd, t, childId, "deps", updatedBy, changeSummary, plannedBy)) wired.push(t);
 	}
 	for (const t of intoSubgraphDeps) {
-		if (wireChildIntoParent(cwd, t, childId, "subgraph_deps", updatedBy, changeSummary)) wired.push(t);
+		if (wireChildIntoParent(cwd, t, childId, "subgraph_deps", updatedBy, changeSummary, plannedBy)) wired.push(t);
 	}
 	return wired;
 }
@@ -1495,10 +1537,11 @@ function wireIntoInfoRefs(
 	intoInfoRefs: string[],
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): string[] {
 	const wired: string[] = [];
 	for (const t of intoInfoRefs) {
-		if (wireChildIntoInfoRef(cwd, t, childId, updatedBy, changeSummary)) wired.push(t);
+		if (wireChildIntoInfoRef(cwd, t, childId, updatedBy, changeSummary, plannedBy)) wired.push(t);
 	}
 	return wired;
 }
@@ -1519,6 +1562,7 @@ function wireChildIntoInfoRef(
 	childId: string,
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): boolean {
 	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
 		const fresh = tryReadTaskFile(cwd, consumerId);
@@ -1530,7 +1574,7 @@ function wireChildIntoInfoRef(
 		}
 		if (fresh.info_refs.includes(childId)) return false; // already wired — idempotent
 		const newRefs = [...fresh.info_refs, childId].sort();
-		if (writeWiredInfoRefCas(cwd, fresh, newRefs, updatedBy, changeSummary)) return true;
+		if (writeWiredInfoRefCas(cwd, fresh, newRefs, updatedBy, changeSummary, plannedBy)) return true;
 		// (version, struct_version) moved — another writer changed this consumer; re-read and retry
 	}
 	throw new Error(
@@ -1551,10 +1595,11 @@ function writeWiredInfoRefCas(
 	newRefs: string[],
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): boolean {
 	const current = tryReadTaskFile(cwd, base.id);
 	if (!current || current.version !== base.version || current.struct_version !== base.struct_version) return false;
-	writeWiredInfoRef(cwd, current, newRefs, updatedBy, changeSummary);
+	writeWiredInfoRef(cwd, current, newRefs, updatedBy, changeSummary, plannedBy);
 	return true;
 }
 
@@ -1573,12 +1618,14 @@ function writeWiredInfoRef(
 	newRefs: string[],
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): void {
 	const now = new Date().toISOString();
 	const newItem: Task = {
 		...fresh,
 		info_refs: newRefs,
 		version: fresh.version + 1,
+		planned_by: plannedBy ?? fresh.planned_by,
 		updated_at: now,
 		updated_by: updatedBy,
 		history: [
@@ -1618,6 +1665,7 @@ function wireChildIntoParent(
 	field: "deps" | "subgraph_deps",
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): boolean {
 	for (let attempt = 0; attempt < WIRING_CAS_RETRIES; attempt++) {
 		const fresh = tryReadTaskFile(cwd, parentId);
@@ -1641,7 +1689,7 @@ function wireChildIntoParent(
 			assertSubgraphDepOutsideSubgraph(graph, parentId, fresh.deps, newArr);
 			assertNoCycle(graph, parentId, fresh.deps, newArr);
 		}
-		if (writeWiredParentCas(cwd, fresh, field, newArr, updatedBy, changeSummary)) return true;
+		if (writeWiredParentCas(cwd, fresh, field, newArr, updatedBy, changeSummary, plannedBy)) return true;
 		// struct_version moved — another writer changed this parent; re-read and retry
 	}
 	throw new Error(
@@ -1676,10 +1724,11 @@ function writeWiredParentCas(
 	newArr: string[],
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): boolean {
 	const current = tryReadTaskFile(cwd, base.id);
 	if (!current || current.struct_version !== base.struct_version) return false;
-	writeWiredParent(cwd, current, field === "deps" ? { deps: newArr } : { subgraph_deps: newArr }, updatedBy, changeSummary);
+	writeWiredParent(cwd, current, field === "deps" ? { deps: newArr } : { subgraph_deps: newArr }, updatedBy, changeSummary, plannedBy);
 	return true;
 }
 
@@ -1696,6 +1745,7 @@ function writeWiredParent(
 	patch: { deps?: string[]; subgraph_deps?: string[] },
 	updatedBy: string,
 	changeSummary: string,
+	plannedBy: TaskPlanning | null,
 ): void {
 	const now = new Date().toISOString();
 	const changedItems: string[] = [];
@@ -1709,6 +1759,7 @@ function writeWiredParent(
 		struct_changed_at: now,
 		updated_at: now,
 		updated_by: updatedBy,
+		planned_by: plannedBy ?? fresh.planned_by,
 		history: [
 			{
 				changed_items: changedItems,
@@ -1739,6 +1790,8 @@ export interface CommitOptions {
 	cname: string;
 	change_summary?: string;
 	updated_by?: string;
+	/** The planner authoring this commit (identity + session); recorded as planned_by. */
+	planned_by?: TaskPlanning | null;
 	/** REQUIRED — for an update it is task_read's version; for a create it must be 1 (v1). */
 	expected_version: number;
 }
@@ -1857,6 +1910,7 @@ function commitTaskLocked(cwd: string, id: string, opts: CommitOptions): CommitR
 			updated_by: opts.updated_by ?? "unknown",
 			dispatched_to: null,
 			execution_session: null,
+			planned_by: opts.planned_by ?? null,
 			completion_report: null,
 			report_for_version: 1,
 			history: [],
@@ -1878,8 +1932,8 @@ function commitTaskLocked(cwd: string, id: string, opts: CommitOptions): CommitR
 		// Wire the freshly-created child into its declared parents. deps/subgraph_deps wiring is
 		// structure-only (no content bump); into_info_ref wiring appends this info node to the
 		// consumers' info_refs and DOES bump each consumer's content version.
-		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, opts.updated_by ?? "unknown", "wired new child");
-		wireIntoInfoRefs(cwd, clean, intoInfoRefs, opts.updated_by ?? "unknown", "wired info into consumer");
+		wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, opts.updated_by ?? "unknown", "wired new child", opts.planned_by ?? null);
+		wireIntoInfoRefs(cwd, clean, intoInfoRefs, opts.updated_by ?? "unknown", "wired info into consumer", opts.planned_by ?? null);
 		return {
 			item: readTask(cwd, clean) ?? item,
 			created: true,
@@ -1982,6 +2036,7 @@ function commitTaskLocked(cwd: string, id: string, opts: CommitOptions): CommitR
 			struct_changed_at: structChanged.length > 0 ? now : base.struct_changed_at,
 			updated_at: now,
 			updated_by: updatedBy,
+			planned_by: opts.planned_by ?? base.planned_by,
 			history: [
 				{
 					changed_items: changed,
@@ -2014,8 +2069,8 @@ function commitTaskLocked(cwd: string, id: string, opts: CommitOptions): CommitR
 			// Wire this node into its declared parents (structure-only on the parents; this node's own
 			// commit, content or not, is already done). Only meaningful when into directives were present.
 			if (hasWiring) {
-				wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
-				wireIntoInfoRefs(cwd, clean, intoInfoRefs, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`);
+				wireIntoParents(cwd, clean, kind, intoDeps, intoSubgraphDeps, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`, opts.planned_by ?? null);
+				wireIntoInfoRefs(cwd, clean, intoInfoRefs, updatedBy, opts.change_summary?.trim() || `updated: ${changed.join(", ")}`, opts.planned_by ?? null);
 			}
 			return {
 				item: readTask(cwd, clean) ?? newItem,
@@ -2080,7 +2135,7 @@ export interface SetStatusOptions {
 	/** Record the responsible agent when setting dispatched (dispatch). */
 	dispatched_to?: TaskDispatch | null;
 	/** Record the worker's execution session when setting active (start). */
-	execution_session?: TaskExecutionSession | null;
+	execution_session?: TaskSession | null;
 	/** Lifecycle action name for the history entry (dispatch / start / complete / block / cancel / status). */
 	event?: string;
 }

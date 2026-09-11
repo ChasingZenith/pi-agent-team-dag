@@ -52,13 +52,13 @@
  * model instead of failing silently.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative } from "node:path";
 import * as store from "./lib/tasks/store";
-import type { Task, TaskDispatch, TaskKind, TaskStatus } from "./lib/tasks/store";
+import type { Task, TaskDispatch, TaskKind, TaskPlanning, TaskStatus } from "./lib/tasks/store";
 import * as graph from "./lib/tasks/graph";
 import {
 	availableIds,
@@ -160,6 +160,19 @@ export default function (pi: ExtensionAPI) {
 		return "unknown";
 	}
 
+	/**
+	 * The planner identity recorded as planned_by on every commit: the committing
+	 * agent's name plus its OWN pi session (id + JSONL transcript), mirroring the
+	 * worker's execution_session. null when the runtime exposes no session.
+	 */
+	function planningIdentity(dir: string, name: string, ctx: unknown): TaskPlanning | null {
+		const sm = (ctx as ExtensionContext | undefined)?.sessionManager;
+		const sessionId = sm?.getSessionId() ?? "";
+		if (!sessionId) return null;
+		const file = sm?.getSessionFile();
+		return { name, session_id: sessionId, session_file: file ? relative(dir, file) : "" };
+	}
+
 	function audit(event: string, extra: Record<string, unknown>): void {
 		try {
 			pi.appendEntry("tasks-log", { event, ts: new Date().toISOString(), ...extra });
@@ -241,6 +254,7 @@ export default function (pi: ExtensionAPI) {
 		lines.push(
 			`dispatched_to: ${item.dispatched_to ? item.dispatched_to.name : "(none)"}`,
 			`execution_session: ${item.execution_session ? item.execution_session.session_id : "(none — the worker records it at task_start)"}`,
+			`planned_by: ${item.planned_by ? `${item.planned_by.name} (${item.planned_by.session_id}${item.planned_by.session_file ? `, ${item.planned_by.session_file}` : ""})` : "(none — recorded at task_commit)"}`,
 		);
 		const descLen = item.description?.length ?? 0;
 		const reportLen = item.completion_report?.length ?? 0;
@@ -435,7 +449,7 @@ export default function (pi: ExtensionAPI) {
 					"re-read, merge your changes into your draft, retry.",
 			}),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const p = params as {
 				id: string;
 				scope?: string;
@@ -451,6 +465,7 @@ export default function (pi: ExtensionAPI) {
 				cname: me,
 				change_summary: p.change_summary,
 				updated_by: me,
+				planned_by: planningIdentity(cwd, me, ctx),
 				expected_version: p.expected_version,
 			});
 			audit("task_commit", {
@@ -500,6 +515,7 @@ export default function (pi: ExtensionAPI) {
 					pending_drafts: pending,
 					updated_at: r.item.updated_at,
 					updated_by: r.item.updated_by,
+					planned_by: r.item.planned_by,
 					change_summary: summary,
 					graph_warnings: warned.warnings,
 				},
@@ -841,7 +857,7 @@ pi.registerTool({
 		name: "task_read",
 		label: "Task Read",
 		description:
-			"Read one task: metadata + graph context (deps, subgraph_deps, dispatched_to, execution_session, " +
+			"Read one task: metadata + graph context (deps, subgraph_deps, dispatched_to, execution_session, planned_by, " +
 			"dependents, readiness, change history) plus optionally " +
 			"the long-form content. Reading and editing are separate: READ here (fields= loads the content); to EDIT, task_checkout prepares your draft, write/edit modifies it, and task_commit / task_submit_report commit it — content is changed ONLY through those tools, never by touching task storage directly. " +
 			"The description loaded via fields=\"description\" is the EFFECTIVE description: content shared via info_refs is injected before the task's own body — your checkout draft will contain only the task's own body, without the injected shared content.",

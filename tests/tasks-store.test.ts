@@ -956,6 +956,49 @@ describe("struct_version + into_* wiring", () => {
   });
 });
 
+describe("planned_by — the planner's identity + session", () => {
+  const SESSION = { name: ME, session_id: "sess-1", session_file: ".pi/agent-sessions/planner.json" };
+
+  it("is recorded by task_commit and round-trips through parseTask/serializeMetadata", () => {
+    draft(`draft/${ME}/p1.toml`, `id = 'p1'\ntitle = 'p1'`);
+    commitTask(CWD, "p1", { scope: "all", cname: ME, updated_by: ME, expected_version: 1, planned_by: SESSION });
+    expect(readTask(CWD, "p1")!.planned_by).toEqual(SESSION);
+    const parsed = parseTask(readFileSync(join(tmp, "p1.toml"), "utf-8"))!;
+    expect(parsed.planned_by).toEqual(SESSION);
+  });
+
+  it("is null when the committing agent has no session", () => {
+    createTask({ id: "p2" });
+    expect(readTask(CWD, "p2")!.planned_by).toBeNull();
+  });
+
+  it("is updated on a later commit (names the planner that authored the current version)", () => {
+    draft(`draft/${ME}/p3.toml`, `id = 'p3'\ntitle = 'p3'`);
+    commitTask(CWD, "p3", { scope: "all", cname: ME, updated_by: ME, expected_version: 1, planned_by: SESSION });
+    const other = { name: "planner-2", session_id: "sess-2", session_file: "f2" };
+    draft(`draft/${ME}/p3.toml`, `title = 'p3 v2'`);
+    commitTask(CWD, "p3", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1, planned_by: other });
+    expect(readTask(CWD, "p3")!.planned_by).toEqual(other);
+  });
+
+  it("propagates to the parent on wiring — the module names the planner that decomposed it", () => {
+    createTask({ id: "mod", kind: "module" });
+    draft(`draft/${ME}/leaf.toml`, `id = 'leaf'\ntitle = 'leaf'\ninto_deps = [ 'mod' ]`);
+    commitTask(CWD, "leaf", { scope: "all", cname: ME, updated_by: ME, expected_version: 1, planned_by: SESSION });
+    // parent re-commit is structure-only, but records the planner that embedded the child
+    expect(readTask(CWD, "mod")!.planned_by).toEqual(SESSION);
+    expect(readTask(CWD, "mod")!.version).toBe(1);
+  });
+
+  it("an unrelated commit without a planned_by leaves the recorded planner intact", () => {
+    draft(`draft/${ME}/p4.toml`, `id = 'p4'\ntitle = 'p4'`);
+    commitTask(CWD, "p4", { scope: "all", cname: ME, updated_by: ME, expected_version: 1, planned_by: SESSION });
+    draft(`draft/${ME}/p4.toml`, `title = 'p4 v2'`);
+    commitTask(CWD, "p4", { scope: "metadata", cname: ME, updated_by: ME, expected_version: 1 });
+    expect(readTask(CWD, "p4")!.planned_by).toEqual(SESSION);
+  });
+});
+
 describe("listPendingDrafts — a commit's leftovers", () => {
   it("is empty when nothing was ever checked out", () => {
     expect(listPendingDrafts(CWD, ME)).toEqual([]);

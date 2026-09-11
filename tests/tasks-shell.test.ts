@@ -115,6 +115,29 @@ describe("tasks extension shell", () => {
     expect(active()).toEqual(expect.arrayContaining(ALL_TOOLS));
   });
 
+  it("task_commit records the committing planner's identity + session as planned_by", async () => {
+    const { pi, tools, handlers } = makeFakePi();
+    tasksExtension(pi);
+    await handlers["session_start"]({}, { cwd: CWD });
+    const commit = tools.find((t) => t.name === "task_commit");
+    const read = tools.find((t) => t.name === "task_read");
+    const ctx = {
+      sessionManager: {
+        getSessionId: () => "sess-plan-1",
+        getSessionFile: () => join(CWD, ".pi/agent-sessions/planner.json"),
+      },
+    };
+    writeDraft(`draft/${ME}/task-plan.toml`, `id = 'task-plan'\ntitle = 'Plan'`);
+    const r = await commit.execute("c", { id: "task-plan", expected_version: 1 }, undefined, undefined, ctx);
+    expect(r.details.planned_by).toEqual({
+      name: ME,
+      session_id: "sess-plan-1",
+      session_file: ".pi/agent-sessions/planner.json",
+    });
+    const rd = await read.execute("r", { id: "task-plan" }, undefined, undefined, ctx);
+    expect(rd.content[0].text).toContain("planned_by: unknown (sess-plan-1, .pi/agent-sessions/planner.json)");
+  });
+
   it("draft → commit → set_status chain: parent unlocks when deps complete, audits land", async () => {
     const { pi, tools, entries } = makeFakePi();
     tasksExtension(pi);

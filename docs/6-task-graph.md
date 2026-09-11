@@ -134,6 +134,7 @@
 | `updated_by` | string | 更新者（agent 身份名，身份不可得时为 `unknown`） |
 | `dispatched_to` | object \| null | 当前负责人 `{name, dispatched_by, dispatch_msg_id}`——在设置 `dispatched`（派发）时由 `task_dispatch` / `task_set_status` 写入，`active` 时保留，done/cancelled 自动清除；`name` 为负责 agent 的 comms 名字（即 comms 投递地址，跨重启稳定）；`dispatched_by` 为派发者、`dispatch_msg_id` 为委托消息 msg_id |
 | `execution_session` | object \| null | **执行 agent 的 pi 会话** `{session_id, session_file}`——worker 在 `task_start` 写入；done/cancelled 时保留（回溯时机）；reopen/undo 保留、由下一次 start 覆盖 |
+| `planned_by` | object \| null | **规划者身份 + 其 pi 会话** `{name, session_id, session_file}`——每次 `task_commit` 由提交者写入（与 `dispatched_to` 对称）：记录产出当前内容版本的 planner 是谁、其会话 JSONL 在哪，供重规划时接回同一 planner 上下文；`into_*` 接线重提交父节点时一并写入，因此模块节点记录的是分解它的 planner |
 
 **正文文件（description.md / report.md）带 YAML 风格 frontmatter，直接打开文件即可看出版本信息：**
 
@@ -167,6 +168,11 @@ report_sha256 = 'e3b0…'
 created_at = '2026-08-10T03:00:00.000Z'
 updated_at = '2026-08-10T04:15:00.000Z'
 updated_by = 'planner-1'
+
+[planned_by]
+name = 'planner-1'
+session_id = '01J0…'
+session_file = '.pi/agent-sessions/planner-1.json'
 
 [[history]]
 changed_items = [ 'deps' ]
@@ -216,10 +222,10 @@ change_summary = '重写接口契约'
 
 | 工具 | 参数 | 作用 |
 |------|------|------|
-| `task_commit` | `id`, `expected_version`(必填), `scope?`(`metadata`\|`description`\|`all`，默认 `all`), `change_summary?` | **唯一的内容写入/版本函数**：读调用者草稿（`draft/<cname>/`）→ 校验（deps 存在/无环/门约束/kind/info_refs）→ 归档被替换版本（`history/<id>.v<N>/` 3 文件）→ 写新真本（metadata + description.md；report.md 不动）→ version+1 → history 摘要 + 审计 + broadcast → **删除已消费草稿**，并在返回文本的 `pending drafts` 里报告本 agent 草稿目录中**剩余未消费的草稿**（按 id + 类型列出；类型决定谁来提交：`metadata`/`description` → `task_commit`，`report` → `task_submit_report`）——草稿不参与图扫描，只有这一行能提醒尚未提交的草稿。创建：草稿 toml 含 id/title（必填）+ 可选 deps/subgraph_deps/kind/info_refs → v1（`expected_version` 必须为 1）。`kind="info"` 建共享信息节点（纯内容、裸 description）；`info_refs` 引用 `info` 节点注入共享要求（见 §2.1.1）。更新：metadata 草稿是 patch（只写要改的字段）；`expected_version` **必填**（= `task_read` 返回的版本），版本已越过 → 冲突拒绝（重读、合并草稿、重试）。无变化拒绝。`version` 只在 title/description/kind/info_refs（内容）变化时 +1；`deps`/`subgraph_deps`（结构）变化 bump `struct_version`，不 bump `version`——`into_deps`/`into_subgraph_deps` 是 metadata 草稿字段（非调用参数），把本节点接入父节点并结构-only 重提交父节点（其内容 version 不受扰动） |
+| `task_commit` | `id`, `expected_version`(必填), `scope?`(`metadata`\|`description`\|`all`，默认 `all`), `change_summary?` | **唯一的内容写入/版本函数**：读调用者草稿（`draft/<cname>/`）→ 校验（deps 存在/无环/门约束/kind/info_refs）→ 归档被替换版本（`history/<id>.v<N>/` 3 文件）→ 写新真本（metadata + description.md；report.md 不动）→ version+1 → history 摘要 + 审计 + broadcast → **删除已消费草稿**，并在返回文本的 `pending drafts` 里报告本 agent 草稿目录中**剩余未消费的草稿**（按 id + 类型列出；类型决定谁来提交：`metadata`/`description` → `task_commit`，`report` → `task_submit_report`）——草稿不参与图扫描，只有这一行能提醒尚未提交的草稿。创建：草稿 toml 含 id/title（必填）+ 可选 deps/subgraph_deps/kind/info_refs → v1（`expected_version` 必须为 1）。`kind="info"` 建共享信息节点（纯内容、裸 description）；`info_refs` 引用 `info` 节点注入共享要求（见 §2.1.1）。更新：metadata 草稿是 patch（只写要改的字段）；`expected_version` **必填**（= `task_read` 返回的版本），版本已越过 → 冲突拒绝（重读、合并草稿、重试）。无变化拒绝。`version` 只在 title/description/kind/info_refs（内容）变化时 +1；`deps`/`subgraph_deps`（结构）变化 bump `struct_version`，不 bump `version`——`into_deps`/`into_subgraph_deps` 是 metadata 草稿字段（非调用参数），把本节点接入父节点并结构-only 重提交父节点（其内容 version 不受扰动）。每次提交把提交者身份 + 其 pi 会话写入节点 `planned_by`（见 §3.2 字段表） |
 | `task_checkout` | `id`, `scope?`(`description`\|`report`，默认 `description`), `version?` | 初始化自己的草稿（改内容的 Step 1，只给正文、不带 frontmatter）。**创建新任务**：`version=0`（id 尚不存在）→ 脚手架化 metadata 草稿（含 `id`）+ 空 description 草稿，填好后 `task_commit(id, expected_version=1)` 建 v1。**已存在任务**：省略 version = 当前版本，把真本 `description.md` 的**正文**（剥离 frontmatter）复制到 `draft/<cname>/<id>.description.md`；`version=<n>`（n<当前）→ 把 `history/<id>.v<n>/` 该历史快照的正文复制进草稿（`scope="description"` 时）。`scope="report"`：在 `draft/<cname>/<id>.report.md` 创建**空白草稿**（不带 frontmatter，不复制旧报告），之后 `write/edit` 正文 → `task_submit_report`（提交时补上 `for_version` = 当前 description 版本，见 docs/5 §3）。已有草稿时拒绝覆盖（需手动清除后重建） |
 | `task_set_status` | `id`, `status`, `dispatched_to?`, `change_summary?` | 状态迁移（见 §2.4）；返回 `unlocked`（见 §2.6）；`dispatched_to` 记录负责人——仅设置 `dispatched` 时有效，done/cancelled 自动清除。**生命周期事件：不 bump 版本**，只追加 history 摘要（`changed_items=["status"]` + `event`） |
-| `task_read` | `id`, `version?`, `fields?` | 一律返回元数据 + 图上下文（身份行、title/kind、deps、`subgraph_deps`、`info_refs`、dispatched_to、execution_session、依赖方、缺失 deps（含门）、就绪性、变更历史）+ 正文字数（`description (vN): N chars` / `completion report (for description vN): N chars`）+ 你自己的未提交草稿数 + **完整性警告**（存储细节不外泄，读与编辑分离：编辑走 `task_checkout` + write/edit + `task_commit`/`task_submit_report`）；长正文按需加载——`fields="description"` / `fields="report"` / `fields="full"`；省略的正文报告字数；`version=<n>` 读历史快照（同样受 `fields` 约束）。description 返回的是**有效描述**：被引用 `info` 节点正文注入 + task 自身正文（见 §2.1.1）；`kind="info"` 节点显示 `ready: none — shared information`，无生命周期 |
+| `task_read` | `id`, `version?`, `fields?` | 一律返回元数据 + 图上下文（身份行、title/kind、deps、`subgraph_deps`、`info_refs`、dispatched_to、execution_session、planned_by、依赖方、缺失 deps（含门）、就绪性、变更历史）+ 正文字数（`description (vN): N chars` / `completion report (for description vN): N chars`）+ 你自己的未提交草稿数 + **完整性警告**（存储细节不外泄，读与编辑分离：编辑走 `task_checkout` + write/edit + `task_commit`/`task_submit_report`）；长正文按需加载——`fields="description"` / `fields="report"` / `fields="full"`；省略的正文报告字数；`version=<n>` 读历史快照（同样受 `fields` 约束）。description 返回的是**有效描述**：被引用 `info` 节点正文注入 + task 自身正文（见 §2.1.1）；`kind="info"` 节点显示 `ready: none — shared information`，无生命周期 |
 | `task_list` | 无参 | 整图渲染为缩进树（roots = 交付物，children = 其 deps；glyph 反映节点状态、`[module]` 标记 module）；树后依次为状态计数行、`Ready: <ids>` 行、`── Shared information (N) ──` 段（`info` 节点不进 DAG 树，每行带 `referenced by N` 引用计数），最后在图有结构问题时附图告警（环 / 悬空依赖 / 游离任务 / 断图）；普通节点行尾带 `subgraph_deps: <ids>` / `info_refs: <ids>` |
 | `task_ready_set` | `for?` | 查询就绪集（见 §2.5，**按 kind 分桶**：unit 执行 / module 待驱动）+ 每个未就绪 pending 项及其缺失 deps + 进度计数；`for=<id>` 缩到该节点及其依赖闭包 |
 
