@@ -11,9 +11,10 @@
  */
 import { describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildLaunchScript } from "../extensions/lib/launch-script";
+import { agentDir, buildLaunchScript, PI_STOP_TUI_EXTENSION } from "../extensions/lib/launch-script";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -44,6 +45,16 @@ function extensionFlags(script: string): string[] {
     if (tokens[i] === "-e") flags.push(unquote(tokens[i + 1]));
   }
   return flags;
+}
+
+/** Every `-e` flag except pi-stop-tui, which lives outside this repo. */
+function repoExtensionFlags(script: string): string[] {
+  return extensionFlags(script).filter((f) => f.startsWith(REPO_ROOT));
+}
+
+/** `-e` flags pointing outside this repo (pi-stop-tui). */
+function externalExtensionFlags(script: string): string[] {
+  return extensionFlags(script).filter((f) => !f.startsWith(REPO_ROOT));
 }
 
 /** Extract the value of the FIRST `--skill <path>` flag from the exec line. */
@@ -77,8 +88,8 @@ describe("buildLaunchScript", () => {
     expect(script.split("\n")[2]).toBe(`cd '${SPAWNER_CWD}'`);
   });
 
-  it("passes every extension as an absolute path inside the repo", () => {
-    const flags = extensionFlags(build());
+  it("passes every repo extension as an absolute path inside the repo", () => {
+    const flags = repoExtensionFlags(build());
     expect(flags.length).toBe(5);
     for (const flag of flags) {
       expect(flag.startsWith("/")).toBe(true);
@@ -90,7 +101,7 @@ describe("buildLaunchScript", () => {
   });
 
   it("keeps the extension load order (dependency order)", () => {
-    const flags = extensionFlags(build());
+    const flags = repoExtensionFlags(build());
     expect(flags.map((f) => f.replace(`${REPO_ROOT}/extensions/`, ""))).toEqual([
       "comms.ts",
       "task-graph.ts",
@@ -144,13 +155,29 @@ describe("buildLaunchScript", () => {
   it("appends role-declared extensions after the plugin chain", () => {
     const script = build({ extensions: ["/abs/ext.ts", "/abs/ext-2.ts"] });
     const flags = extensionFlags(script);
-    expect(flags.length).toBe(7);
+    expect(repoExtensionFlags(script).length).toBe(5);
     expect(flags.slice(-2)).toEqual(["/abs/ext.ts", "/abs/ext-2.ts"]);
     for (const flag of flags) expect(flag.startsWith("/")).toBe(true);
   });
 
   it("keeps exactly the 5 plugin -e flags when no role extensions are declared", () => {
-    expect(extensionFlags(build()).length).toBe(5);
+    expect(repoExtensionFlags(build()).length).toBe(5);
+  });
+
+  it("loads pi-stop-tui from the agent dir only when it is linked there", () => {
+    // Independent repo, symlinked into pi's extension dir. The explicit -e is
+    // the only thing that loads it: auto-discovery is force-disabled in the
+    // agent dir's settings.json, and -e bypasses that.
+    expect(PI_STOP_TUI_EXTENSION.endsWith(`${sep}extensions${sep}pi-stop-tui`)).toBe(true);
+    expect(externalExtensionFlags(build())).toEqual(
+      existsSync(PI_STOP_TUI_EXTENSION) ? [PI_STOP_TUI_EXTENSION] : [],
+    );
+  });
+
+  it("resolves the agent dir from PI_CODING_AGENT_DIR, defaulting to ~/.pi/agent", () => {
+    expect(agentDir({})).toBe(join(homedir(), ".pi", "agent"));
+    expect(agentDir({ PI_CODING_AGENT_DIR: "/custom/agent" })).toBe("/custom/agent");
+    expect(agentDir({ PI_CODING_AGENT_DIR: "~/custom/agent" })).toBe(join(homedir(), "custom", "agent"));
   });
 
   it("passes --role-dir flags verbatim after --subnet", () => {

@@ -193,6 +193,7 @@ exec pi \
   -e extensions/comms.ts \
   -e extensions/role-context.ts \
   -e extensions/auto-exit.ts \
+  -e <agent_dir>/extensions/pi-stop-tui \   # 仅在 agent dir 下存在该链接时出现
   --skill <project>/.pi/skills \
   --cname '<name>' \
   --subnet '<subnet>' \                 # 通信域，继承 spawner 的 --subnet（未指定则省略）
@@ -219,6 +220,7 @@ exec pi \
 - **能力透传**：角色 frontmatter 声明的 `skills:`/`extensions:`（docs/2 §2.2）经 LLMContext 追加为 `--skill`/`-e`——agent 自带角色所需的外部能力；解析不到的引用由 spawner 侧警告跳过（details 的 `capabilityWarnings` 可见）
 - **role-dir 继承**：spawner 的 `--role-dir` 被绝对化后透传给 spawned agent（`roleDirsFromArgv`），其 role-context 工具白名单与 spawner 命中同一外部模板
 - `--model` 仅在提供了 model 时才出现——未指定时启动脚本**省略该标志**（不传空串），让 pi 自行选择默认模型；有 model 时优先使用调用者的 model
+- **pi-stop-tui（可选，仅 spawned agent）**：该扩展位于独立仓库、软链在 pi 的扩展目录（`<agent_dir>/extensions/pi-stop-tui`），启动脚本用显式 `-e` 加载，agent 起步即停 TUI renderer 以省渲染开销。它在 agent dir 的 `settings.json` 里被 `"extensions": ["-extensions/pi-stop-tui/index.ts"]` 强制关闭自动发现，而 CLI `-e` 源无条件启用——因此平时启动的 pi（含 spawner）永远不会加载它。`<agent_dir>` 由 spawner 的 `PI_CODING_AGENT_DIR`（缺省 `~/.pi/agent`）解析，不取 spawned pi 的环境（tmux window 继承的是 tmux server 的环境，不携带该变量）。链接不存在时不发该标志，故本仓库不依赖这个扩展
 - **不传 `--name`**：comms 拥有会话名——boot 认领基础名 `cname`，由 profile 的 `current_task` 驱动（`task_start` 设标题、`task_submit_report` 清空，见 docs/1 §6.6 与 docs/5 §3）；`dispatch` / `complete` / `block` / `cancel` 等管理动作不改变会话名；手动 `--name` / `/name` 永远优先，自动命名不再覆盖
 
 **`writeAndSendScript(windowId, params)`**：

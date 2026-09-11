@@ -7,10 +7,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { sanitizeAgentName } from "./comms/protocol";
 import { tmuxSendScript } from "./tmux";
 
@@ -32,6 +32,36 @@ export const SCRIPT_DIR = join(tmpdir(), "pi-agent-lifecycle");
  * make spawn location-independent.
  */
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/** Project-local config directory name (pi's `CONFIG_DIR_NAME`). */
+const CONFIG_DIR_NAME = ".pi";
+
+/**
+ * pi's user config directory (mirrors pi's `getAgentDir()`).
+ *
+ * @param env - Environment to read, injectable for tests.
+ */
+export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.PI_CODING_AGENT_DIR?.trim();
+  if (!override) return join(homedir(), CONFIG_DIR_NAME, "agent");
+  return override.startsWith("~") ? join(homedir(), override.slice(1)) : override;
+}
+
+/**
+ * pi-stop-tui: an INDEPENDENT extension repository, symlinked into pi's
+ * extension directory (it stays out of this repo's plugin chain on purpose).
+ *
+ * Its path is derived from the SPAWNER's agent dir, not the spawned pi's env:
+ * tmux windows inherit the tmux server's environment, which does not carry
+ * `PI_CODING_AGENT_DIR`.
+ *
+ * Loaded only via the explicit `-e` below. Auto-discovery of the symlink is
+ * force-disabled in the agent dir's `settings.json`
+ * (`"extensions": ["-extensions/pi-stop-tui/index.ts"]`), and CLI `-e` sources
+ * are enabled unconditionally — so a normally started pi (including this
+ * spawner) never loads it.
+ */
+export const PI_STOP_TUI_EXTENSION = join(agentDir(), "extensions", "pi-stop-tui");
 
 // ---------------------------------------------------------------------------
 // Script builder
@@ -133,6 +163,10 @@ export function buildLaunchScript(params: LaunchScriptParams): string {
     "-e", join(PROJECT_ROOT, "extensions", "task-comms-ops.ts"),
     "-e", join(PROJECT_ROOT, "extensions", "role-context.ts"),
     "-e", join(PROJECT_ROOT, "extensions", "auto-exit.ts"),
+    // pi-stop-tui: halts the spawned agent's renderer at session start (render
+    // overhead). Emitted only when it is actually linked into the agent dir, so
+    // the DAG repo does not require it; see PI_STOP_TUI_EXTENSION.
+    ...(existsSync(PI_STOP_TUI_EXTENSION) ? ["-e", PI_STOP_TUI_EXTENSION] : []),
     // Role-declared extensions (--extensions frontmatter) append after the
     // plugin chain. Their tool names must appear in the role's defaultTools
     // or role-context's setActiveTools whitelist removes them.
