@@ -24,6 +24,7 @@ import {
   commitTask,
   effectiveDescription,
   HISTORY_CAP,
+  listPendingDrafts,
   listTasks,
   parseTask,
   readTask,
@@ -952,5 +953,35 @@ describe("struct_version + into_* wiring", () => {
     const parsed = parseTask(raw)!;
     expect(parsed.struct_version).toBe(1);
     expect(typeof parsed.struct_changed_at).toBe("string");
+  });
+});
+
+describe("listPendingDrafts — a commit's leftovers", () => {
+  it("is empty when nothing was ever checked out", () => {
+    expect(listPendingDrafts(CWD, ME)).toEqual([]);
+  });
+
+  it("groups files by id, in metadata / description / report order, ignoring non-drafts", () => {
+    draft(`draft/${ME}/b.report.md`, "report body");
+    draft(`draft/${ME}/a.description.md`, "description body");
+    draft(`draft/${ME}/a.toml`, "id = 'a'");
+    draft(`draft/${ME}/notes.txt`, "not a draft");
+    expect(listPendingDrafts(CWD, ME)).toEqual([
+      { id: "a", kinds: ["metadata", "description"] },
+      { id: "b", kinds: ["report"] },
+    ]);
+  });
+
+  it("reports exactly what a commit did not consume", () => {
+    createTask({ id: "c", description: "v1 body" });
+    draft(`draft/${ME}/c.toml`, "");
+    draft(`draft/${ME}/c.description.md`, "v2 body");
+    commitTask(CWD, "c", { scope: "description", cname: ME, updated_by: ME, expected_version: 1 });
+    expect(listPendingDrafts(CWD, ME)).toEqual([{ id: "c", kinds: ["metadata"] }]);
+  });
+
+  it("sees only the committing agent's own draft dir", () => {
+    draft(`draft/other-agent/a.toml`, "id = 'a'");
+    expect(listPendingDrafts(CWD, ME)).toEqual([]);
   });
 });

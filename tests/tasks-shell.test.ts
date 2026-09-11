@@ -374,6 +374,27 @@ describe("tasks extension shell", () => {
     await expect(read.execute("c2", { id: "task-v", version: 0 }, undefined, undefined)).rejects.toThrow(/positive integers/);
   });
 
+  it("task_commit reports the draft files it left uncommitted (pending drafts)", async () => {
+    const { pi, tools } = makeFakePi();
+    tasksExtension(pi);
+    const commit = tools.find((t) => t.name === "task_commit");
+
+    const first = await commitCreate(commit, "task-a", "A");
+    expect(first.content[0].text).toContain("No pending draft.");
+    expect(first.details.pending_drafts).toEqual([]);
+
+    // drafts the commit does not consume — another id's checkout, and a report
+    // draft of this very task — survive and are reported by id + kind
+    writeDraft(`draft/${ME}/task-b.description.md`, "B body");
+    writeDraft(`draft/${ME}/task-a.report.md`, "A report");
+    const second = await commitPatch(commit, "task-a", "title = 'A v2'", 1, "renamed");
+    expect(second.content[0].text).toContain("pending drafts: 2 (task-a: report; task-b: description)");
+    expect(second.details.pending_drafts).toEqual([
+      { id: "task-a", kinds: ["report"] },
+      { id: "task-b", kinds: ["description"] },
+    ]);
+  });
+
   it("task_commit enforces expected_version: stale rejects, no-op rejects", async () => {
     const { pi, tools } = makeFakePi();
     tasksExtension(pi);

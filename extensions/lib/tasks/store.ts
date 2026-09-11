@@ -312,6 +312,49 @@ export function taskDraftReportPath(cwd: string, cname: string, id: string): str
 	return join(taskDraftDir(cwd, cname), `${id}.report.md`);
 }
 
+/** A draft file's role — also its display order in a pending-draft report. */
+export type DraftKind = "metadata" | "description" | "report";
+
+const DRAFT_SUFFIXES: readonly [suffix: string, kind: DraftKind][] = [
+	[".toml", "metadata"],
+	[".description.md", "description"],
+	[".report.md", "report"],
+];
+
+/** One task id with the draft files of that id still unconsumed. */
+export interface PendingDraft {
+	id: string;
+	kinds: DraftKind[];
+}
+
+/**
+ * Draft files left in draft/<cname>/ — a commit's leftovers. Drafts are invisible
+ * to the graph (only top-level true copies are scanned), so a commit reports them
+ * to keep uncommitted work from being silently forgotten. Unknown file names are
+ * skipped: they are not committable as any draft kind.
+ */
+export function listPendingDrafts(cwd: string, cname: string): PendingDraft[] {
+	let names: string[];
+	try {
+		names = readdirSync(taskDraftDir(cwd, cname));
+	} catch {
+		return []; // no draft dir — nothing was ever checked out
+	}
+	const byId = new Map<string, Set<DraftKind>>();
+	for (const name of names) {
+		const hit = DRAFT_SUFFIXES.find(([suffix]) => name.endsWith(suffix));
+		if (!hit) continue;
+		const id = name.slice(0, -hit[0].length);
+		if (!id) continue;
+		const kinds = byId.get(id) ?? new Set<DraftKind>();
+		kinds.add(hit[1]);
+		byId.set(id, kinds);
+	}
+	return [...byId.entries()]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([id, kinds]) => ({ id, kinds: DRAFT_SUFFIXES.map(([, k]) => k).filter((k) => kinds.has(k)) }));
+}
+
 /** Directory holding archived version snapshots (history/). */
 function taskHistoryDir(cwd: string): string {
 	return join(tasksDir(cwd), "history");

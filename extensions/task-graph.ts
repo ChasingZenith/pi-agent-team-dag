@@ -91,6 +91,20 @@ function fmtAge(ms: number): string {
 	return `${hr} h`;
 }
 
+/**
+ * The post-commit "pending drafts" line: the draft files this commit did NOT
+ * consume. Drafts are invisible to the graph (only true copies are scanned), so
+ * naming them — with their kind, hence which tool submits them — is the only
+ * signal that work is still sitting unsubmitted in draft/<cname>/.
+ */
+function pendingDraftLine(pending: store.PendingDraft[]): string {
+	const total = pending.reduce((n, d) => n + d.kinds.length, 0);
+	if (total === 0) return "  No pending draft.";
+	const shown = pending.slice(0, 5).map((d) => `${d.id}: ${d.kinds.join(", ")}`);
+	if (pending.length > 5) shown.push(`and ${pending.length - 5} more`);
+	return `  pending drafts: ${total} (${shown.join("; ")})`;
+}
+
 /** TOML-inline array of simple ids (for metadata draft templates). */
 function tomlInlineArray(ids: string[]): string {
 	return ids.length ? `[ ${ids.map((x) => `"${x}"`).join(", ")} ]` : "[]";
@@ -454,6 +468,9 @@ export default function (pi: ExtensionAPI) {
 						`task_commit: "${r.item.id}" → v${r.item.version} (changed: ${r.changed_items.join(", ")}, by ${r.item.updated_by})`,
 						`  consumed drafts: ${r.consumed.length > 0 ? r.consumed.join(", ") : "(none)"}`,
 					];
+			// What is left to commit (task_commit / task_submit_report) after this one.
+			const pending = store.listPendingDrafts(cwd, me);
+			lines.push(pendingDraftLine(pending));
 			const idNote = store.sanitizedIdNote(p.id);
 			if (idNote) lines.push(idNote);
 			// Post-commit structure health check: surface orphan nodes, dangling
@@ -479,6 +496,7 @@ export default function (pi: ExtensionAPI) {
 					created: r.created,
 					changed_items: r.changed_items,
 					consumed: r.consumed,
+					pending_drafts: pending,
 					updated_at: r.item.updated_at,
 					updated_by: r.item.updated_by,
 					change_summary: summary,
