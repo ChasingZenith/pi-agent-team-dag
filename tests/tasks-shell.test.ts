@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll } from "bun:test
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTaskStatus } from "../extensions/lib/tasks/store";
 
 // ━━ helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -319,6 +320,24 @@ describe("tasks extension shell", () => {
     const done = await setStatus.execute("c2", { id: "task-x", status: "done", change_summary: "done" }, undefined, undefined);
     expect(done.details.item.dispatched_to).toBeNull();
     expect(done.details.version).toBe(1);
+  });
+
+  it("task_read names the dispatcher (dispatched_by) — the coordinator driving that subgraph", async () => {
+    const { pi, tools } = makeFakePi();
+    tasksExtension(pi);
+    const commit = tools.find((t) => t.name === "task_commit");
+    const read = tools.find((t) => t.name === "task_read");
+    await commitCreate(commit, "task-d", "D");
+
+    // task_dispatch (task-comms-ops) records dispatched_by; the store-level
+    // call stands in for it here so this shell test needs no comms runtime.
+    setTaskStatus(CWD, "task-d", "dispatched", {
+      dispatched_to: { name: "worker-1", dispatched_by: "coord-login", dispatch_msg_id: "m1" },
+      updated_by: "coord-login",
+      event: "dispatch",
+    });
+    const r = await read.execute("c1", { id: "task-d" }, undefined, undefined);
+    expect(r.content[0].text).toContain("dispatched_to: worker-1 (dispatched by coord-login)");
   });
 
   it("set_status rejects dispatched_to on a non-dispatched status", async () => {

@@ -251,8 +251,12 @@ export default function (pi: ExtensionAPI) {
 		if (item.info_refs.length > 0) {
 			lines.push(`info_refs: ${item.info_refs.join(", ")} (shared information injected into this item's description)`);
 		}
+		// dispatched_by names the delegator — for a node handed to a
+		// sub-coordinator (or a unit dispatched by one) it is the only place the
+		// owning coordinator of this subgraph appears. task.toml stores it, but
+		// nothing else reads it out, so render it here.
 		lines.push(
-			`dispatched_to: ${item.dispatched_to ? item.dispatched_to.name : "(none)"}`,
+			`dispatched_to: ${item.dispatched_to ? `${item.dispatched_to.name}${item.dispatched_to.dispatched_by ? ` (dispatched by ${item.dispatched_to.dispatched_by})` : ""}` : "(none)"}`,
 			`execution_session: ${item.execution_session ? item.execution_session.session_id : "(none — the worker records it at task_start)"}`,
 			`planned_by: ${item.planned_by ? `${item.planned_by.name} (${item.planned_by.session_id}${item.planned_by.session_file ? `, ${item.planned_by.session_file}` : ""})` : "(none — recorded at task_commit)"}`,
 		);
@@ -855,7 +859,7 @@ pi.registerTool({
 		name: "task_read",
 		label: "Task Read",
 		description:
-			"Read one task: metadata + graph context (deps, subgraph_deps, dispatched_to, execution_session, planned_by, " +
+			"Read one task: metadata + graph context (deps, subgraph_deps, dispatched_to (with the dispatcher who delegated it), execution_session, planned_by, " +
 			"dependents, readiness, change history) plus optionally " +
 			"the long-form content. Reading and editing are separate: READ here (fields= loads the content); to EDIT, task_checkout prepares your draft, write/edit modifies it, and task_commit / task_submit_report commit it — content is changed ONLY through those tools, never by touching task storage directly. " +
 			"The description loaded via fields=\"description\" is the EFFECTIVE description: content shared via info_refs is injected before the task's own body — your checkout draft will contain only the task's own body, without the injected shared content.",
